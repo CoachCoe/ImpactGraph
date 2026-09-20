@@ -1,0 +1,110 @@
+# Production-shaped stack: API, outbox worker, web, PostgreSQL.
+#
+# Deliberately platform-neutral -- it runs anywhere that speaks Docker Compose, and the
+# same images push to any registry. `scripts/deploy.sh` drives it.
+#
+# Not included, and required before this faces real users: TLS termination, a managed
+# database with backups, secret management, and authentication (the API has none -- see
+# docs/security.md).
+name: impactgraph
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-impactgraph}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    image: ${IMAGE_PREFIX:-impactgraph}/api:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      PERSISTENCE_MODE: postgres
+      DEMO_MODE: ${DEMO_MODE:?set DEMO_MODE to local or sepolia}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-impactgraph}
+      CHAIN_ID: ${CHAIN_ID:?set CHAIN_ID}
+      CHAIN_NAME: ${CHAIN_NAME:-}
+      RPC_URL: ${RPC_URL:?set RPC_URL}
+      IMPACT_REGISTRY_ADDRESS: ${IMPACT_REGISTRY_ADDRESS:?set IMPACT_REGISTRY_ADDRESS}
+      # Must stay empty for a public network: the backend holds no key and must not sign.
+      EVM_SENDER_ADDRESS: ${EVM_SENDER_ADDRESS:-}
+      BLOCK_EXPLORER_URL: ${BLOCK_EXPLORER_URL:-}
+      BLOCKCHAIN_CONFIRMATIONS_REQUIRED: ${BLOCKCHAIN_CONFIRMATIONS_REQUIRED:-2}
+      AI_PROVIDER: ${AI_PROVIDER:-mock}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-1048576}
+    volumes:
+      - evidence-data:/data/evidence
+    ports:
+      - "${API_PORT:-8000}:8000"
+    restart: unless-stopped
+
+  worker:
+    image: ${IMAGE_PREFIX:-impactgraph}/api:${IMAGE_TAG:-latest}
+    command: ["python", "-m", "impactgraph.cli", "worker", "--interval", "2"]
+    # Shares the API image, whose healthcheck probes HTTP. The worker serves none, so it
+    # checks that the loop process is still the container's entrypoint instead.
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q worker /proc/1/cmdline"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      PERSISTENCE_MODE: postgres
+      DEMO_MODE: ${DEMO_MODE}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-impactgraph}
+      CHAIN_ID: ${CHAIN_ID}
+      RPC_URL: ${RPC_URL}
+      IMPACT_REGISTRY_ADDRESS: ${IMPACT_REGISTRY_ADDRESS}
+      EVM_SENDER_ADDRESS: ${EVM_SENDER_ADDRESS:-}
+      BLOCKCHAIN_CONFIRMATIONS_REQUIRED: ${BLOCKCHAIN_CONFIRMATIONS_REQUIRED:-2}
+      AI_PROVIDER: ${AI_PROVIDER:-mock}
+    volumes:
+      - evidence-data:/data/evidence
+    restart: unless-stopped
+
+  web:
+    image: ${IMAGE_PREFIX:-impactgraph}/web:${IMAGE_TAG:-latest}
+    environment:
+      # The /api proxy runs server-side, so this is the in-network address.
+      API_BASE_URL: http://api:8000
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        # NEXT_PUBLIC_* values are inlined at build time, so a rebuild is required to
+        # change them. Changing them in the environment alone has no effect.
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:?set NEXT_PUBLIC_API_BASE_URL}
+        NEXT_PUBLIC_RPC_URL: ${NEXT_PUBLIC_RPC_URL:-}
+        NEXT_PUBLIC_BLOCK_EXPLORER_URL: ${NEXT_PUBLIC_BLOCK_EXPLORER_URL:-}
+        NEXT_PUBLIC_CHAIN_ID: ${CHAIN_ID:-}
+        NEXT_PUBLIC_CHAIN_NAME: ${CHAIN_NAME:-}
+        NEXT_PUBLIC_IMPACT_REGISTRY_ADDRESS: ${IMPACT_REGISTRY_ADDRESS:-}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  evidence-data:

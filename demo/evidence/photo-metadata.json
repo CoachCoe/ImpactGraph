@@ -1,0 +1,8 @@
+{
+  "notice": "Fictional demo metadata",
+  "photos": [
+    {"id": "installation-01", "capturedAt": "2026-08-21T10:30:00Z", "gps": {"latitude": -0.0917, "longitude": 34.768}},
+    {"id": "installation-02", "capturedAt": "2026-08-21T10:34:00Z", "gps": null}
+  ]
+}
+

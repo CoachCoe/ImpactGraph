@@ -1,0 +1,157 @@
+# Self-contained demo: chain, database, API, worker and web in one command.
+#
+# Distinct from docker-compose.prod.yml on purpose. Production points at a real network
+# and must never run its own chain; this runs a disposable one so the whole golden path
+# -- evidence registration, wallet attestation, verification -- completes with nothing
+# else installed.
+#
+# Everything here is throwaway. The chain is an Anvil node with published keys, the
+# accounts hold no value, and the database is reseeded on every start.
+name: impactgraph-demo
+
+x-chain: &chain
+  # First deployment from Anvil's account 0 on a fresh chain is deterministic, so the
+  # API can be configured before the registry exists. deploy-registry asserts the address
+  # it actually got and fails loudly if the chain was not fresh.
+  IMPACT_REGISTRY_ADDRESS: "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+  EVM_SENDER_ADDRESS: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+  VERIFIER_WALLET_ADDRESS: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+  RPC_URL: "http://chain:8545"
+  CHAIN_ID: "31337"
+  CHAIN_NAME: "Anvil local EVM"
+  DEMO_MODE: local
+  PERSISTENCE_MODE: postgres
+  AI_PROVIDER: mock
+  DATABASE_URL: postgresql+psycopg://impactgraph:impactgraph@postgres:5432/impactgraph
+
+services:
+  chain:
+    image: ghcr.io/foundry-rs/foundry:stable
+    # Published keys, deterministic accounts, no value. Exposed because a browser wallet
+    # has to reach it directly from the visitor's machine.
+    entrypoint: ["anvil", "--host", "0.0.0.0", "--chain-id", "31337", "--silent"]
+    ports: ["${CHAIN_PORT:-8545}:8545"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          cast block-number --rpc-url http://127.0.0.1:8545 > /dev/null 2>&1
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: impactgraph
+      POSTGRES_PASSWORD: impactgraph
+      POSTGRES_DB: impactgraph
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U impactgraph -d impactgraph"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # One shot: deploy the registry, create the onchain entities, migrate, seed.
+  # The api, worker and reset services reuse this image rather than declaring their
+  # own build, so `docker compose build api` is a no-op and changes to the backend
+  # reach the stack only through `build init` -- which is what scripts/demo.sh runs.
+  init:
+    image: impactgraph/api:demo
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    depends_on:
+      chain: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+    environment: *chain
+    volumes: ["evidence-data:/data/evidence"]
+    restart: "no"
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        python -m impactgraph.cli deploy-registry \
+          --expect-address 0x5FbDB2315678afecb367f032d93F642f64180aa3
+        alembic upgrade head
+        python -m impactgraph.cli bootstrap-chain
+        python -m impactgraph.cli seed
+
+  api:
+    image: impactgraph/api:demo
+    depends_on:
+      init: {condition: service_completed_successfully}
+    environment:
+      <<: *chain
+      APP_ENV: demo
+      BLOCKCHAIN_CONFIRMATIONS_REQUIRED: "1"
+    volumes: ["evidence-data:/data/evidence"]
+    ports: ["${API_PORT:-8000}:8000"]
+    restart: unless-stopped
+
+  worker:
+    image: impactgraph/api:demo
+    depends_on:
+      api: {condition: service_healthy}
+    environment:
+      <<: *chain
+      BLOCKCHAIN_CONFIRMATIONS_REQUIRED: "1"
+    volumes: ["evidence-data:/data/evidence"]
+    command: ["python", "-m", "impactgraph.cli", "worker", "--interval", "2"]
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q worker /proc/1/cmdline"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # Anyone can drive the demo to VERIFIED, so it needs putting back.
+  reset:
+    image: impactgraph/api:demo
+    depends_on:
+      api: {condition: service_healthy}
+    environment: *chain
+    volumes: ["evidence-data:/data/evidence"]
+    command:
+      - /bin/sh
+      - -c
+      - |
+        while true; do
+          sleep "${RESET_INTERVAL_SECONDS:-1800}"
+          python -m impactgraph.cli demo-reset --local-only || true
+        done
+    # Shares the API image, whose healthcheck probes HTTP. This loop serves none.
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q demo-reset /proc/1/cmdline || pgrep -f demo-reset >/dev/null || true"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  web:
+    image: impactgraph/web:demo
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        # Inlined at build time. The browser reaches the API and the chain directly, so
+        # these are the visitor's addresses, not the in-network ones.
+        NEXT_PUBLIC_API_BASE_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+        NEXT_PUBLIC_RPC_URL: ${PUBLIC_RPC_URL:-http://localhost:8545}
+        NEXT_PUBLIC_CHAIN_ID: "31337"
+        NEXT_PUBLIC_CHAIN_NAME: "Anvil local EVM"
+        NEXT_PUBLIC_IMPACT_REGISTRY_ADDRESS: "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+        # Anvil's published account 3. No value, disposable chain, and the panel that
+        # shows it cannot render on a public network.
+        NEXT_PUBLIC_DEMO_VERIFIER_ADDRESS: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+        NEXT_PUBLIC_DEMO_VERIFIER_KEY: "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
+    depends_on:
+      api: {condition: service_healthy}
+    environment:
+      API_BASE_URL: http://api:8000
+    ports: ["${WEB_PORT:-3000}:3000"]
+    restart: unless-stopped
+
+volumes:
+  evidence-data:

@@ -1,0 +1,37 @@
+.env
+.env.*
+!.env.example
+!.env.production.example
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+.next/
+out/
+cache/
+broadcast/
+var/
+coverage/
+test-results/
+playwright-report/
+*.pyc
+*.tsbuildinfo
+.DS_Store
+
+# Working documents: audit trails, plans, and reports written in the past tense about
+# what was done. They are kept locally but never published -- a stranger cloning this
+# repository needs documents about the software, not about the work.
+docs/audit/
+docs/completion-report.md
+docs/implementation-plan.md
+docs/source-materials.md
+
+# Commissioning context held locally: these reproduce a third party's brief and job
+# listing, including a named contact and compensation terms.
+docs/original-job-posting.md
+docs/master-codex-build-prompt.md
+
+# Local deployment rehearsal output.
+prod-release.log

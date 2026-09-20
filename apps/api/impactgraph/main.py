@@ -1,0 +1,1358 @@
+from __future__ import annotations
+
+import asyncio
+from typing import Annotated, Any
+from uuid import UUID, uuid4
+
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
+
+from .auth import (
+    SESSION_COOKIE,
+    SESSION_LIFETIME,
+    AuthenticatedUser,
+    AuthenticationError,
+    authenticate,
+    challenge_message,
+    issue_wallet_challenge,
+    resolve_session,
+    revoke_session,
+    verify_wallet_signature,
+)
+from .blockchain import EvmBlockchainService, commitment_from_receipt
+from .cli import register_seeded_evidence
+from .config import Settings
+from .database import create_session_factory
+from .demo import INVOICE_BYTES, TAMPERED_INVOICE_BYTES, store
+from .domain import BlockchainStatus, Role, Visibility
+from .evidence import (
+    FileEvidenceStorage,
+    MockEvidenceAnalysisProvider,
+    ReconciliationService,
+    verify_integrity,
+)
+from .financial import (
+    EvidenceReconciliationService,
+    FinancialIngestionService,
+    MockFinancialDataProvider,
+    financial_summary,
+    transaction_response,
+)
+from .hashing import sha256_bytes
+from .persistence import (
+    AttestationRecord,
+    BlockchainOperationRecord,
+    DomainEntityRecord,
+    EvidenceRecord,
+    FinancialTransactionRecord,
+    ProgramRecord,
+    UserRecord,
+)
+from .read_model import (
+    CLAIM_ID as SEEDED_CLAIM_ID,
+)
+from .read_model import TransparencyReadRepository, reset_read_model
+from .services import (
+    ApplicationActor,
+    AuditService,
+    AuthorizationError,
+    DomainConflictError,
+    EvidenceApplicationService,
+    VerificationApplicationService,
+)
+from .verification import restate_claims_for
+from .worker import BlockchainOutboxWorker
+
+settings = Settings.from_env()
+session_factory = (
+    create_session_factory(settings.database_url)
+    if settings.persistence_mode == "postgres"
+    else None
+)
+evidence_storage = FileEvidenceStorage(settings.evidence_storage_path)
+if settings.ai_provider != "mock":
+    # Accepting a provider name and then using the mock anyway is the same silent-fallback
+    # failure the specification forbids for chains. No real provider is implemented yet.
+    raise RuntimeError(
+        f"AI_PROVIDER={settings.ai_provider!r} is configured but no such provider is "
+        "implemented. Set AI_PROVIDER=mock, or implement the provider behind "
+        "EvidenceAnalysisProvider before selecting it."
+    )
+analysis_provider = MockEvidenceAnalysisProvider()
+reconciliation_service = ReconciliationService()
+evidence_reconciliation = EvidenceReconciliationService(reconciliation_service)
+financial_provider = MockFinancialDataProvider()
+app = FastAPI(title="ImpactGraph Transparency API", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.middleware("http")
+async def correlation_id(request: Request, call_next):
+    value = request.headers.get("x-correlation-id", str(uuid4()))
+    request.state.correlation_id = value
+    response = await call_next(request)
+    response.headers["x-correlation-id"] = value
+    return response
+
+
+def _refuse_demo_store_route() -> None:
+    """These routes fabricate chain state and exist only for the in-memory demo.
+
+    They mark an operation CONFIRMED, and one transitions a claim to VERIFIED, without a
+    receipt, an event or a confirmation depth. With a database configured they would also
+    contradict the durable read model, so they refuse rather than produce a second,
+    fictional answer. The durable path is intent -> wallet/outbox -> observed event.
+    """
+    if session_factory is not None:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "DEMO_ROUTE_DISABLED",
+                "message": (
+                    "This route fabricates chain state and is disabled when a database is "
+                    "configured. Use the durable verification flow."
+                ),
+            },
+        )
+
+
+def _assert_wallet_may_verify(wallet: str) -> None:
+    """Refuse an intent the registry would reject anyway.
+
+    Separation of duties is checked between organisations, which does not stop the
+    operator's own wallet being bound to a verifier account. The registry catches that and
+    reverts -- but a revert reaches the browser as a failed gas estimate, and the wallet
+    then falls back to an enormous gas limit, so the visitor sees a gas error rather than
+    the authorisation problem that actually stopped them. Fail here instead, while there
+    is still something useful to say.
+    """
+    try:
+        chain = EvmBlockchainService.from_foundry_artifact(
+            rpc_url=settings.rpc_url,
+            contract_address=settings.registry_address,
+            artifact_path=settings.contract_artifact_path,
+        )
+        holds_verifier = chain.has_verifier_role(wallet)
+        holds_operator = chain.has_operator_role(wallet)
+    except (OSError, ConnectionError, ValueError):
+        # The registry is unreachable. The chain still enforces this, so do not block the
+        # flow on our own inability to pre-check it.
+        return
+    if holds_operator:
+        raise HTTPException(
+            403,
+            detail={
+                "code": "WALLET_IS_OPERATOR",
+                "message": (
+                    f"{wallet} holds OPERATOR_ROLE on this registry, so it cannot also be "
+                    "the independent verifier. Connect the verifier's wallet instead."
+                ),
+            },
+        )
+    if not holds_verifier:
+        raise HTTPException(
+            403,
+            detail={
+                "code": "WALLET_LACKS_VERIFIER_ROLE",
+                "message": (
+                    f"{wallet} does not hold VERIFIER_ROLE on this registry, so the "
+                    "attestation would revert. Connect the wallet that was granted the "
+                    "verifier role."
+                ),
+            },
+        )
+
+
+def _unauthenticated() -> HTTPException:
+    return HTTPException(
+        401,
+        detail={"code": "NOT_AUTHENTICATED", "message": "Sign in to perform this operation"},
+    )
+
+
+def current_user(request: Request) -> AuthenticatedUser | None:
+    """Resolve the signed-in user, or None. Reads are public, so this never raises."""
+    if session_factory is None:
+        return None
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        header = request.headers.get("authorization", "")
+        token = header[7:] if header.lower().startswith("bearer ") else None
+    if not token:
+        return None
+    with session_factory() as session:
+        return resolve_session(session, token)
+
+
+CurrentUser = Annotated[AuthenticatedUser | None, Depends(current_user)]
+
+
+def require_user(user: AuthenticatedUser | None, allowed: set[Role]) -> AuthenticatedUser:
+    """Authorise a mutation against the signed-in identity.
+
+    Replaces the former header-derived role. The identity now comes from a session the
+    caller had to authenticate to obtain, so the separation-of-duties rules built on it
+    are enforceable rather than advisory.
+    """
+    if session_factory is None:
+        raise HTTPException(
+            409, "Authentication requires PERSISTENCE_MODE=postgres"
+        )
+    if user is None:
+        raise _unauthenticated()
+    if user.role not in allowed:
+        raise HTTPException(
+            403,
+            detail={
+                "code": "ROLE_FORBIDDEN",
+                "message": f"{user.role.value} cannot perform this operation",
+            },
+        )
+    return user
+
+
+def actor_for(user: AuthenticatedUser) -> ApplicationActor:
+    """The domain actor for a signed-in user. Organisation identity is not client-supplied."""
+    return ApplicationActor(user.organization_external_id, user.role, user.wallet_address)
+
+
+class InvoiceExtraction(BaseModel):
+    """The review boundary accepts the same constrained shape produced by the AI provider."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    documentType: str
+    invoiceNumber: str
+    vendor: str
+    amountMinor: int = Field(ge=0)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    date: str
+    equipment: str
+    quantity: int = Field(ge=1)
+    projectReference: str
+    confidence: float = Field(ge=0, le=1)
+
+
+class EvidenceReviewRequest(BaseModel):
+    extraction: InvoiceExtraction
+
+
+class WalletSubmissionRequest(BaseModel):
+    transactionHash: str
+    wallet: str
+
+
+class VerificationDecisionRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+async def monitor_wallet_operation(operation_id: UUID) -> None:
+    if session_factory is None or not settings.registry_address:
+        return
+    blockchain = EvmBlockchainService.from_foundry_artifact(
+        rpc_url=settings.rpc_url,
+        contract_address=settings.registry_address,
+        artifact_path=settings.contract_artifact_path,
+        sender=settings.evm_sender_address or None,
+    )
+    worker = BlockchainOutboxWorker(
+        session_factory=session_factory,
+        blockchain=blockchain,
+        confirmations_required=settings.confirmations_required,
+    )
+    for _ in range(120):
+        result = await asyncio.to_thread(worker.observe_operation, operation_id)
+        if result in {BlockchainStatus.CONFIRMED, BlockchainStatus.FAILED}:
+            return
+        await asyncio.sleep(1)
+
+
+async def process_backend_operation(operation_id: UUID) -> None:
+    """Submit a durable outbox intent, then independently confirm its receipt and event."""
+    if session_factory is None or not settings.registry_address:
+        return
+    blockchain = EvmBlockchainService.from_foundry_artifact(
+        rpc_url=settings.rpc_url,
+        contract_address=settings.registry_address,
+        artifact_path=settings.contract_artifact_path,
+        sender=settings.evm_sender_address or None,
+    )
+    worker = BlockchainOutboxWorker(
+        session_factory=session_factory,
+        blockchain=blockchain,
+        confirmations_required=settings.confirmations_required,
+    )
+    for _ in range(120):
+        result = await asyncio.to_thread(worker.run_once)
+        with session_factory() as session:
+            operation = session.get(BlockchainOperationRecord, operation_id)
+            if operation and operation.status in {BlockchainStatus.CONFIRMED, BlockchainStatus.FAILED}:
+                return
+        if result.failed:
+            return
+        await asyncio.sleep(1)
+
+
+def evidence_record_response(record: EvidenceRecord) -> dict[str, Any]:
+    metadata = record.metadata_json or {}
+    return {
+        "id": record.external_id,
+        "projectId": record.project_ref,
+        "type": record.evidence_type,
+        "filename": metadata.get("filename"),
+        "contentHash": record.content_hash,
+        "storageUri": record.storage_uri,
+        "mimeType": record.mime_type,
+        "visibility": record.visibility,
+        "workflowStatus": record.workflow_status,
+        "analysisStatus": record.analysis_status,
+        "integrityStatus": record.integrity_status,
+        "blockchainStatus": record.blockchain_status,
+        "extraction": record.extraction,
+        "reconciliation": record.reconciliation,
+        "providerMetadata": metadata.get("providerMetadata"),
+        "blockchainReference": metadata.get("blockchainReference"),
+    }
+
+
+def require_idempotency(value: str | None) -> str:
+    if not value:
+        raise HTTPException(
+            400,
+            detail={"code": "IDEMPOTENCY_KEY_REQUIRED", "message": "Idempotency-Key is required"},
+        )
+    return value
+
+
+def database_read(method: str, *args):
+    if session_factory is None:
+        return None
+    with session_factory() as session:
+        repository = TransparencyReadRepository(session)
+        try:
+            return getattr(repository, method)(*args)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class WalletProofRequest(BaseModel):
+    nonce: str
+    signature: str
+
+
+def _session_payload(user: AuthenticatedUser) -> dict[str, Any]:
+    return {
+        "email": user.email,
+        "displayName": user.display_name,
+        "role": user.role.value,
+        "organization": {
+            "id": user.organization_external_id,
+            "name": user.organization_name,
+        },
+        "walletAddress": user.wallet_address,
+    }
+
+
+@app.post("/auth/login")
+def login(body: LoginRequest, response: Response):
+    if session_factory is None:
+        raise HTTPException(409, "Authentication requires PERSISTENCE_MODE=postgres")
+    with session_factory.begin() as session:
+        try:
+            token, user = authenticate(session, body.email, body.password)
+        except AuthenticationError as exc:
+            # One message for both unknown account and wrong password: distinguishing
+            # them would let an unauthenticated caller enumerate valid accounts.
+            raise HTTPException(
+                401, detail={"code": "INVALID_CREDENTIALS", "message": str(exc)}
+            ) from exc
+        payload = _session_payload(user)
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        httponly=True,
+        samesite="lax",
+        secure=settings.app_env == "production",
+        max_age=int(SESSION_LIFETIME.total_seconds()),
+        path="/",
+    )
+    return payload
+
+
+@app.post("/auth/logout")
+def logout(request: Request, response: Response):
+    if session_factory is not None:
+        with session_factory.begin() as session:
+            revoke_session(session, request.cookies.get(SESSION_COOKIE))
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"signedOut": True}
+
+
+@app.get("/auth/me")
+def me(user: CurrentUser = None):
+    if user is None:
+        raise _unauthenticated()
+    return _session_payload(user)
+
+
+@app.post("/auth/wallet/challenge")
+def wallet_challenge(user: CurrentUser = None):
+    """Issue a nonce the wallet must sign to prove control of its address."""
+    verifier = require_user(user, {Role.VERIFIER, Role.OPERATOR, Role.ADMIN})
+    with session_factory.begin() as session:  # type: ignore[union-attr]
+        nonce = issue_wallet_challenge(session, verifier.user_id)
+    return {"nonce": nonce, "message": challenge_message(nonce)}
+
+
+@app.post("/auth/wallet/verify")
+def wallet_verify(body: WalletProofRequest, user: CurrentUser = None):
+    """Bind a wallet address to the account by recovering it from a signature.
+
+    The address is recovered from the signature rather than supplied by the caller, so an
+    account cannot claim a wallet it does not control -- which the previous
+    X-Wallet-Address header allowed.
+    """
+    account = require_user(user, {Role.VERIFIER, Role.OPERATOR, Role.ADMIN})
+    with session_factory.begin() as session:  # type: ignore[union-attr]
+        try:
+            address = verify_wallet_signature(
+                session, account.user_id, body.nonce, body.signature
+            )
+        except AuthenticationError as exc:
+            raise HTTPException(
+                400, detail={"code": "WALLET_PROOF_INVALID", "message": str(exc)}
+            ) from exc
+        record = session.get(UserRecord, account.user_id)
+        if record is None:
+            raise _unauthenticated()
+        record.wallet_address = address
+    return {"walletAddress": address}
+
+
+@app.get("/financial/programs/{program_id}")
+def program_financials(program_id: str):
+    """Where the money came from, what it was committed to, and where it went.
+
+    Public: "where did the money go" is one of the questions the product exists to answer,
+    and an answer only its operator can see is not transparency.
+    """
+    if session_factory is None:
+        raise HTTPException(409, "Financial records require PERSISTENCE_MODE=postgres")
+    with session_factory() as session:
+        return financial_summary(session, program_id)
+
+
+@app.get("/financial/transactions/{transaction_id}")
+def financial_transaction(transaction_id: str):
+    if session_factory is None:
+        raise HTTPException(409, "Financial records require PERSISTENCE_MODE=postgres")
+    with session_factory() as session:
+        record = session.scalar(
+            select(FinancialTransactionRecord).where(
+                FinancialTransactionRecord.external_id == transaction_id
+            )
+        )
+        if record is None:
+            raise HTTPException(404, "Financial transaction not found")
+        return transaction_response(record)
+
+
+@app.post("/financial/programs/{program_id}/import")
+def import_financial_statement(
+    request: Request,
+    program_id: str,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    """Pull the provider statement and record any payments not already observed.
+
+    Importing the same statement twice is a no-op: payments are unique per provider
+    source reference. Spend beyond the allocation is rejected rather than recorded.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    _require_program_management(program_id, user)
+    require_idempotency(idempotency_key)
+    if session_factory is None:
+        raise HTTPException(409, "Financial records require PERSISTENCE_MODE=postgres")
+    service = FinancialIngestionService(financial_provider)
+    with session_factory.begin() as session:
+        result = service.import_statement(session, program_ref=program_id)
+        AuditService().record(
+            session,
+            actor=actor,
+            action="FINANCIAL_STATEMENT_IMPORTED",
+            entity_type="PROGRAM",
+            entity_id=program_id,
+            correlation_id=request.state.correlation_id,
+            metadata=result.as_dict(),
+        )
+        return {"provider": financial_provider.name, **result.as_dict()}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "mode": settings.demo_mode, "chainId": settings.chain_id}
+
+
+@app.get("/programs")
+def programs():
+    return database_read("programs") if session_factory else store.programs()
+
+
+@app.get("/programs/{program_id}")
+def program(program_id: str):
+    if session_factory:
+        return database_read("program", program_id)
+    if program_id != store.program()["id"]:
+        raise HTTPException(404, "Program not found")
+    return store.program()
+
+
+@app.get("/projects/{project_id}")
+def project(project_id: str):
+    if session_factory:
+        return database_read("project", project_id)
+    if project_id != store.project()["id"]:
+        raise HTTPException(404, "Project not found")
+    return store.project()
+
+
+@app.get("/claims/{claim_id}")
+def claim(claim_id: str):
+    if session_factory:
+        return database_read("claim", claim_id)
+    if claim_id != store.claim["id"]:
+        raise HTTPException(404, "Claim not found")
+    return store.claim
+
+
+@app.get("/claims/{claim_id}/provenance")
+def provenance(claim_id: str):
+    if session_factory:
+        return database_read("provenance", claim_id)
+    if claim_id != store.claim["id"]:
+        raise HTTPException(404, "Claim not found")
+    return store.graph()
+
+
+@app.get("/claims/{claim_id}/verification")
+def verification(claim_id: str):
+    if session_factory:
+        return database_read("verification", claim_id)
+    if claim_id != store.claim["id"]:
+        raise HTTPException(404, "Claim not found")
+    return store.verification()
+
+
+@app.get("/evidence/{evidence_id}")
+def evidence(evidence_id: str, user: CurrentUser = None):
+    _require_evidence_visibility(evidence_id, user)
+    if session_factory:
+        return database_read("evidence", evidence_id)
+    if evidence_id not in store.evidence:
+        raise HTTPException(404, "Evidence not found")
+    return store.evidence[evidence_id]
+
+
+@app.post("/evidence", status_code=201)
+async def upload_evidence(
+    request: Request,
+    evidence_id: Annotated[str, Form()],
+    project_id: Annotated[str, Form()],
+    evidence_type: Annotated[str, Form()],
+    file: Annotated[UploadFile, File()],
+    visibility: Annotated[str, Form()] = "RESTRICTED",
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    normalized_visibility = visibility.upper()
+    try:
+        Visibility(normalized_visibility)
+    except ValueError as exc:
+        raise HTTPException(422, "visibility must be PUBLIC, RESTRICTED, or INTERNAL") from exc
+    _require_project_management(project_id, user)
+    key = require_idempotency(idempotency_key)
+    if file.content_type not in settings.allowed_upload_types:
+        raise HTTPException(415, f"Upload type {file.content_type!r} is not allowed")
+    content = await file.read(settings.max_upload_bytes + 1)
+    if len(content) > settings.max_upload_bytes:
+        raise HTTPException(413, "Evidence upload exceeds configured size limit")
+    if not content:
+        raise HTTPException(422, "Evidence upload cannot be empty")
+    content_hash = sha256_bytes(content)
+    if session_factory is not None:
+        try:
+            storage_uri = evidence_storage.store(evidence_id, content)
+            service = EvidenceApplicationService(settings.chain_id)
+            with session_factory.begin() as session:
+                response = service.create_uploaded(
+                    session,
+                    actor=actor,
+                    evidence_id=evidence_id,
+                    project_ref=project_id,
+                    evidence_type=evidence_type.upper(),
+                    storage_uri=storage_uri,
+                    content_hash=content_hash,
+                    mime_type=file.content_type or "application/octet-stream",
+                    visibility=normalized_visibility,
+                    correlation_id=request.state.correlation_id,
+                    idempotency_key=key,
+                )
+                record = session.scalar(
+                    select(EvidenceRecord).where(EvidenceRecord.external_id == evidence_id)
+                )
+                if record:
+                    # Resolve the program from the project the evidence was filed under.
+                    # Defaulting to the showcase program would file evidence against it
+                    # whatever project the operator named.
+                    project = session.scalar(
+                        select(DomainEntityRecord).where(
+                            DomainEntityRecord.external_id == project_id,
+                            DomainEntityRecord.entity_type == "PROJECT",
+                        )
+                    )
+                    program = (
+                        session.get(ProgramRecord, project.program_id)
+                        if project and project.program_id
+                        else None
+                    )
+                    record.metadata_json = {
+                        "filename": file.filename,
+                        "programId": program.slug if program else None,
+                    }
+            return response
+        except (ValueError, FileExistsError, DomainConflictError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+    fingerprint = f"UPLOAD:{evidence_id}:{project_id}:{content_hash}"
+    existing = store.idempotency.get(key)
+    if existing:
+        try:
+            return store.remember_idempotent(key, fingerprint, {})
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+    if evidence_id in store.evidence:
+        raise HTTPException(409, "Evidence identifier already exists")
+    try:
+        storage_uri = evidence_storage.store(evidence_id, content)
+    except (ValueError, FileExistsError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    item = {
+        "id": evidence_id,
+        "projectId": project_id,
+        "type": evidence_type.upper(),
+        "filename": file.filename,
+        "contentHash": content_hash,
+        "storageUri": storage_uri,
+        "mimeType": file.content_type,
+        "visibility": normalized_visibility,
+        "workflowStatus": "UPLOADED",
+        "analysisStatus": "NOT_STARTED",
+        "integrityStatus": "NOT_CHECKED",
+        "blockchainStatus": "NOT_STARTED",
+        "uploadedBy": "Global Water Initiative",
+        "source": "Operator upload",
+        "tampered": False,
+        "correlationId": request.state.correlation_id,
+    }
+    store.evidence[evidence_id] = item
+    return store.remember_idempotent(key, fingerprint, item)
+
+
+@app.post("/evidence/{evidence_id}/analyze")
+def analyze_evidence(evidence_id: str, user: CurrentUser = None):
+    require_user(user, {Role.OPERATOR, Role.ADMIN})
+    _require_evidence_management(evidence_id, user)
+    if session_factory is not None:
+        with session_factory.begin() as session:
+            item = session.scalar(select(EvidenceRecord).where(EvidenceRecord.external_id == evidence_id))
+            if not item:
+                raise HTTPException(404, "Evidence not found")
+            if item.workflow_status not in {"UPLOADED", "ANALYSIS_FAILED"}:
+                raise HTTPException(409, f"Cannot analyze evidence in {item.workflow_status} state")
+            item.workflow_status, item.analysis_status = "ANALYZING", "PROCESSING"
+            try:
+                result = analysis_provider.analyze(evidence_storage.retrieve(item.storage_uri), item.mime_type)
+            except Exception as exc:
+                item.workflow_status, item.analysis_status = "ANALYSIS_FAILED", "FAILED"
+                raise HTTPException(422, f"Evidence analysis failed: {exc}") from exc
+            item.extraction = result.extraction
+            # Resolved from the ledger. These expectations used to be six literals written
+            # here that happened to equal what the mock extractor returned, so every
+            # document reconciled against the same values and the comparison proved nothing.
+            item.reconciliation = evidence_reconciliation.reconcile(
+                session,
+                project_ref=item.project_ref,
+                extraction=result.extraction,
+            )
+            metadata = dict(item.metadata_json or {})
+            metadata["providerMetadata"] = {"provider": result.provider, "model": result.model, "processedAt": result.processed_at, "rawResponse": result.raw_response}
+            item.metadata_json = metadata
+            item.workflow_status, item.analysis_status = "ANALYZED", "COMPLETED"
+            session.flush()
+            return evidence_record_response(item)
+    item = store.evidence.get(evidence_id)
+    if not item:
+        raise HTTPException(404, "Evidence not found")
+    if item["workflowStatus"] not in {"UPLOADED", "ANALYSIS_FAILED"}:
+        raise HTTPException(409, f"Cannot analyze evidence in {item['workflowStatus']} state")
+    item["workflowStatus"] = "ANALYZING"
+    item["analysisStatus"] = "PROCESSING"
+    try:
+        content = evidence_storage.retrieve(item["storageUri"])
+        result = analysis_provider.analyze(content, item["mimeType"])
+    except Exception as exc:
+        item["workflowStatus"] = "ANALYSIS_FAILED"
+        item["analysisStatus"] = "FAILED"
+        raise HTTPException(422, f"Evidence analysis failed: {exc}") from exc
+    item["extraction"] = result.extraction
+    item["providerMetadata"] = {
+        "provider": result.provider,
+        "model": result.model,
+        "processedAt": result.processed_at,
+        "rawResponse": result.raw_response,
+    }
+    item["workflowStatus"] = "ANALYZED"
+    item["analysisStatus"] = "COMPLETED"
+    # The in-memory demo store has no ledger to resolve against.
+    item["reconciliation"] = {
+        "status": "UNMATCHED",
+        "checks": [
+            {
+                "check": "TRANSACTION_REFERENCE",
+                "result": "FAIL",
+                "message": "Reconciliation needs the financial ledger; run with a database",
+            }
+        ],
+        "reasons": ["Reconciliation requires PERSISTENCE_MODE=postgres"],
+    }
+    return item
+
+
+@app.post("/evidence/{evidence_id}/review")
+def review_evidence(
+    evidence_id: str,
+    body: EvidenceReviewRequest,
+    user: CurrentUser = None,
+):
+    require_user(user, {Role.OPERATOR, Role.ADMIN})
+    _require_evidence_management(evidence_id, user)
+    if session_factory is not None:
+        with session_factory.begin() as session:
+            item = session.scalar(select(EvidenceRecord).where(EvidenceRecord.external_id == evidence_id))
+            if not item:
+                raise HTTPException(404, "Evidence not found")
+            if item.workflow_status != "ANALYZED":
+                raise HTTPException(409, "Only ANALYZED evidence can be reviewed")
+            reviewed_extraction = body.extraction.model_dump(mode="json")
+            item.extraction = reviewed_extraction
+            item.reconciliation = evidence_reconciliation.reconcile(
+                session,
+                project_ref=item.project_ref,
+                extraction=reviewed_extraction,
+            )
+            item.workflow_status = "REVIEWED"
+            metadata = dict(item.metadata_json or {})
+            metadata["reviewedBy"] = "Global Water Initiative"
+            item.metadata_json = metadata
+            session.flush()
+            return evidence_record_response(item)
+    item = store.evidence.get(evidence_id)
+    if not item:
+        raise HTTPException(404, "Evidence not found")
+    if item["workflowStatus"] != "ANALYZED":
+        raise HTTPException(409, "Only ANALYZED evidence can be reviewed")
+    item["extraction"] = body.extraction.model_dump(mode="json")
+    item["workflowStatus"] = "REVIEWED"
+    item["reviewedBy"] = "Global Water Initiative"
+    return item
+
+
+@app.post("/evidence/{evidence_id}/register", status_code=202)
+def register_evidence(
+    request: Request,
+    evidence_id: str,
+    background_tasks: BackgroundTasks,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    _require_evidence_management(evidence_id, user)
+    key = require_idempotency(idempotency_key)
+    if session_factory is not None:
+        service = EvidenceApplicationService(settings.chain_id)
+        try:
+            with session_factory.begin() as session:
+                response = service.request_registration(
+                    session,
+                    actor=actor,
+                    evidence_id=evidence_id,
+                    correlation_id=request.state.correlation_id,
+                    idempotency_key=key,
+                )
+            background_tasks.add_task(process_backend_operation, UUID(response["operationId"]))
+            return response
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except (ValueError, DomainConflictError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+    item = store.evidence.get(evidence_id)
+    if not item:
+        raise HTTPException(404, "Evidence not found")
+    fingerprint = f"REGISTER:{evidence_id}:{item['contentHash']}"
+    existing = store.idempotency.get(key)
+    if existing:
+        try:
+            return store.remember_idempotent(key, fingerprint, {})
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+    if item["workflowStatus"] != "REVIEWED":
+        raise HTTPException(409, "Evidence must be REVIEWED before registration")
+    operation_id = f"bcop-register-{evidence_id}"
+    operation = {
+        "operationId": operation_id,
+        "entityId": evidence_id,
+        "status": "SUBMITTED",
+        "transactionHash": "0x" + sha256_bytes(evidence_id.encode()).split(":", 1)[1],
+        "expectedEvent": "EvidenceRegistered",
+        "correlationId": request.state.correlation_id,
+    }
+    store.evidence_operations[operation_id] = operation
+    item["workflowStatus"] = "REGISTRATION_PENDING"
+    item["blockchainStatus"] = "SUBMITTED"
+    return store.remember_idempotent(key, fingerprint, operation)
+
+
+@app.post("/blockchain/operations/{operation_id}/confirm-evidence-demo")
+def confirm_evidence_registration(operation_id: str, user: CurrentUser = None):
+    require_user(user, {Role.ADMIN, Role.OPERATOR})
+    _refuse_demo_store_route()
+    operation = store.evidence_operations.get(operation_id)
+    if not operation:
+        raise HTTPException(404, "Blockchain operation not found")
+    item = store.evidence[operation["entityId"]]
+    operation.update(
+        {"status": "CONFIRMED", "confirmations": 1, "eventValidated": True, "blockNumber": 1001}
+    )
+    item["workflowStatus"] = "REGISTERED_ONCHAIN"
+    item["blockchainStatus"] = "CONFIRMED"
+    item["blockchainReference"] = {
+        "transactionHash": operation["transactionHash"],
+        "blockNumber": operation["blockNumber"],
+    }
+    return {"evidence": item, "blockchainOperation": operation}
+
+
+def _evidence_operating_org(evidence_id: str) -> str | None:
+    """The organisation that operates the program this evidence belongs to."""
+    if not session_factory:
+        return None
+    with session_factory() as session:
+        record = session.scalar(
+            select(EvidenceRecord).where(EvidenceRecord.external_id == evidence_id)
+        )
+        if record is None:
+            return None
+        project = session.scalar(
+            select(DomainEntityRecord).where(
+                DomainEntityRecord.external_id == record.project_ref,
+                DomainEntityRecord.entity_type == "PROJECT",
+            )
+        )
+        program = session.get(ProgramRecord, project.program_id) if project else None
+        return program.operator_org_ref if program else None
+
+
+def _evidence_visibility(evidence_id: str) -> str | None:
+    if session_factory:
+        with session_factory() as session:
+            record = session.scalar(
+                select(EvidenceRecord).where(EvidenceRecord.external_id == evidence_id)
+            )
+            return record.visibility if record else None
+    item = store.evidence.get(evidence_id)
+    return item["visibility"] if item else None
+
+
+def _operating_org_for_program(program_id: str) -> str:
+    """The organisation that operates a program, or 404 if there is no such program."""
+    if not session_factory:
+        raise HTTPException(503, "Database is not configured")
+    with session_factory() as session:
+        program = session.scalar(
+            select(ProgramRecord).where(ProgramRecord.slug == program_id)
+        )
+        if program is None:
+            raise HTTPException(404, "Program not found")
+        return program.operator_org_ref
+
+
+def _require_program_management(program_id: str, user: AuthenticatedUser | None) -> None:
+    """An operator may write to the ledger of its own program only.
+
+    Import was role-checked but never ownership-checked, while every other operator
+    mutation resolves ownership. The rows it writes are the counterparts evidence
+    reconciles against, and reconciliation is a required verification requirement -- so an
+    outside operator could push another organisation's claim across a policy gate, or
+    block it by exhausting the allocation.
+    """
+    if user is None:
+        raise _unauthenticated()
+    if user.role == Role.ADMIN:
+        return
+    if _operating_org_for_program(program_id) != user.organization_external_id:
+        raise HTTPException(403, "Program belongs to another operating organisation")
+
+
+def _require_project_management(
+    project_id: str, user: AuthenticatedUser | None
+) -> None:
+    """An operator may mutate only projects belonging to its organisation."""
+    if user is None:
+        raise _unauthenticated()
+    if user.role == Role.ADMIN:
+        return
+    if session_factory:
+        with session_factory() as session:
+            project = session.scalar(
+                select(DomainEntityRecord).where(
+                    DomainEntityRecord.external_id == project_id,
+                    DomainEntityRecord.entity_type == "PROJECT",
+                )
+            )
+            program = session.get(ProgramRecord, project.program_id) if project else None
+            if program is None:
+                raise HTTPException(404, "Project not found")
+            if program.operator_org_ref != user.organization_external_id:
+                raise HTTPException(403, "Project belongs to another operating organisation")
+            return
+    if project_id != "project-water-12" or user.organization_external_id != "org-global-water":
+        raise HTTPException(403, "Project belongs to another operating organisation")
+
+
+def _require_evidence_management(
+    evidence_id: str, user: AuthenticatedUser | None
+) -> None:
+    if session_factory:
+        with session_factory() as session:
+            evidence = session.scalar(
+                select(EvidenceRecord).where(EvidenceRecord.external_id == evidence_id)
+            )
+            if evidence is None:
+                raise HTTPException(404, "Evidence not found")
+            project_ref = evidence.project_ref
+    else:
+        evidence = store.evidence.get(evidence_id)
+        if evidence is None:
+            raise HTTPException(404, "Evidence not found")
+        project_ref = evidence["projectId"]
+    _require_project_management(project_ref, user)
+
+
+def _require_evidence_visibility(
+    evidence_id: str, user: AuthenticatedUser | None
+) -> None:
+    """Enforce the visibility recorded on the evidence.
+
+    The field was previously stored and reported but never checked, so RESTRICTED and
+    INTERNAL evidence was readable by anyone. PUBLIC stays open without an account,
+    because public verifiability is the point of the product.
+    """
+    visibility = _evidence_visibility(evidence_id)
+    if visibility is None:
+        raise HTTPException(404, "Evidence not found")
+    if visibility == "PUBLIC":
+        return
+    if user is None:
+        raise _unauthenticated()
+    if visibility == "INTERNAL":
+        # Role alone is not enough: any operator would otherwise read every other
+        # organisation's internal evidence, including the extracted document fields.
+        # docs/security.md has always said this is limited to the operating organisation.
+        operating_org = _evidence_operating_org(evidence_id)
+        permitted = user.role == Role.ADMIN or (
+            operating_org is not None
+            and operating_org == user.organization_external_id
+        )
+        if not permitted:
+            raise HTTPException(
+                403,
+                detail={
+                    "code": "EVIDENCE_FORBIDDEN",
+                    "message": "This evidence is internal to the operating organisation",
+                },
+            )
+
+
+def _seeded_evidence_uri(evidence_id: str) -> str:
+    """Resolve the seeded showcase object, creating it if storage is empty.
+
+    Integrity verification reads the stored bytes back, so the object has to exist. It is
+    created only when absent: after the tampering demo the altered bytes must survive until
+    an explicit demo reset, or the mismatch would silently repair itself.
+    """
+    uri = evidence_storage.uri_for(evidence_id)
+    if not evidence_storage.exists(uri):
+        evidence_storage.store(evidence_id, INVOICE_BYTES)
+    return uri
+
+
+def _integrity_response(
+    evidence_id: str,
+    expected: str,
+    current: str,
+    byte_count: int,
+    registered_at: str | None = None,
+) -> dict[str, Any]:
+    matched = current == expected
+    return {
+        "registeredAt": registered_at,
+        "evidenceId": evidence_id,
+        "status": "MATCH" if matched else "MISMATCH",
+        "expected": expected,
+        "current": current,
+        # How many bytes were actually read back and hashed. The interface shows the work
+        # the check did, and a count it invented would be the one thing it must not do.
+        "byteCount": byte_count,
+        "explanation": "The stored evidence is byte-for-byte consistent with its registered "
+        "commitment. This proves the bytes have not changed since registration; it does not "
+        "prove the document states the truth."
+        if matched
+        else "The stored evidence no longer hashes to its registered commitment. The commitment "
+        "cannot be changed retroactively, so the divergence is detectable.",
+    }
+
+
+def _registered_evidence_hash(record: EvidenceRecord) -> str:
+    """Resolve the immutable commitment from its confirmed registry receipt when configured."""
+    metadata = record.metadata_json or {}
+    reference = metadata.get("blockchainReference") or {}
+    transaction_hash = reference.get("transactionHash")
+    if settings.registry_address:
+        if not transaction_hash:
+            raise HTTPException(409, "Confirmed evidence has no registry transaction reference")
+        blockchain = EvmBlockchainService.from_foundry_artifact(
+            rpc_url=settings.rpc_url,
+            contract_address=settings.registry_address,
+            artifact_path=settings.contract_artifact_path,
+        )
+        observation = blockchain.get_transaction(transaction_hash)
+        if observation is None:
+            raise HTTPException(409, "Registry transaction is not available")
+        commitment = commitment_from_receipt(observation, record.external_id)
+        if not commitment:
+            raise HTTPException(409, "Registry receipt has no matching evidence commitment")
+        return commitment
+    commitment = metadata.get("registeredContentHash")
+    if not commitment:
+        raise HTTPException(409, "Evidence has no independently indexed registered commitment")
+    return str(commitment)
+
+
+@app.post("/evidence/{evidence_id}/verify-integrity")
+def integrity(evidence_id: str, user: CurrentUser = None):
+    # Deliberately public: verifying that evidence still matches its published commitment
+    # is the product's central claim, and a donor must be able to check it without an
+    # account. Visibility is enforced instead -- non-public evidence requires a session.
+    _require_evidence_visibility(evidence_id, user)
+    if session_factory:
+        with session_factory.begin() as session:
+            record = session.scalar(
+                select(EvidenceRecord).where(EvidenceRecord.external_id == evidence_id)
+            )
+            if record is None:
+                raise HTTPException(404, "Evidence not found")
+            try:
+                content = evidence_storage.retrieve(record.storage_uri)
+            except (OSError, ValueError) as exc:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "EVIDENCE_UNREADABLE",
+                        "message": "The stored evidence object could not be read back",
+                    },
+                ) from exc
+            registered_hash = _registered_evidence_hash(record)
+            matched, current = verify_integrity(content, registered_hash)
+            record.integrity_status = "MATCH" if matched else "MISMATCH"
+            # The mismatch is detected on the evidence, but it is the claim that carries
+            # the trust signal a donor reads. Restate it in the same transaction, or the
+            # claim keeps its verified badge above a failing requirement list.
+            restate_claims_for(session, evidence_id)
+            return _integrity_response(
+                evidence_id,
+                registered_hash,
+                current,
+                len(content),
+                ((record.metadata_json or {}).get("blockchainReference") or {}).get(
+                    "registeredAt"
+                ),
+            )
+    item = store.evidence.get(evidence_id)
+    if not item:
+        raise HTTPException(404, "Evidence not found")
+    item["storageUri"] = item.get("storageUri") or _seeded_evidence_uri(evidence_id)
+    try:
+        content = evidence_storage.retrieve(item["storageUri"])
+    except (OSError, ValueError, KeyError) as exc:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "EVIDENCE_UNREADABLE",
+                "message": "The stored evidence object could not be read back",
+            },
+        ) from exc
+    _, current = verify_integrity(content, item["contentHash"])
+    response = _integrity_response(
+        evidence_id, item["contentHash"], current, len(content)
+    )
+    item["integrityStatus"] = response["status"]
+    return response
+
+
+@app.post("/demo/evidence/{evidence_id}/tamper")
+def tamper(evidence_id: str, user: CurrentUser = None):
+    require_user(user, {Role.ADMIN})
+    if settings.demo_mode == "sepolia":
+        raise HTTPException(409, "Refusing to alter evidence in a public demo run")
+    storage_uri = _evidence_storage_uri(evidence_id)
+    evidence_storage.overwrite(storage_uri, TAMPERED_INVOICE_BYTES)
+    return integrity(evidence_id, user=user)
+
+
+def _evidence_storage_uri(evidence_id: str) -> str:
+    if session_factory:
+        with session_factory() as session:
+            record = session.scalar(
+                select(EvidenceRecord).where(EvidenceRecord.external_id == evidence_id)
+            )
+            if record is None:
+                raise HTTPException(404, "Evidence not found")
+            return record.storage_uri
+    item = store.evidence.get(evidence_id)
+    if item is None:
+        raise HTTPException(404, "Evidence not found")
+    item["storageUri"] = item.get("storageUri") or _seeded_evidence_uri(evidence_id)
+    return item["storageUri"]
+
+
+@app.post("/verification-requests/{claim_id}/submit-attestation")
+def submit_attestation(
+    claim_id: str,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    require_user(user, {Role.VERIFIER})
+    _refuse_demo_store_route()
+    if claim_id != store.claim["id"]:
+        raise HTTPException(404, "Claim not found")
+    if not idempotency_key:
+        raise HTTPException(
+            400,
+            detail={"code": "IDEMPOTENCY_KEY_REQUIRED", "message": "Idempotency-Key is required"},
+        )
+    return store.submit_verification()
+
+
+@app.post("/verification-requests/{claim_id}/intent", status_code=201)
+def create_verifier_intent(
+    request: Request,
+    claim_id: str,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    verifier = require_user(user, {Role.VERIFIER})
+    if not verifier.wallet_address:
+        raise HTTPException(
+            403,
+            detail={
+                "code": "WALLET_NOT_VERIFIED",
+                "message": "Prove control of your wallet before requesting verification",
+            },
+        )
+    key = require_idempotency(idempotency_key)
+    if session_factory is None:
+        raise HTTPException(409, "Durable verifier intents require PERSISTENCE_MODE=postgres")
+    if not settings.registry_address:
+        raise HTTPException(503, "IMPACT_REGISTRY_ADDRESS is required")
+    _assert_wallet_may_verify(verifier.wallet_address)
+    service = VerificationApplicationService(settings.chain_id, settings.registry_address)
+    try:
+        with session_factory.begin() as session:
+            return service.create_verifier_intent(
+                session,
+                actor=actor_for(verifier),
+                claim_id=claim_id,
+                correlation_id=request.state.correlation_id,
+                idempotency_key=key,
+            )
+    except AuthorizationError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except DomainConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/verification-requests/{claim_id}/reject")
+def reject_verification_request(
+    request: Request,
+    claim_id: str,
+    body: VerificationDecisionRequest,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    verifier = require_user(user, {Role.VERIFIER})
+    key = require_idempotency(idempotency_key)
+    if session_factory is None:
+        raise HTTPException(409, "Durable verification decisions require PERSISTENCE_MODE=postgres")
+    service = VerificationApplicationService(settings.chain_id, settings.registry_address)
+    try:
+        with session_factory.begin() as session:
+            return service.reject_claim(
+                session,
+                actor=actor_for(verifier),
+                claim_id=claim_id,
+                reason=body.reason,
+                correlation_id=request.state.correlation_id,
+                idempotency_key=key,
+            )
+    except AuthorizationError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except DomainConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/blockchain/operations/{operation_id}/submitted")
+def record_wallet_submission(
+    request: Request,
+    operation_id: UUID,
+    body: WalletSubmissionRequest,
+    background_tasks: BackgroundTasks,
+    user: CurrentUser = None,
+):
+    verifier = require_user(user, {Role.VERIFIER})
+    if session_factory is None:
+        raise HTTPException(409, "Durable wallet submissions require PERSISTENCE_MODE=postgres")
+    service = VerificationApplicationService(settings.chain_id, settings.registry_address)
+    try:
+        with session_factory.begin() as session:
+            response = service.record_wallet_submission(
+                session,
+                actor=actor_for(verifier),
+                operation_id=operation_id,
+                transaction_hash=body.transactionHash,
+                correlation_id=request.state.correlation_id,
+            )
+        background_tasks.add_task(monitor_wallet_operation, operation_id)
+        return response
+    except AuthorizationError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (ValueError, DomainConflictError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/blockchain/operations/{operation_id}")
+def blockchain_operation(operation_id: UUID):
+    if session_factory is None:
+        raise HTTPException(409, "Durable operations require PERSISTENCE_MODE=postgres")
+    with session_factory() as session:
+        operation = session.get(BlockchainOperationRecord, operation_id)
+        if operation is None:
+            raise HTTPException(404, "Blockchain operation not found")
+        claim_status = None
+        if operation.operation_type == "CREATE_VERIFIER_ATTESTATION":
+            # Report the status of the claim this attestation is actually about. The
+            # showcase claim id was hardcoded here, so polling any verifier operation
+            # returned the showcase claim's status regardless of what was attested.
+            attestation = session.scalar(
+                select(AttestationRecord).where(
+                    AttestationRecord.external_id == operation.entity_id
+                )
+            )
+            if attestation:
+                claim = TransparencyReadRepository(session).claim(attestation.subject_id)
+                claim_status = claim["status"]
+        return {
+            "operationId": str(operation.id),
+            "entityId": operation.entity_id,
+            "operationType": operation.operation_type,
+            "status": operation.status,
+            "transactionHash": operation.transaction_hash,
+            "confirmations": operation.confirmations,
+            "expectedEvent": operation.expected_event,
+            "error": operation.error,
+            "claimStatus": claim_status,
+        }
+
+
+@app.post("/blockchain/operations/{operation_id}/confirm-demo")
+def confirm_attestation(operation_id: str, user: CurrentUser = None):
+    require_user(user, {Role.ADMIN, Role.VERIFIER})
+    _refuse_demo_store_route()
+    if not store.pending_tx or operation_id != store.pending_tx["operationId"]:
+        raise HTTPException(404, "Blockchain operation not found")
+    try:
+        return store.confirm_verification()
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/blockchain/transactions/{transaction_hash}")
+def blockchain_transaction(transaction_hash: str):
+    if (
+        not store.pending_tx
+        or transaction_hash.lower() != store.pending_tx["transactionHash"].lower()
+    ):
+        raise HTTPException(404, "Blockchain transaction not found")
+    return store.pending_tx
+
+
+@app.post("/demo/reset")
+def reset(user: CurrentUser = None):
+    require_user(user, {Role.ADMIN})
+    if settings.demo_mode == "sepolia":
+        raise HTTPException(409, "Sepolia is immutable; create a new demo run")
+    store.reset()
+    # Restore the pristine showcase bytes so the tampering demo can be run again.
+    evidence_storage.overwrite(evidence_storage.uri_for("ev-inv-8291"), INVOICE_BYTES)
+    claim_status = store.claim["status"]
+    if session_factory:
+        with session_factory.begin() as session:
+            reset_read_model(session, evidence_storage)
+        # Reseeding drops the registry reference, which left the evidence marked CONFIRMED
+        # with nothing pointing at the registry -- so the donor-facing integrity check, the
+        # one thing this product exists to demonstrate, answered 409 for the rest of the
+        # run. The commitment is still on chain, and this recovers the reference.
+        register_seeded_evidence(settings)
+        with session_factory() as session:
+            claim_status = TransparencyReadRepository(session).claim(SEEDED_CLAIM_ID)["status"]
+    return {"reset": True, "claimStatus": claim_status}

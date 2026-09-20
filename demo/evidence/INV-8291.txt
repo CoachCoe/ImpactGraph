@@ -1,0 +1,10 @@
+IMPACTGRAPH FICTIONAL DEMO EVIDENCE
+Invoice: INV-8291
+Vendor: Aqua Systems Ltd.
+Date: 2026-08-17
+Project: Water Project #12
+Equipment: 2 x AquaPure X200 filtration systems
+Total: USD 4,200.00
+
+This is deterministic fictional demo data. It is not a real financial record.
+

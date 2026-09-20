@@ -1,0 +1,8 @@
+IMPACTGRAPH FICTIONAL PAYMENT RECORD
+Reference: TX-9182
+Source: MockFinancialDataProvider
+Payer: Global Water Initiative
+Payee: Aqua Systems Ltd.
+Amount: USD 4,200.00
+Status: SETTLED (SIMULATED)
+

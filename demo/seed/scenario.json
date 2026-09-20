@@ -1,0 +1,13 @@
+{
+  "demoRunId": "clean-water-kenya-2026-local-001",
+  "program": "Clean Water Kenya 2026",
+  "operator": "Global Water Initiative",
+  "donor": "Jane Smith",
+  "verifier": "ImpactVerify",
+  "project": "Water Project #12",
+  "vendor": "Aqua Systems Ltd.",
+  "initialClaimStatus": "VERIFICATION_PENDING",
+  "financialProvider": "MockFinancialDataProvider",
+  "aiProvider": "mock"
+}
+

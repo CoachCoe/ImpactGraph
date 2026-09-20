@@ -1,0 +1,681 @@
+from __future__ import annotations
+
+from typing import Any
+from uuid import NAMESPACE_URL, uuid5
+
+from sqlalchemy import delete, func, select
+from sqlalchemy.orm import Session
+
+from .config import Settings
+from .demo import INVOICE_BYTES
+from .domain import Money
+from .evidence import (
+    MOCK_INVOICE_EXTRACTION,
+    EvidenceStorage,
+    FileEvidenceStorage,
+    ReconciliationService,
+)
+from .financial import (
+    EvidenceReconciliationService,
+    FinancialIngestionService,
+    FinancialLedger,
+    MockFinancialDataProvider,
+    financial_summary,
+)
+from .hashing import claim_hash, sha256_bytes, verification_bundle_hash
+from .persistence import (
+    AllocationRecord,
+    AttestationRecord,
+    AuditLogRecord,
+    BlockchainOperationRecord,
+    ClaimRecord,
+    DeliveryRecord,
+    DomainEntityRecord,
+    EvidenceRecord,
+    FinancialTransactionRecord,
+    FundingRecord,
+    IdempotencyRecord,
+    OrganizationRecord,
+    OutboxRecord,
+    OutcomeRecord,
+    ProcessedChainEventRecord,
+    ProgramRecord,
+    ProvenanceEdgeRecord,
+)
+from .verification import EvidenceScoreService, claim_subgraph, evaluate_persisted_claim
+
+PROGRAM_ID = "program-clean-water-kenya-2026"
+PROJECT_ID = "project-water-12"
+CLAIM_ID = "claim-water-12-200"
+OUTCOME_ID = "outcome-water-12-200"
+EVIDENCE_ID = "ev-inv-8291"
+CLAIM_STATEMENT = "200 households gained access to clean drinking water."
+_INTEGRITY_DETAIL = {
+    "MATCH": "Integrity confirmed",
+    "MISMATCH": "Integrity check failed",
+    "NOT_CHECKED": "Integrity not yet checked",
+}
+_UNKNOWN_INTEGRITY = "Integrity status unavailable"
+FUNDING_ID = "funding-jane-10000"
+ALLOCATION_ID = "allocation-water-12-8500"
+FINANCIAL_TRANSACTION_ID = "ftx-9182"
+DELIVERY_ID = "delivery-water-12"
+OPERATOR_ORG_REF = "org-global-water"
+
+
+def stable_uuid(value: str):
+    return uuid5(NAMESPACE_URL, f"https://impactgraph.local/{value}")
+
+
+def seed_read_model(session: Session, storage: EvidenceStorage | None = None) -> None:
+    """Idempotently installs the deterministic showcase without deleting user records."""
+    # Restore the showcase bytes before the early return below. Seeding is what makes the
+    # demo repeatable, so it has to undo a tamper even when the rows are already present.
+    evidence_store = storage or FileEvidenceStorage(Settings.from_env().evidence_storage_path)
+    storage_uri = evidence_store.uri_for(EVIDENCE_ID)
+    evidence_store.overwrite(storage_uri, INVOICE_BYTES)
+    if session.scalar(select(ProgramRecord).where(ProgramRecord.slug == PROGRAM_ID)):
+        return
+    program_uuid = stable_uuid(PROGRAM_ID)
+    session.add(
+        ProgramRecord(
+            id=program_uuid,
+            slug=PROGRAM_ID,
+            name="Clean Water Kenya 2026",
+            operator_name="Global Water Initiative",
+            operator_org_ref=OPERATOR_ORG_REF,
+            region="Kisumu County, Kenya",
+            status="ACTIVE",
+        )
+    )
+    # The models intentionally avoid broad ORM relationships; establish the FK parent
+    # before adding graph entities so ordering is explicit and database-portable.
+    session.flush()
+    # Program and project summaries stay as presentation rows; the financial and delivery
+    # entities below are real records with typed money, not JSON blobs.
+    entities = [
+        (
+            PROGRAM_ID,
+            "PROGRAM",
+            {
+                "filtrationSystems": 12,
+                "peopleServed": 2840,
+                "verificationPercent": 92,
+            },
+        ),
+        (
+            PROJECT_ID,
+            "PROJECT",
+            {"name": "Water Project #12", "deliveries": 1, "evidenceObjects": 5},
+        ),
+    ]
+    for external_id, entity_type, data in entities:
+        session.add(
+            DomainEntityRecord(
+                external_id=external_id,
+                entity_type=entity_type,
+                program_id=program_uuid,
+                data=data,
+                blockchain_status="CONFIRMED",
+            )
+        )
+
+    session.add(
+        FundingRecord(
+            external_id=FUNDING_ID,
+            program_ref=PROGRAM_ID,
+            funder_name="Jane Smith",
+            amount_minor=1000000,
+            currency="USD",
+            received_on="2026-07-02",
+            source_ref="mock-bank-inbound-4471",
+        )
+    )
+    session.add(
+        FundingRecord(
+            external_id="funding-institutional-90000",
+            program_ref=PROGRAM_ID,
+            funder_name="Institutional funding pool",
+            amount_minor=9000000,
+            currency="USD",
+            received_on="2026-07-01",
+            source_ref="mock-bank-inbound-4400",
+        )
+    )
+    session.add(
+        AllocationRecord(
+            external_id=ALLOCATION_ID,
+            program_ref=PROGRAM_ID,
+            project_ref=PROJECT_ID,
+            funding_ref=FUNDING_ID,
+            purpose="Water Project #12",
+            amount_minor=850000,
+            currency="USD",
+        )
+    )
+    session.add(
+        AllocationRecord(
+            external_id="allocation-program-operations-91500",
+            program_ref=PROGRAM_ID,
+            project_ref="program-portfolio-projects",
+            funding_ref="funding-institutional-90000",
+            purpose="Remaining Clean Water Kenya portfolio",
+            amount_minor=9150000,
+            currency="USD",
+        )
+    )
+    session.flush()
+
+    # Observed payments arrive through the provider rather than being written here.
+    FinancialIngestionService(MockFinancialDataProvider()).import_statement(
+        session, program_ref=PROGRAM_ID, allocation_ref=ALLOCATION_ID
+    )
+    # The two deliberately anomalous provider rows belong to the wider portfolio, not
+    # Water Project #12. Keeping them visible exercises reconciliation states without
+    # inflating the showcase project's $4,200 spend.
+    for external_id in ("ftx-9183", "ftx-9184"):
+        transaction = session.scalar(
+            select(FinancialTransactionRecord).where(
+                FinancialTransactionRecord.external_id == external_id
+            )
+        )
+        if transaction:
+            transaction.allocation_ref = "allocation-program-operations-91500"
+    session.add(
+        FinancialTransactionRecord(
+            external_id="ftx-portfolio-deployment",
+            program_ref=PROGRAM_ID,
+            allocation_ref="allocation-program-operations-91500",
+            payer_ref=OPERATOR_ORG_REF,
+            payee_ref="portfolio-delivery-partners",
+            payee_name="Clean Water Kenya delivery partners",
+            amount_minor=8188000,
+            currency="USD",
+            occurred_on="2026-08-30",
+            memo="Aggregated observed deployment across remaining projects",
+            provider="mock-bank",
+            source_ref="mock-bank-portfolio-deployment",
+            match_status="MATCHED",
+        )
+    )
+
+    session.add(
+        DeliveryRecord(
+            external_id=DELIVERY_ID,
+            program_ref=PROGRAM_ID,
+            project_ref=PROJECT_ID,
+            financial_transaction_ref=FINANCIAL_TRANSACTION_ID,
+            item="AquaPure X200",
+            quantity=2,
+            delivered_on="2026-08-21",
+        )
+    )
+    session.add(
+        OutcomeRecord(
+            external_id=OUTCOME_ID,
+            program_ref=PROGRAM_ID,
+            delivery_ref=DELIVERY_ID,
+            metric="Households with access to clean drinking water",
+            value=200,
+            unit="households",
+            region="Kisumu County",
+        )
+    )
+    session.flush()
+
+    evidence_hash = sha256_bytes(INVOICE_BYTES)
+    session.add(
+        EvidenceRecord(
+            external_id=EVIDENCE_ID,
+            project_ref=PROJECT_ID,
+            evidence_type="INVOICE",
+            storage_uri=storage_uri,
+            content_hash=evidence_hash,
+            mime_type="text/plain",
+            visibility="PUBLIC",
+            workflow_status="SUBMITTED_FOR_VERIFICATION",
+            analysis_status="COMPLETED",
+            # Neither is something a seed can know. `impactgraph.cli seed` registers the
+            # commitment when a registry is configured and records CONFIRMED from the real
+            # receipt; the integrity endpoint is the only thing that may record a MATCH.
+            integrity_status="NOT_CHECKED",
+            blockchain_status="NOT_STARTED",
+            metadata_json={
+                "filename": "INV-8291.txt",
+                "uploadedBy": "Global Water Initiative",
+                "source": "Operator upload",
+                "programId": PROGRAM_ID,
+                "registeredContentHash": evidence_hash,
+                # No blockchainReference: a fabricated transaction hash here made
+                # registry-backed integrity verification fail against a real chain, and
+                # asserted an onchain registration that never happened. `impactgraph.cli
+                # seed` records a real one when a registry is configured.
+            },
+            extraction=dict(MOCK_INVOICE_EXTRACTION),
+            # Reconciled against the imported payment and the recorded delivery, so the
+            # seeded result is whatever the service actually produces.
+            reconciliation=EvidenceReconciliationService(ReconciliationService()).reconcile(
+                session,
+                project_ref=PROJECT_ID,
+                extraction=MOCK_INVOICE_EXTRACTION,
+            ),
+        )
+    )
+    payload_hash = claim_hash(CLAIM_ID, CLAIM_STATEMENT, OUTCOME_ID)
+    bundle_hash = verification_bundle_hash(
+        CLAIM_ID,
+        payload_hash,
+        [evidence_hash],
+        OUTCOME_ID,
+        ["funding-jane-10000", "allocation-water-12-8500", "ftx-9182", "delivery-water-12"],
+        "1.0",
+    )
+    session.add(
+        ClaimRecord(
+            external_id=CLAIM_ID,
+            program_ref=PROGRAM_ID,
+            project_ref=PROJECT_ID,
+            statement=CLAIM_STATEMENT,
+            payload_hash=payload_hash,
+            status="VERIFICATION_PENDING",
+            verification_policy_version="1.0",
+            verification_bundle_hash=bundle_hash,
+        )
+    )
+    session.add(
+        AttestationRecord(
+            external_id="att-operator-water-12",
+            attestation_type="OPERATOR",
+            subject_type="CLAIM",
+            subject_id=CLAIM_ID,
+            issuer_id=OPERATOR_ORG_REF,
+            # No wallet and no transaction hash, because neither exists. The operator
+            # attestation is the operating organisation putting its name to the claim
+            # inside this system -- a database record, never a chain signature. It used to
+            # carry a placeholder wallet and hash and the status CONFIRMED, which asserted
+            # an onchain signature that never happened, twelve lines above the comment
+            # explaining why exactly that was removed from the evidence record below.
+            issuer_wallet=None,
+            statement_hash=payload_hash,
+            verification_bundle_hash=bundle_hash,
+            transaction_hash=None,
+            status="RECORDED",
+        )
+    )
+    edges = [
+        ("FUNDING", "funding-jane-10000", "FUNDS", "ALLOCATION", "allocation-water-12-8500"),
+        ("ALLOCATION", "allocation-water-12-8500", "PAYS", "FINANCIAL_TRANSACTION", "ftx-9182"),
+        ("FINANCIAL_TRANSACTION", "ftx-9182", "SUPPORTS", "DELIVERY", "delivery-water-12"),
+        ("EVIDENCE", EVIDENCE_ID, "EVIDENCES", "DELIVERY", "delivery-water-12"),
+        ("DELIVERY", "delivery-water-12", "PRODUCES", "OUTCOME", OUTCOME_ID),
+        ("OUTCOME", OUTCOME_ID, "SUPPORTS", "CLAIM", CLAIM_ID),
+        ("EVIDENCE", EVIDENCE_ID, "SUPPORTS", "CLAIM", CLAIM_ID),
+    ]
+    for source_type, source_id, relationship, target_type, target_id in edges:
+        session.add(
+            ProvenanceEdgeRecord(
+                source_type=source_type,
+                source_id=source_id,
+                relationship=relationship,
+                target_type=target_type,
+                target_id=target_id,
+                # link_provenance has no caller: no edge in this system has ever been
+                # written to a chain. Claiming otherwise made the donor-facing graph draw
+                # every segment as onchain-attested on the strength of a seed literal.
+                confirmed_onchain=False,
+            )
+        )
+
+
+def reset_read_model(session: Session, storage: EvidenceStorage | None = None) -> None:
+    """Delete only the explicitly selected local demo database, then deterministically seed."""
+    for model in (
+        ProcessedChainEventRecord,
+        OutboxRecord,
+        BlockchainOperationRecord,
+        IdempotencyRecord,
+        AuditLogRecord,
+        ProvenanceEdgeRecord,
+        AttestationRecord,
+        ClaimRecord,
+        EvidenceRecord,
+        OutcomeRecord,
+        DeliveryRecord,
+        FinancialTransactionRecord,
+        AllocationRecord,
+        FundingRecord,
+        DomainEntityRecord,
+        ProgramRecord,
+    ):
+        session.execute(delete(model))
+    session.flush()
+    seed_read_model(session, storage)
+
+
+class TransparencyReadRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def programs(self) -> list[dict[str, Any]]:
+        return [
+            self.program(record.slug)
+            for record in self.session.scalars(select(ProgramRecord).order_by(ProgramRecord.name))
+        ]
+
+    def program(self, program_id: str) -> dict[str, Any]:
+        record = self.session.scalar(select(ProgramRecord).where(ProgramRecord.slug == program_id))
+        if record is None:
+            raise LookupError("Program not found")
+        metrics = self.session.scalar(
+            select(DomainEntityRecord).where(DomainEntityRecord.external_id == program_id)
+        )
+        data = dict(metrics.data) if metrics else {}
+        # Funded and deployed are derived from the ledger, not carried in a summary blob
+        # that could disagree with the transactions it claims to total. The delivery and
+        # outcome totals are derived for the same reason: the blob said 12 systems and
+        # 2,840 people while the records it linked to said 2 and 200, and the dashboard
+        # hyperlinked each figure to the record that contradicted it.
+        data.pop("filtrationSystems", None)
+        data.pop("peopleServed", None)
+        # Nothing computes a verification percentage; serving one invites it to be rendered.
+        data.pop("verificationPercent", None)
+        ledger = financial_summary(self.session, program_id)
+        delivered = self.session.scalar(
+            select(func.coalesce(func.sum(DeliveryRecord.quantity), 0)).where(
+                DeliveryRecord.program_ref == program_id
+            )
+        )
+        served = self.session.scalar(
+            select(func.coalesce(func.sum(OutcomeRecord.value), 0)).where(
+                OutcomeRecord.program_ref == program_id
+            )
+        )
+        return {
+            "id": record.slug,
+            "name": record.name,
+            "operator": record.operator_name,
+            "region": record.region,
+            "status": record.status,
+            "funding": ledger["received"],
+            "deployed": ledger["spent"],
+            "filtrationSystems": int(delivered or 0),
+            "peopleServed": int(served or 0),
+            **data,
+            "featuredClaimId": CLAIM_ID,
+        }
+
+    def project(self, project_id: str) -> dict[str, Any]:
+        record = self.session.scalar(
+            select(DomainEntityRecord).where(
+                DomainEntityRecord.external_id == project_id,
+                DomainEntityRecord.entity_type == "PROJECT",
+            )
+        )
+        if record is None:
+            raise LookupError("Project not found")
+        claim = self.session.scalar(
+            select(ClaimRecord).where(ClaimRecord.project_ref == project_id)
+        )
+        allocation = FinancialLedger.allocation_for_project(self.session, project_id)
+        return {
+            "id": project_id,
+            "programId": PROGRAM_ID,
+            **record.data,
+            "budget": (
+                Money(allocation.amount_minor, allocation.currency).as_dict()
+                if allocation
+                else None
+            ),
+            "spent": (
+                FinancialLedger.spent_against(
+                    self.session, allocation.external_id, allocation.currency
+                ).as_dict()
+                if allocation
+                else None
+            ),
+            "remaining": (
+                FinancialLedger.remaining(self.session, allocation).as_dict()
+                if allocation
+                else None
+            ),
+            "verification": claim.status if claim else "DRAFT",
+            "actions": ["IMPORT_FINANCIAL_STATEMENT", "RECORD_DELIVERY", "UPLOAD_EVIDENCE"],
+        }
+
+    def claim(self, claim_id: str) -> dict[str, Any]:
+        record = self._claim(claim_id)
+        attestations = list(
+            self.session.scalars(
+                select(AttestationRecord).where(AttestationRecord.subject_id == claim_id)
+            )
+        )
+        organizations = {
+            record.external_id: record.name
+            for record in self.session.scalars(select(OrganizationRecord))
+        }
+        return {
+            "id": record.external_id,
+            "programId": record.program_ref,
+            "projectId": record.project_ref,
+            "statement": record.statement,
+            "status": record.status,
+            "payloadHash": record.payload_hash,
+            "verificationBundleHash": record.verification_bundle_hash,
+            "policyVersion": record.verification_policy_version,
+            "verifiedAt": record.verified_at.isoformat() if record.verified_at else None,
+            "evidenceIds": self._supporting_evidence_ids(record.external_id),
+            "attestations": [
+                {
+                    "id": item.external_id,
+                    "type": item.attestation_type,
+                    # The real organisation, not a constant keyed on the type. Any
+                    # verifier whatsoever was previously displayed as "ImpactVerify".
+                    "issuer": organizations.get(item.issuer_id, item.issuer_id),
+                    "wallet": item.issuer_wallet,
+                    "status": item.status,
+                    # Whether this was signed on a chain or recorded in this system.
+                    # An operator attestation has never been a chain signature, and
+                    # showing it beside one that is, identically, overstated it.
+                    "onchain": item.transaction_hash is not None,
+                    "transactionHash": item.transaction_hash,
+                    "verificationBundleHash": item.verification_bundle_hash,
+                }
+                for item in attestations
+            ],
+        }
+
+    def evidence(self, evidence_id: str) -> dict[str, Any]:
+        record = self.session.scalar(
+            select(EvidenceRecord).where(EvidenceRecord.external_id == evidence_id)
+        )
+        if record is None:
+            raise LookupError("Evidence not found")
+        return {
+            "id": record.external_id,
+            "type": record.evidence_type,
+            "projectId": record.project_ref,
+            "contentHash": record.content_hash,
+            "mimeType": record.mime_type,
+            "visibility": record.visibility,
+            "workflowStatus": record.workflow_status,
+            "analysisStatus": record.analysis_status,
+            "integrityStatus": record.integrity_status,
+            "blockchainStatus": record.blockchain_status,
+            "extraction": record.extraction,
+            "reconciliation": record.reconciliation,
+            **record.metadata_json,
+        }
+
+    def _supporting_evidence_ids(self, claim_id: str) -> list[str]:
+        """The evidence actually linked to this claim.
+
+        The showcase evidence id was returned for every claim; the same query the
+        verification policy uses is the one that belongs here.
+        """
+        return list(
+            self.session.scalars(
+                select(ProvenanceEdgeRecord.source_id).where(
+                    ProvenanceEdgeRecord.source_type == "EVIDENCE",
+                    ProvenanceEdgeRecord.relationship == "SUPPORTS",
+                    ProvenanceEdgeRecord.target_id == claim_id,
+                    ProvenanceEdgeRecord.superseded_by.is_(None),
+                )
+            )
+        )
+
+    def _financial_nodes(self, entity_ids: set[str]) -> list[dict[str, Any]]:
+        """Provenance nodes for the given entities, built from the typed records.
+
+        Every select here was previously unscoped, so one claim's graph contained every
+        program's funding, allocations, deliveries and outcomes.
+        """
+
+        def amount(row: Any) -> str:
+            return f"{Money(row.amount_minor, row.currency).amount_minor / 100:,.2f} {row.currency}"
+
+        nodes: list[dict[str, Any]] = []
+        for row in self.session.scalars(
+            select(FundingRecord).where(FundingRecord.external_id.in_(entity_ids))
+        ):
+            nodes.append(
+                {
+                    "id": row.external_id,
+                    "type": "FUNDING",
+                    "title": row.funder_name,
+                    "detail": f"{amount(row)} contributed",
+                }
+            )
+        for row in self.session.scalars(
+            select(AllocationRecord).where(AllocationRecord.external_id.in_(entity_ids))
+        ):
+            nodes.append(
+                {
+                    "id": row.external_id,
+                    "type": "ALLOCATION",
+                    "title": row.purpose,
+                    "detail": f"{amount(row)} allocated",
+                }
+            )
+        for row in self.session.scalars(
+            select(FinancialTransactionRecord).where(
+                FinancialTransactionRecord.external_id.in_(entity_ids)
+            )
+        ):
+            nodes.append(
+                {
+                    "id": row.external_id,
+                    "type": "FINANCIAL_TRANSACTION",
+                    "title": row.payee_name,
+                    "detail": f"{amount(row)} observed payment",
+                }
+            )
+        for row in self.session.scalars(
+            select(DeliveryRecord).where(DeliveryRecord.external_id.in_(entity_ids))
+        ):
+            nodes.append(
+                {
+                    "id": row.external_id,
+                    "type": "DELIVERY",
+                    "title": f"{row.quantity} × {row.item}",
+                    "detail": f"Delivered {row.delivered_on}",
+                }
+            )
+        for row in self.session.scalars(
+            select(OutcomeRecord).where(OutcomeRecord.external_id.in_(entity_ids))
+        ):
+            nodes.append(
+                {
+                    "id": row.external_id,
+                    "type": "OUTCOME",
+                    "title": f"{row.value} {row.unit} served",
+                    "detail": row.region,
+                }
+            )
+        return nodes
+
+    def provenance(self, claim_id: str) -> dict[str, Any]:
+        self._claim(claim_id)
+        claim = self.claim(claim_id)
+        entity_ids, scoped_edges = claim_subgraph(self.session, claim_id)
+        nodes = self._financial_nodes(entity_ids)
+        evidence_records = list(
+            self.session.scalars(
+                select(EvidenceRecord).where(EvidenceRecord.external_id.in_(entity_ids))
+            )
+        )
+        nodes.extend(
+            {
+                "id": item.external_id,
+                "type": "EVIDENCE",
+                # The real status, not a fixed "Integrity confirmed" label that would
+                # keep reassuring a reader after the evidence stopped matching.
+                "detail": _INTEGRITY_DETAIL.get(item.integrity_status, _UNKNOWN_INTEGRITY),
+                "title": str(
+                    (item.extraction or {}).get("invoiceNumber") or item.external_id
+                ),
+            }
+            for item in evidence_records
+        )
+        nodes.append(
+            {
+                "id": claim_id,
+                "type": "CLAIM",
+                "title": claim["statement"],
+                "detail": claim["status"],
+            }
+        )
+        edges = scoped_edges
+        return {
+            "nodes": nodes,
+            "edges": [
+                {
+                    "source": edge.source_id,
+                    "relationship": edge.relationship,
+                    "target": edge.target_id,
+                    "confirmedOnchain": edge.confirmed_onchain,
+                }
+                for edge in edges
+            ],
+        }
+
+    def verification(self, claim_id: str) -> dict[str, Any]:
+        claim = self._claim(claim_id)
+        decision, evidence_records, verifier = evaluate_persisted_claim(self.session, claim)
+        operator = next(
+            (item for item in decision.requirements if item.requirement == "OPERATOR_ATTESTATION"),
+            None,
+        )
+        integrity = all(item.integrity_status == "MATCH" for item in evidence_records)
+        score = EvidenceScoreService().score(
+            financial=all(
+                item.reconciliation
+                and item.reconciliation.get("status") in {"MATCHED", "PARTIAL_MATCH"}
+                for item in evidence_records
+            ),
+            integrity=bool(evidence_records) and integrity,
+            operator=operator is not None and operator.status.value == "PASS",
+            verifier=verifier is not None,
+            location_points=7,
+            consistency=True,
+        )
+        return {
+            "claimId": claim_id,
+            "status": claim.status,
+            "policyVersion": claim.verification_policy_version,
+            "requirements": [
+                {
+                    "requirement": item.requirement,
+                    "status": item.status.value,
+                    "reason": item.reason,
+                }
+                for item in decision.requirements
+            ],
+            "evidenceScore": score,
+            "verificationBundleHash": claim.verification_bundle_hash,
+        }
+
+    def _claim(self, claim_id: str) -> ClaimRecord:
+        record = self.session.scalar(select(ClaimRecord).where(ClaimRecord.external_id == claim_id))
+        if record is None:
+            raise LookupError("Claim not found")
+        return record
