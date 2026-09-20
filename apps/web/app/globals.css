@@ -75,6 +75,21 @@ footer>span{display:block;margin-top:6px}.formGrid{grid-template-columns:1fr}}
 .meter{height:8px;border-radius:5px;background:#e3ece7;overflow:hidden;margin:8px 0}
 .meter span{display:block;height:100%;background:var(--green)}
 @media(max-width:800px){.ledgerHead{flex-direction:column;gap:6px}}
+
+/* The generic metrics strip normally sits at page level and centers itself with viewport
+   margins. On the money-trail page it is already inside `.inspector`; applying those margins
+   a second time squeezed four columns into roughly one third of the available width. */
+.financialMetrics {
+  width: 100%;
+  max-width: none;
+  margin-inline: 0;
+}
+
+@media (max-width: 800px) {
+  .financialMetrics {
+    margin-inline: 0;
+  }
+}
 /* --- chain of provenance ---
    One hairline carries the whole graph: continuity is the argument it makes. A segment
    whose relationship is not attested breaks the line, so the claim stays falsifiable by

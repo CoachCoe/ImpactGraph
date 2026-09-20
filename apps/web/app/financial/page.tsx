@@ -50,7 +50,7 @@ export default async function FinancialPage() {
         </div>
       </section>
 
-      <section className="metrics" aria-label="Financial summary">
+      <section className="metrics financialMetrics" aria-label="Financial summary">
         <article>
           <span>Received</span>
           <strong>{formatMoney(summary.received, { maximumFractionDigits: 0 })}</strong>
