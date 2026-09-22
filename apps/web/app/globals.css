@@ -31,48 +31,64 @@
   --track-label:.3em;
   --track-label-sm:.14em;
 
-  --paper:#f5f7f3;
+  --paper:#f8f9fa;
   --card:#fff;
-  --card-quiet:#fcfdfb;
-  --field:#fafbf9;
-  --line:#dce4de;
-  --ink:#102820;
-  --ink-soft:#45564f;
-  /* Raised from #66756f: the 9-11px labels that use it sat at 2.9:1. */
-  --muted:#54625c;
+  --card-quiet:#fcfdfd;
+  --field:#f9fafa;
+  --line:#e3e6e8;
+  --ink:#0e1e1e;
+  --ink-deep:#0a1616;
+  --ink-soft:#4a5757;
+  /* The brand's own #8FA3A3 is 2.5:1 on paper. This is the same neutral, dark
+     enough for the 9-11px labels that carry most of this product's detail. */
+  --muted:#5a6666;
 
-  --green:#117a5b;
-  --green-ink:#086144;
-  --green-wash:#dff3e9;
-  --green-tint:#eef5f1;
-  --green-field:#f3f7f4;
-  --green-quiet:#f7faf8;
-  --green-rule:#e3ece7;
-  --green-track:#ccd9d2;
-  --green-underline:rgba(17,122,91,.35);
+  /* Brand. Reserved for identity and action -- eyebrows, the primary control, focus,
+     emphasis rules -- and never used inside a status chip, where it would be read as
+     a verdict. #ff4a22 is 3.2:1 on paper, so it fills and underlines and sets display
+     sizes; --brand-ink is the same hue taken to AA for anything smaller. */
+  --brand:#ff4a22;
+  --brand-ink:#c8340f;
+  --brand-wash:#ffece7;
+  --brand-rule:rgba(255,74,34,.34);
 
-  --blue:#1d5d8c;
-  --blue-wash:#e7eff7;
+  /* Verified. Teal is the brand palette's nearest thing to a confirmation, and it
+     leaves green free of meaning rather than having one colour serve as both the
+     house accent and the verdict. */
+  --ok:#007a7a;
+  --ok-ink:#0a5f5f;
+  --ok-wash:#d6eded;
+  --ok-quiet:#f4fafa;
+  --ok-rule:#cfe3e3;
 
-  --amber:#a5630c;
-  --amber-wash:#fff2d7;
-  --amber-dot:#e3a23b;
+  /* Awaiting a verdict. Neutral, not blue: nothing has been asserted yet, and a
+     positive-reading colour would say otherwise. */
+  --wait:#3f4f4c;
+  --wait-wash:#e8ecea;
 
-  --red:#9d3434;
-  --red-ink:#7a3030;
-  --red-wash:#fae4e4;
-  --red-field:#fdf3f3;
-  --red-line:#e7b9b9;
+  /* Attested but incomplete. Darkened from #a5630c, which was 4.3:1 on its own wash. */
+  --warn:#995b0a;
+  --warn-wash:#fff2d7;
+  --warn-dot:#e3a23b;
 
-  --stone:#e7eee9;
-  --hero-a:#edf7f1;
-  --hero-b:#f8f4e8;
-  --hero-c:#e8f1f4;
-  --deep-a:#163d37;
-  --deep-b:#31776b;
+  --fail:#9d3434;
+  --fail-ink:#7a3030;
+  --fail-wash:#fae4e4;
+  --fail-field:#fdf3f3;
+  --fail-line:#e7b9b9;
 
-  --shadow:0 18px 50px rgba(20,48,38,.08);
-  --shadow-soft:0 8px 30px rgba(20,48,38,.04);
+  --stone:#e9ecec;
+  --hero-a:#f8f9fa;
+  --hero-b:#fdf1ec;
+  --hero-c:#eef6f6;
+  --deep-a:#0a1616;
+  --deep-b:#0f4a4a;
+
+  --shadow:0 18px 50px rgba(14,30,30,.08);
+  --shadow-soft:0 8px 30px rgba(14,30,30,.04);
+
+  --radius-card:18px;
+  --radius-pill:100px;
 
   --gutter:max(24px,calc((100vw - 1160px)/2));
 }
@@ -88,7 +104,10 @@ h1,h2,h3,p{margin-top:0}
 
 /* A label: mono, wide, upper. Used for eyebrows, record ids, units and timestamps —
    never for running prose. */
-.eyebrow{font-family:var(--font-mono);font-weight:500;font-size:11px;letter-spacing:var(--track-label);text-transform:uppercase;color:var(--green)}
+.eyebrow{display:flex;align-items:center;gap:12px;font-family:var(--font-mono);font-weight:500;font-size:11px;letter-spacing:var(--track-label);text-transform:uppercase;color:var(--brand-ink)}
+.eyebrow::before{content:"";flex:none;width:28px;height:1px;background:currentColor}
+/* .score centres its column, which a flex eyebrow would otherwise left-align. */
+.score .eyebrow{justify-content:center}
 
 /* --- header --- */
 .header{height:72px;display:flex;align-items:center;padding:0 max(24px,calc((100vw - 1240px)/2));border-bottom:1px solid var(--line);background:rgba(255,255,255,.9);position:sticky;top:0;z-index:20;backdrop-filter:blur(16px)}
@@ -96,14 +115,14 @@ h1,h2,h3,p{margin-top:0}
 .brandMark{display:grid;place-items:center;width:32px;height:32px;border-radius:9px;background:var(--ink);color:var(--card);font-family:var(--font-display);font-weight:700}
 .header nav{display:flex;gap:28px;margin-left:auto;margin-right:32px}
 .header nav a{font-family:var(--font-mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-soft)}
-.header nav a:hover{color:var(--green)}
-.network{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:8px 12px;border:1px solid var(--line);border-radius:20px;font-family:var(--font-mono);font-size:11px;letter-spacing:.06em;background:var(--card)}
-.network span{display:inline-block;width:7px;height:7px;background:var(--amber-dot);border-radius:50%;margin-right:7px}
+.header nav a:hover{color:var(--brand-ink)}
+.network{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:8px 12px;border:1px solid var(--line);border-radius:var(--radius-pill);font-family:var(--font-mono);font-size:11px;letter-spacing:.06em;background:var(--card)}
+.network span{display:inline-block;width:7px;height:7px;background:var(--warn-dot);border-radius:50%;margin-right:7px}
 
 /* --- hero and section headings --- */
 .hero{padding:72px var(--gutter) 48px;background:linear-gradient(130deg,var(--hero-a),var(--hero-b) 58%,var(--hero-c))}
 .hero h1{font-size:clamp(38px,5.6vw,64px);line-height:1.08;letter-spacing:var(--track-display-lg);margin:17px 0}
-.hero h1 em{color:var(--green);font-style:normal;font-weight:500}
+.hero h1 em{color:var(--brand-ink);font-style:normal;font-weight:500}
 .hero p{font-size:18px;color:var(--muted);max-width:600px}
 .section,.workspace,.inspector{max-width:1160px;margin:0 auto;padding:64px 24px}
 .sectionHead,.workspaceHead,.panelHead,.claimHero{display:flex;align-items:flex-start;justify-content:space-between;gap:24px}
@@ -117,7 +136,7 @@ h1,h2,h3,p{margin-top:0}
 /* --- metrics strip ---
    Mono label, display figure, sans descriptor. Figures are tabular so a column of
    money reads as a column. */
-.metrics{max-width:1160px;margin:-22px auto 0;margin-inline:var(--gutter);display:grid;grid-template-columns:repeat(4,minmax(0,1fr));background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);position:relative}
+.metrics{max-width:1160px;margin:-22px auto 0;margin-inline:var(--gutter);display:grid;grid-template-columns:repeat(4,minmax(0,1fr));background:var(--card);border:1px solid var(--line);border-radius:var(--radius-card);box-shadow:var(--shadow);position:relative}
 .metrics article{padding:25px 28px;border-right:1px solid var(--line)}
 .metrics article:last-child{border:0}
 .metrics span,.metrics small{display:block;font-size:12px;color:var(--muted)}
@@ -127,13 +146,13 @@ h1,h2,h3,p{margin-top:0}
 /* --- status --- */
 .status{display:inline-flex;align-items:center;gap:7px;padding:8px 11px;border-radius:8px;font-family:var(--font-mono);font-size:11px;font-weight:600;letter-spacing:.06em;white-space:nowrap}
 .status b{width:18px;height:18px;border-radius:50%;display:grid;place-items:center}
-.status.verified{background:var(--green-wash);color:var(--green-ink)}
-.status.pending{background:var(--blue-wash);color:var(--blue)}
-.status.warning{background:var(--amber-wash);color:var(--amber)}
-.status.failed{background:var(--red-wash);color:var(--red)}
+.status.verified{background:var(--ok-wash);color:var(--ok-ink)}
+.status.pending{background:var(--wait-wash);color:var(--wait)}
+.status.warning{background:var(--warn-wash);color:var(--warn)}
+.status.failed{background:var(--fail-wash);color:var(--fail)}
 
 /* --- program card --- */
-.programCard{display:grid;grid-template-columns:36% 64%;overflow:hidden;border-radius:16px;background:var(--card);border:1px solid var(--line);box-shadow:var(--shadow)}
+.programCard{display:grid;grid-template-columns:36% 64%;overflow:hidden;border-radius:var(--radius-card);background:var(--card);border:1px solid var(--line);box-shadow:var(--shadow)}
 .programVisual{min-height:390px;background:radial-gradient(circle at 40% 35%,rgba(255,255,255,.18),transparent 26%),linear-gradient(145deg,var(--deep-a),var(--deep-b));display:flex;flex-direction:column;justify-content:space-between;padding:35px;color:var(--card)}
 .waterIcon{font-family:var(--font-display);font-weight:500;font-size:100px;line-height:1;opacity:.75}
 .programVisual span{font-family:var(--font-mono);font-size:11px;letter-spacing:.18em}
@@ -143,22 +162,23 @@ h1,h2,h3,p{margin-top:0}
 .miniMetrics b{display:block;font-family:var(--font-display);font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:var(--track-display);color:var(--ink);font-size:18px;margin-bottom:4px}
 /* The claim itself, set as the page's second voice: display type, but at book weight
    so it reads as something asserted rather than something announced. */
-.programBody blockquote{font-family:var(--font-display);font-weight:500;font-size:clamp(20px,2.4vw,26px);line-height:1.3;letter-spacing:var(--track-display);margin:43px 0 20px;border-left:3px solid var(--green);padding-left:24px}
+.programBody blockquote{font-family:var(--font-display);font-weight:500;font-size:clamp(20px,2.4vw,26px);line-height:1.3;letter-spacing:var(--track-display);margin:43px 0 20px;border-left:3px solid var(--brand);padding-left:24px}
 .trustLine{font-family:var(--font-mono);font-size:11px;color:var(--muted)}
-.trustLine span{color:var(--green);font-weight:600}
+.trustLine span{color:var(--ok);font-weight:600}
 .trustLine i{font-style:normal;margin:0 8px}
 
 /* --- controls --- */
-.button{font-family:var(--font-display);font-weight:700;letter-spacing:.01em;background:var(--ink);color:var(--card);border:0;border-radius:9px;padding:13px 18px;display:inline-flex;justify-content:center;gap:28px;cursor:pointer}
-.button:hover{background:var(--green)}
+.button{font-family:var(--font-display);font-weight:700;font-size:15px;letter-spacing:.01em;background:var(--brand);color:var(--ink);border:1.5px solid transparent;border-radius:var(--radius-pill);padding:14px 26px;display:inline-flex;align-items:center;justify-content:center;gap:24px;cursor:pointer}
+.button:hover{background:var(--ink);color:var(--paper)}
 .button:disabled{opacity:.65;cursor:default}
-.secondary,.danger{font-family:var(--font-display);font-weight:700;border:1px solid var(--line);background:var(--card);border-radius:9px;padding:12px;cursor:pointer}
-.danger{color:var(--red)}
+.secondary,.danger{font-family:var(--font-display);font-weight:700;font-size:15px;border:1.5px solid rgba(14,30,30,.25);background:transparent;color:var(--ink);border-radius:var(--radius-pill);padding:12px 24px;cursor:pointer}
+.secondary:hover,.danger:hover{border-color:var(--ink)}
+.danger{color:var(--fail);border-color:var(--fail-line)}
 .full{width:100%;margin-top:16px}
 
 /* --- panels --- */
 .contentGrid{display:grid;grid-template-columns:minmax(0,2fr) minmax(290px,1fr);gap:22px;align-items:start}
-.panel{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:28px;margin-bottom:22px;box-shadow:var(--shadow-soft)}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:var(--radius-card);padding:28px;margin-bottom:22px;box-shadow:var(--shadow-soft)}
 .panel h2{font-size:22px;margin:7px 0}
 .subtle{font-size:12px;color:var(--muted)}
 .provenance{position:relative;margin-top:25px}
@@ -173,9 +193,9 @@ summary{font-size:13px;font-weight:700;cursor:pointer}
 .checks li{display:flex;gap:10px;padding:8px 0;font-size:12px}
 .checks li span{display:block}
 .checks li small{display:block;color:var(--muted);margin-top:3px}
-.checks .pass b{color:var(--green)}
-.checks .warning b{color:var(--amber)}
-.checks .fail b{color:var(--red)}
+.checks .pass b{color:var(--ok)}
+.checks .warning b{color:var(--warn)}
+.checks .fail b{color:var(--fail)}
 
 /* --- evidence confidence --- */
 .score{text-align:center}
@@ -200,15 +220,15 @@ summary{font-size:13px;font-weight:700;cursor:pointer}
 .documentTitle small{color:var(--muted);margin-top:4px}
 .formGrid label{font-family:var(--font-mono);font-size:10px;letter-spacing:var(--track-label-sm);text-transform:uppercase;color:var(--muted)}
 .formGrid input{width:100%;margin-top:5px;border:1px solid var(--line);padding:10px;border-radius:7px;background:var(--field);color:var(--ink)}
-.aiNote{display:flex;justify-content:space-between;background:var(--green-tint);border-radius:8px;padding:12px;font-family:var(--font-mono);font-size:11px}
+.aiNote{display:flex;justify-content:space-between;background:var(--ok-quiet);border-radius:8px;padding:12px;font-family:var(--font-mono);font-size:11px}
 .aiNote span{color:var(--muted)}
 .uploadPanel{display:block}
 .filePicker{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:18px;padding:14px 16px;border:1px dashed var(--line);border-radius:9px;background:var(--field);cursor:pointer}
 .filePicker input{max-width:50%}
 .uploadActions{display:flex;flex-wrap:wrap;gap:12px;margin-top:18px}
-.errorMessage{display:flex;flex-direction:column;gap:8px;margin-top:18px;padding:14px 16px;border:1px solid var(--red-line);border-left:3px solid var(--red);border-radius:8px;background:var(--red-field);color:var(--red);font-size:13px}
+.errorMessage{display:flex;flex-direction:column;gap:8px;margin-top:18px;padding:14px 16px;border:1px solid var(--fail-line);border-left:3px solid var(--fail);border-radius:8px;background:var(--fail-field);color:var(--fail);font-size:13px}
 .errorMessage b{font-size:13px}
-.errorMessage span{color:var(--red-ink)}
+.errorMessage span{color:var(--fail-ink)}
 .errorMessage .secondary{align-self:flex-start}
 
 /* --- verifier workspace --- */
@@ -218,11 +238,11 @@ summary{font-size:13px;font-weight:700;cursor:pointer}
 .reviewFacts>div>span:last-child{font-size:13px;font-weight:700}
 .reviewFacts small{display:block;color:var(--muted);font-weight:400;margin-top:3px}
 .decision>p{color:var(--muted);font-size:13px;line-height:1.55}
-.txState{display:flex;min-height:190px;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:12px;background:var(--green-field);border-radius:10px;padding:20px}
+.txState{display:flex;min-height:190px;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:12px;background:var(--ok-quiet);border-radius:10px;padding:20px}
 .txState span{font-family:var(--font-mono);font-size:11px;color:var(--muted)}
-.txState.success{background:var(--green-wash);color:var(--green)}
-.txState.failure{background:var(--red-field);color:var(--red)}
-.spinner{width:30px;height:30px;border:3px solid var(--green-track);border-top-color:var(--green);border-radius:50%;animation:spin 1s linear infinite}
+.txState.success{background:var(--ok-wash);color:var(--ok)}
+.txState.failure{background:var(--fail-field);color:var(--fail)}
+.spinner{width:30px;height:30px;border:3px solid var(--line);border-top-color:var(--brand);border-radius:50%;animation:spin 1s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 
 /* --- authentication --- */
@@ -234,7 +254,7 @@ summary{font-size:13px;font-weight:700;cursor:pointer}
 .headerRight{display:flex;align-items:center;gap:14px}
 .account{display:flex;align-items:center;gap:12px;font-size:12px}
 .account small{display:block;color:var(--muted)}
-.account .secondary,.headerRight .secondary{padding:8px 12px;font-size:12px;border-radius:8px;text-decoration:none;display:inline-block}
+.account .secondary,.headerRight .secondary{padding:8px 16px;font-size:13px;border-radius:var(--radius-pill);text-decoration:none;display:inline-block}
 
 /* --- financial ledger --- */
 .ledger{display:flex;flex-direction:column;gap:12px;margin-top:20px}
@@ -246,8 +266,8 @@ summary{font-size:13px;font-weight:700;cursor:pointer}
 .ledgerFoot{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:12px}
 .ledgerFoot .subtle{font-size:11px}
 .allocation{margin-top:14px}
-.meter{height:8px;border-radius:5px;background:var(--green-rule);overflow:hidden;margin:8px 0}
-.meter span{display:block;height:100%;background:var(--green)}
+.meter{height:8px;border-radius:5px;background:var(--ok-rule);overflow:hidden;margin:8px 0}
+.meter span{display:block;height:100%;background:var(--ok)}
 /* The generic metrics strip normally sits at page level and centers itself with viewport
    margins. On the money-trail page it is already inside `.inspector`; applying those margins
    a second time squeezed four columns into roughly one third of the available width. */
@@ -261,18 +281,18 @@ summary{font-size:13px;font-weight:700;cursor:pointer}
 .chainStep{position:relative;padding:0 0 0 27px}
 .chainStep::before{content:"";position:absolute;left:5px;top:14px;bottom:0;border-left:1px solid var(--line)}
 .chainStep:last-child::before{display:none}
-.chainStep[data-attested=false]::before{border-left:1px dashed var(--amber)}
-.chainDot{position:absolute;left:0;top:9px;width:11px;height:11px;border-radius:50%;border:1px solid var(--green);background:var(--card)}
+.chainStep[data-attested=false]::before{border-left:1px dashed var(--warn)}
+.chainDot{position:absolute;left:0;top:9px;width:11px;height:11px;border-radius:50%;border:1px solid var(--ok);background:var(--card)}
 .chainRecord{display:flex;flex-direction:column;gap:2px;padding:2px 0}
-.chainRecord small{font-family:var(--font-mono);color:var(--green);font-weight:600;font-size:9px;letter-spacing:var(--track-label-sm);text-transform:uppercase}
+.chainRecord small{font-family:var(--font-mono);color:var(--ok);font-weight:600;font-size:9px;letter-spacing:var(--track-label-sm);text-transform:uppercase}
 .chainRecord strong{font-size:14px;line-height:1.35}
 .chainRecord span{font-size:11px;color:var(--muted)}
 .chainLink{margin:0;padding:9px 0 15px;font-size:11px;color:var(--muted)}
 .chainLink i{font-style:italic}
-.chainStep[data-attested=false] .chainLink{color:var(--amber)}
-.chainBranch{display:flex;flex-direction:column;gap:2px;margin:9px 0 0 14px;padding:9px 13px;border-left:2px solid var(--green-wash);background:var(--green-quiet);border-radius:0 7px 7px 0;color:var(--ink);text-decoration:none}
-.chainBranch:hover{border-left-color:var(--green)}
-.chainBranch small{font-family:var(--font-mono);color:var(--green);font-weight:600;font-size:9px;letter-spacing:var(--track-label-sm);text-transform:uppercase}
+.chainStep[data-attested=false] .chainLink{color:var(--warn)}
+.chainBranch{display:flex;flex-direction:column;gap:2px;margin:9px 0 0 14px;padding:9px 13px;border-left:2px solid var(--ok-wash);background:var(--ok-quiet);border-radius:0 7px 7px 0;color:var(--ink);text-decoration:none}
+.chainBranch:hover{border-left-color:var(--ok)}
+.chainBranch small{font-family:var(--font-mono);color:var(--ok);font-weight:600;font-size:9px;letter-spacing:var(--track-label-sm);text-transform:uppercase}
 .chainBranch strong{font-size:12px}
 .chainBranch span{font-size:10px;color:var(--muted)}
 .chainOrphans{list-style:none;margin:16px 0 0;padding:16px 0 0;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:12px}
@@ -288,9 +308,9 @@ summary{font-size:13px;font-weight:700;cursor:pointer}
 .integrityHeadline{margin:0;font-family:var(--font-display);font-weight:700;letter-spacing:var(--track-display);font-size:17px;line-height:1.35}
 /* Stroke only, no fill: the seal on a letter, not a badge on a dashboard. Its
    space is reserved so the sentence beside it does not shift when it lands. */
-.seal{flex:none;display:grid;place-items:center;width:33px;height:33px;border:1px solid var(--green);border-radius:50%;visibility:hidden}
+.seal{flex:none;display:grid;place-items:center;width:33px;height:33px;border:1px solid var(--ok);border-radius:50%;visibility:hidden}
 .seal[data-shown=true]{visibility:visible}
-.seal i{font-family:var(--font-display);font-style:normal;font-weight:700;font-size:14px;color:var(--green)}
+.seal i{font-family:var(--font-display);font-style:normal;font-weight:700;font-size:14px;color:var(--ok)}
 .hashPair{margin:12px 0;overflow-x:auto}
 .hashPair>div{display:grid;grid-template-columns:max-content;gap:2px}
 .hashPair span{font-family:var(--font-mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600}
@@ -304,30 +324,30 @@ summary{font-size:13px;font-weight:700;cursor:pointer}
    component settles in a single step and none of this runs. */
 .checkWork{margin:10px 0 0;font-family:var(--font-mono);font-size:11px;color:var(--muted)}
 .hashPair code span{transition:color .12s linear}
-.hashPair code span.agrees{color:var(--green)}
-.hashVerdict{display:flex;align-items:center;gap:9px;margin:7px 0 0;font-family:var(--font-mono);font-size:11px;color:var(--green);font-weight:600}
-.hashBracket{width:34px;height:1px;background:var(--green)}
+.hashPair code span.agrees{color:var(--ok)}
+.hashVerdict{display:flex;align-items:center;gap:9px;margin:7px 0 0;font-family:var(--font-mono);font-size:11px;color:var(--ok);font-weight:600}
+.hashBracket{width:34px;height:1px;background:var(--ok)}
 @media (prefers-reduced-motion:reduce){.hashPair code span{transition:none}}
 
 /* --- how it works --- */
 /* The opening sentence claims every figure leads to its records. An underline is what
    keeps that promise; without it the links are indistinguishable from the prose. */
-.hero h1 a{text-decoration:underline;text-decoration-thickness:1.5px;text-underline-offset:8px;text-decoration-color:var(--green-underline)}
-.hero h1 a:hover{color:var(--green);text-decoration-color:var(--green)}
+.hero h1 a{text-decoration:underline;text-decoration-thickness:1.5px;text-underline-offset:8px;text-decoration-color:var(--brand-rule)}
+.hero h1 a:hover{color:var(--brand-ink);text-decoration-color:var(--brand)}
 .prose h3{font-size:18px;margin:22px 0 6px}
 .prose .panel>p.subtle{font-size:13px;line-height:1.65;max-width:68ch}
 .aboutChain{list-style:none;margin:20px 0 0;padding:0;counter-reset:stage}
 .aboutChain li{position:relative;padding:0 0 18px 27px;counter-increment:stage}
 .aboutChain li::before{content:"";position:absolute;left:5px;top:14px;bottom:0;border-left:1px solid var(--line)}
 .aboutChain li:last-child::before{display:none}
-.aboutChain li::after{content:"";position:absolute;left:0;top:4px;width:11px;height:11px;border-radius:50%;border:1px solid var(--green);background:var(--card)}
+.aboutChain li::after{content:"";position:absolute;left:0;top:4px;width:11px;height:11px;border-radius:50%;border:1px solid var(--ok);background:var(--card)}
 .aboutChain b{display:block;font-size:14px}
 .aboutChain span{font-size:12px;color:var(--muted)}
 .aboutQuestions{margin:18px 0 0}
 .aboutQuestions>div{border-top:1px solid var(--line);padding:13px 0}
 .aboutQuestions dt{font-size:14px;font-weight:700}
-.aboutQuestions dt a{text-decoration:underline;text-decoration-color:var(--green-underline);text-underline-offset:4px}
-.aboutQuestions dt a:hover{color:var(--green)}
+.aboutQuestions dt a{text-decoration:underline;text-decoration-color:var(--brand-rule);text-underline-offset:4px}
+.aboutQuestions dt a:hover{color:var(--brand-ink)}
 .aboutQuestions dd{margin:4px 0 0;font-size:12px;color:var(--muted)}
 .aboutSplit{display:grid;grid-template-columns:1fr 1fr;gap:26px;margin-top:18px}
 .aboutSplit ul{margin:8px 0 0;padding-left:18px;font-size:12px;color:var(--muted);line-height:1.6}
@@ -338,7 +358,7 @@ footer{max-width:1160px;margin:0 auto;margin-inline:var(--gutter);padding:28px 0
 
 /* --- focus visibility: the stylesheet previously had none, while resetting link
    underlines and button borders --- */
-:focus-visible{outline:2px solid var(--green);outline-offset:2px;border-radius:4px}
+:focus-visible{outline:2px solid var(--brand);outline-offset:2px;border-radius:4px}
 .programVisual :focus-visible,.button:focus-visible{outline-color:var(--card);outline-offset:3px}
 
 /* --- responsive --- */
