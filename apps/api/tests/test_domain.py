@@ -32,7 +32,11 @@ from impactgraph.hashing import (
     sha256_bytes,
     verification_bundle_hash,
 )
-from impactgraph.verification import VerificationContext, VerificationPolicyService
+from impactgraph.verification import (
+    ConfirmedVerification,
+    VerificationContext,
+    VerificationPolicyService,
+)
 
 
 def make_claim() -> Claim:
@@ -100,12 +104,20 @@ def test_verified_claim_can_be_challenged_or_revoked_without_rewriting_history()
 def test_policy_never_uses_ai_confidence_and_requires_confirmation_and_bundle():
     claim = make_claim()
     context = VerificationContext(
-        True, True, True, True, True, False, None, "sha256:bundle", "operator", "verifier"
+        True, True, True, True, True, (), 1, "sha256:bundle", "operator"
     )
     decision = VerificationPolicyService().evaluate(claim, context)
     assert decision.status == ClaimStatus.VERIFICATION_PENDING
     context = VerificationContext(
-        True, True, True, True, True, True, "sha256:bundle", "sha256:bundle", "operator", "verifier"
+        True,
+        True,
+        True,
+        True,
+        True,
+        (ConfirmedVerification("verifier", "sha256:bundle"),),
+        1,
+        "sha256:bundle",
+        "operator",
     )
     assert VerificationPolicyService().evaluate(claim, context).status == ClaimStatus.VERIFIED
 

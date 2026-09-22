@@ -640,7 +640,7 @@ class TransparencyReadRepository:
 
     def verification(self, claim_id: str) -> dict[str, Any]:
         claim = self._claim(claim_id)
-        decision, evidence_records, verifier = evaluate_persisted_claim(self.session, claim)
+        decision, evidence_records, verifiers = evaluate_persisted_claim(self.session, claim)
         operator = next(
             (item for item in decision.requirements if item.requirement == "OPERATOR_ATTESTATION"),
             None,
@@ -654,7 +654,7 @@ class TransparencyReadRepository:
             ),
             integrity=bool(evidence_records) and integrity,
             operator=operator is not None and operator.status.value == "PASS",
-            verifier=verifier is not None,
+            verifier=bool(verifiers),
             location_points=7,
             consistency=True,
         )

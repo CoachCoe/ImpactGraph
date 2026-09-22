@@ -13,10 +13,16 @@ from __future__ import annotations
 import pytest
 
 from impactgraph.domain import Claim, ClaimStatus, Result
-from impactgraph.verification import VerificationContext, VerificationPolicyService
+from impactgraph.verification import (
+    ConfirmedVerification,
+    VerificationContext,
+    VerificationPolicyService,
+)
 
 BUNDLE = "sha256:" + "a" * 64
 OTHER_BUNDLE = "sha256:" + "b" * 64
+VERIFIER = "org-impactverify"
+OPERATOR = "org-global-water"
 
 
 def context(**overrides) -> VerificationContext:
@@ -26,11 +32,10 @@ def context(**overrides) -> VerificationContext:
         "evidence_integrity": True,
         "reconciliation_passes": True,
         "operator_attestation_confirmed": True,
-        "verifier_attestation_confirmed": True,
-        "attestation_bundle_hash": BUNDLE,
+        "verifications": (ConfirmedVerification(VERIFIER, BUNDLE),),
+        "required_verifications": 1,
         "current_bundle_hash": BUNDLE,
-        "operator_id": "org-global-water",
-        "verifier_id": "org-impactverify",
+        "operator_id": OPERATOR,
     }
     return VerificationContext(**{**satisfied, **overrides})
 
@@ -61,9 +66,11 @@ BREAKS = [
     ("EVIDENCE_INTEGRITY", {"evidence_integrity": False}),
     ("FINANCIAL_RECONCILIATION", {"reconciliation_passes": False}),
     ("OPERATOR_ATTESTATION", {"operator_attestation_confirmed": False}),
-    ("INDEPENDENT_VERIFICATION", {"verifier_attestation_confirmed": False}),
-    ("BUNDLE_CURRENT", {"attestation_bundle_hash": OTHER_BUNDLE}),
-    ("ACTOR_SEPARATION", {"verifier_id": "org-global-water"}),
+    # Raising the bar rather than removing the attestation: an empty set would fail
+    # BUNDLE_CURRENT too, and the table's contract is one requirement at a time.
+    ("INDEPENDENT_VERIFICATION", {"required_verifications": 2}),
+    ("BUNDLE_CURRENT", {"verifications": (ConfirmedVerification(VERIFIER, OTHER_BUNDLE),)}),
+    ("ACTOR_SEPARATION", {"verifications": (ConfirmedVerification(OPERATOR, BUNDLE),)}),
 ]
 
 
@@ -94,12 +101,85 @@ def test_breaking_one_requirement_breaks_only_that_one(requirement: str, break_i
 
 
 def test_an_absent_attestation_is_not_reported_as_a_stale_one():
-    """With no attestation at all, attestation_bundle_hash is None and BUNDLE_CURRENT
-    failed with 'Attestation does not cover the current evidence bundle' -- a sentence
-    asserting an attestation exists and is out of date. None exists."""
-    decision = decide(verifier_attestation_confirmed=False, attestation_bundle_hash=None)
+    """With no attestation at all, BUNDLE_CURRENT failed with 'Attestation does not cover
+    the current evidence bundle' -- a sentence asserting an attestation exists and is out
+    of date. None exists."""
+    decision = decide(verifications=())
     bundle = next(
         item for item in decision.requirements if item.requirement == "BUNDLE_CURRENT"
     )
     assert "does not cover" not in bundle.reason.lower(), bundle.reason
     assert "no independent attestation" in bundle.reason.lower(), bundle.reason
+
+
+SECOND_VERIFIER = "org-secondopinion"
+
+
+def test_two_distinct_verifiers_on_the_current_bundle_meet_a_threshold_of_two():
+    decision = decide(
+        required_verifications=2,
+        verifications=(
+            ConfirmedVerification(VERIFIER, BUNDLE),
+            ConfirmedVerification(SECOND_VERIFIER, BUNDLE),
+        ),
+    )
+    assert decision.status == ClaimStatus.VERIFIED
+
+
+def test_a_stale_attestation_cannot_help_meet_the_threshold():
+    """Two attestations, one of them against evidence that has since changed.
+
+    Counting them equally would report two independent verifications of the current
+    bundle when only one verifier ever saw it. BUNDLE_CURRENT is `all`, not `any`,
+    precisely so the count cannot be padded with an attestation that is out of date.
+    """
+    decision = decide(
+        required_verifications=2,
+        verifications=(
+            ConfirmedVerification(VERIFIER, BUNDLE),
+            ConfirmedVerification(SECOND_VERIFIER, OTHER_BUNDLE),
+        ),
+    )
+    failed = {item.requirement for item in decision.requirements if item.status == Result.FAIL}
+    assert "BUNDLE_CURRENT" in failed
+    assert decision.status != ClaimStatus.VERIFIED
+
+
+def test_the_same_verifier_twice_does_not_meet_a_threshold_of_two():
+    """Otherwise one organisation signing twice would look like independent corroboration."""
+    decision = decide(
+        required_verifications=2,
+        verifications=(
+            ConfirmedVerification(VERIFIER, BUNDLE),
+            ConfirmedVerification(VERIFIER, BUNDLE),
+        ),
+    )
+    failed = {item.requirement for item in decision.requirements if item.status == Result.FAIL}
+    assert "ACTOR_SEPARATION" in failed
+    assert decision.status != ClaimStatus.VERIFIED
+
+
+def test_the_operator_cannot_make_up_the_numbers():
+    decision = decide(
+        required_verifications=2,
+        verifications=(
+            ConfirmedVerification(VERIFIER, BUNDLE),
+            ConfirmedVerification(OPERATOR, BUNDLE),
+        ),
+    )
+    failed = {item.requirement for item in decision.requirements if item.status == Result.FAIL}
+    assert "ACTOR_SEPARATION" in failed
+    assert decision.status != ClaimStatus.VERIFIED
+
+
+def test_one_verification_still_verifies_at_the_default_threshold():
+    """The default is 1, so every program that predates the threshold behaves as before."""
+    assert decide().status == ClaimStatus.VERIFIED
+
+
+def test_the_requirement_reason_names_the_shortfall():
+    decision = decide(required_verifications=3)
+    independent = next(
+        item for item in decision.requirements if item.requirement == "INDEPENDENT_VERIFICATION"
+    )
+    assert "1 of 3" in independent.reason
