@@ -39,6 +39,38 @@ class VerificationContext:
     current_bundle_hash: str
     operator_id: str
 
+    @property
+    def _current(self) -> tuple[ConfirmedVerification, ...]:
+        """Attestations covering the evidence as it stands, from anyone."""
+        return tuple(
+            item for item in self.verifications if item.bundle_hash == self.current_bundle_hash
+        )
+
+    @property
+    def qualifying_issuers(self) -> frozenset[str]:
+        """Who independently verified the current bundle.
+
+        A set, so one organisation attesting twice cannot make up the numbers, and the
+        operator is excluded rather than counted and then objected to afterwards.
+        """
+        return frozenset(
+            item.issuer_id for item in self._current if item.issuer_id != self.operator_id
+        )
+
+    @property
+    def superseded_verifications(self) -> int:
+        """Attestations that covered an earlier bundle, so are not counted."""
+        return len(self.verifications) - len(self._current)
+
+    @property
+    def operator_verified(self) -> bool:
+        return any(item.issuer_id == self.operator_id for item in self._current)
+
+    @property
+    def duplicate_verifier(self) -> bool:
+        issuers = [item.issuer_id for item in self._current]
+        return len(issuers) != len(set(issuers))
+
 
 class VerificationPolicyService:
     version = "1.0"
@@ -79,38 +111,17 @@ class VerificationPolicyService:
             ),
             self._require(
                 "INDEPENDENT_VERIFICATION",
-                len(context.verifications) >= context.required_verifications,
+                len(context.qualifying_issuers) >= context.required_verifications,
                 self._verification_count(context, "confirmed onchain"),
                 self._verification_count(context, "confirmed onchain so far"),
             ),
-            self._require(
-                "BUNDLE_CURRENT",
-                bool(context.verifications)
-                and all(
-                    item.bundle_hash == context.current_bundle_hash
-                    for item in context.verifications
-                ),
-                "Every attestation is bound to the current verification bundle",
-                # Absent is not stale. With no attestation at all this read "Attestation
-                # does not cover the current evidence bundle", a sentence asserting that
-                # one exists and has gone out of date, on the panel whose only job is to
-                # state accurately why a claim is not verified.
-                #
-                # `all` rather than `any`: a stale attestation beside a fresh one would
-                # otherwise meet a threshold of two while only one verifier ever saw the
-                # evidence being verified.
-                "No independent attestation has been made yet"
-                if not context.verifications
-                else "An attestation does not cover the current evidence bundle",
-            ),
+            self._bundle_current(context),
             self._require(
                 "ACTOR_SEPARATION",
-                all(item.issuer_id != context.operator_id for item in context.verifications)
-                and len({item.issuer_id for item in context.verifications})
-                == len(context.verifications),
+                not context.operator_verified and not context.duplicate_verifier,
                 "Verifiers are distinct from the operator and from each other",
                 "Operator cannot independently verify its own claim"
-                if any(item.issuer_id == context.operator_id for item in context.verifications)
+                if context.operator_verified
                 else "The same verifier cannot count towards the threshold twice",
             ),
         )
@@ -128,9 +139,47 @@ class VerificationPolicyService:
         return PolicyDecision(claim.id, status, self.version, items)
 
     @staticmethod
+    def _bundle_current(context: VerificationContext) -> PolicyRequirement:
+        """Whether the attestations being counted cover the evidence as it stands now.
+
+        A stale attestation beside enough current ones is history, not an objection: it
+        verified an earlier bundle and says nothing about this one. It is reported as a
+        warning so a reader can see it, and does not block a claim that current verifiers
+        have independently met the threshold on.
+        """
+        if not context.verifications:
+            # Absent is not stale. This once read "Attestation does not cover the current
+            # evidence bundle", a sentence asserting one exists and has gone out of date,
+            # on the panel whose only job is to say accurately why a claim is not verified.
+            return PolicyRequirement(
+                "BUNDLE_CURRENT", Result.FAIL, "No independent attestation has been made yet"
+            )
+        if not context.qualifying_issuers:
+            return PolicyRequirement(
+                "BUNDLE_CURRENT",
+                Result.FAIL,
+                "No attestation covers the current evidence bundle",
+            )
+        if context.superseded_verifications:
+            return PolicyRequirement(
+                "BUNDLE_CURRENT",
+                Result.WARNING,
+                f"{context.superseded_verifications} earlier attestation(s) cover a "
+                "previous evidence bundle and are not counted",
+            )
+        return PolicyRequirement(
+            "BUNDLE_CURRENT",
+            Result.PASS,
+            "Every attestation is bound to the current verification bundle",
+        )
+
+    @staticmethod
     def _verification_count(context: VerificationContext, suffix: str) -> str:
+        # The qualifying count, not the total: a reason reading "2 of 2" beside a FAIL,
+        # because one of the two was stale or was the operator, is the panel contradicting
+        # its own verdict.
         return (
-            f"{len(context.verifications)} of {context.required_verifications} required "
+            f"{len(context.qualifying_issuers)} of {context.required_verifications} required "
             f"independent verifications {suffix}"
         )
 
@@ -225,6 +274,8 @@ def evaluate_persisted_claim(
         session.scalars(
             select(AttestationRecord).where(
                 AttestationRecord.subject_id == claim.external_id,
+                AttestationRecord.subject_type == "CLAIM",
+                AttestationRecord.revoked_by_attestation_id.is_(None),
                 AttestationRecord.status.in_(ATTESTATION_STANDS),
             )
         )

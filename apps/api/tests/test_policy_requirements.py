@@ -59,25 +59,52 @@ def decide(**overrides):
     return VerificationPolicyService().evaluate(claim(), context(**overrides))
 
 
-# One requirement, the single context change that must break it, in the policy's own order.
+# The policy's requirement list, in its own order.
+REQUIREMENTS = [
+    "PROVENANCE_COMPLETE",
+    "EVIDENCE_REGISTERED",
+    "EVIDENCE_INTEGRITY",
+    "FINANCIAL_RECONCILIATION",
+    "OPERATOR_ATTESTATION",
+    "INDEPENDENT_VERIFICATION",
+    "BUNDLE_CURRENT",
+    "ACTOR_SEPARATION",
+]
+
+# One requirement, the single context change that must break it alone.
+#
+# BUNDLE_CURRENT is absent by design rather than by omission. Since only attestations on
+# the current bundle are counted, every way of making it fail -- no attestation at all, or
+# none covering the current bundle -- also starves INDEPENDENT_VERIFICATION. It is nested
+# under that requirement, not independent of it, and its own behaviour is pinned by the
+# BUNDLE_CURRENT tests below.
 BREAKS = [
     ("PROVENANCE_COMPLETE", {"provenance_complete": False}),
     ("EVIDENCE_REGISTERED", {"evidence_registered": False}),
     ("EVIDENCE_INTEGRITY", {"evidence_integrity": False}),
     ("FINANCIAL_RECONCILIATION", {"reconciliation_passes": False}),
     ("OPERATOR_ATTESTATION", {"operator_attestation_confirmed": False}),
-    # Raising the bar rather than removing the attestation: an empty set would fail
-    # BUNDLE_CURRENT too, and the table's contract is one requirement at a time.
+    # Raising the bar rather than removing the attestation, which would take
+    # BUNDLE_CURRENT down with it.
     ("INDEPENDENT_VERIFICATION", {"required_verifications": 2}),
-    ("BUNDLE_CURRENT", {"verifications": (ConfirmedVerification(VERIFIER, OTHER_BUNDLE),)}),
-    ("ACTOR_SEPARATION", {"verifications": (ConfirmedVerification(OPERATOR, BUNDLE),)}),
+    # A surplus attestation from the operator: the threshold is still met by the genuine
+    # verifier, so only the separation rule objects.
+    (
+        "ACTOR_SEPARATION",
+        {
+            "verifications": (
+                ConfirmedVerification(VERIFIER, BUNDLE),
+                ConfirmedVerification(OPERATOR, BUNDLE),
+            )
+        },
+    ),
 ]
 
 
 def test_everything_satisfied_verifies():
     decision = decide()
     assert decision.status == ClaimStatus.VERIFIED
-    assert [item.requirement for item in decision.requirements] == [name for name, _ in BREAKS], (
+    assert [item.requirement for item in decision.requirements] == REQUIREMENTS, (
         "the policy's requirement list changed; this table must change with it"
     )
 
@@ -129,9 +156,9 @@ def test_two_distinct_verifiers_on_the_current_bundle_meet_a_threshold_of_two():
 def test_a_stale_attestation_cannot_help_meet_the_threshold():
     """Two attestations, one of them against evidence that has since changed.
 
-    Counting them equally would report two independent verifications of the current
-    bundle when only one verifier ever saw it. BUNDLE_CURRENT is `all`, not `any`,
-    precisely so the count cannot be padded with an attestation that is out of date.
+    Counting both would report two independent verifications of the current bundle when
+    only one verifier ever saw it. The stale one is not counted, so the threshold is
+    short by one and the claim does not verify.
     """
     decision = decide(
         required_verifications=2,
@@ -140,8 +167,39 @@ def test_a_stale_attestation_cannot_help_meet_the_threshold():
             ConfirmedVerification(SECOND_VERIFIER, OTHER_BUNDLE),
         ),
     )
-    failed = {item.requirement for item in decision.requirements if item.status == Result.FAIL}
-    assert "BUNDLE_CURRENT" in failed
+    independent = next(
+        item for item in decision.requirements if item.requirement == "INDEPENDENT_VERIFICATION"
+    )
+    assert independent.status == Result.FAIL
+    assert "1 of 2" in independent.reason
+    assert decision.status != ClaimStatus.VERIFIED
+
+
+def test_a_stale_attestation_does_not_block_a_claim_others_have_verified():
+    """History, not an objection.
+
+    An attestation against a superseded bundle verified earlier evidence and says nothing
+    about this one. Treating it as a failure would let any claim be frozen by its own
+    history the moment its evidence was corrected.
+    """
+    decision = decide(
+        required_verifications=1,
+        verifications=(
+            ConfirmedVerification(VERIFIER, BUNDLE),
+            ConfirmedVerification(SECOND_VERIFIER, OTHER_BUNDLE),
+        ),
+    )
+    bundle = next(item for item in decision.requirements if item.requirement == "BUNDLE_CURRENT")
+    assert bundle.status == Result.WARNING
+    assert "not counted" in bundle.reason
+    assert decision.status == ClaimStatus.VERIFIED
+
+
+def test_only_stale_attestations_is_reported_as_such():
+    decision = decide(verifications=(ConfirmedVerification(VERIFIER, OTHER_BUNDLE),))
+    bundle = next(item for item in decision.requirements if item.requirement == "BUNDLE_CURRENT")
+    assert bundle.status == Result.FAIL
+    assert "covers the current evidence bundle" in bundle.reason
     assert decision.status != ClaimStatus.VERIFIED
 
 
