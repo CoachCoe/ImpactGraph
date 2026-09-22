@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from functools import lru_cache
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
@@ -534,17 +535,24 @@ def _probe_database() -> None:
         session.execute(text("SELECT 1"))
 
 
-def _probe_chain() -> None:
-    if not settings.registry_address:
-        raise RuntimeError("no registry address is configured")
+@lru_cache(maxsize=1)
+def _readiness_web3():
     from web3 import Web3
 
-    web3 = Web3(
+    return Web3(
         Web3.HTTPProvider(
             settings.rpc_url, request_kwargs={"timeout": READINESS_TIMEOUT_SECONDS}
         )
     )
-    reported = web3.eth.chain_id
+
+
+def _probe_chain() -> None:
+    if not settings.registry_address:
+        raise RuntimeError("no registry address is configured")
+    # The request timeout does not bound name resolution, so a stalled DNS lookup can
+    # still hold a worker. One reused provider keeps that bounded to one socket rather
+    # than one per probe.
+    reported = _readiness_web3().eth.chain_id
     if reported != settings.chain_id:
         # Reachable is not the same as correct. A wallet or a worker pointed at the wrong
         # chain is the failure this catches, and it looks healthy by every other measure.
