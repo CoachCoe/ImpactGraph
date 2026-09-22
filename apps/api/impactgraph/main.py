@@ -24,6 +24,7 @@ from prometheus_client import CONTENT_TYPE_LATEST
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select, text
 
+from .attribution import MixedCurrencyError, funding_attribution
 from .auth import (
     SESSION_COOKIE,
     SESSION_LIFETIME,
@@ -479,6 +480,26 @@ def program_financials(program_id: str):
         raise HTTPException(409, "Financial records require PERSISTENCE_MODE=postgres")
     with session_factory() as session:
         return financial_summary(session, program_id)
+
+
+@app.get("/financial/funding/{funding_id}/attribution")
+def funding_attribution_view(funding_id: str):
+    # Public, like the rest of the money trail: following a contribution to what it
+    # reached is the question this product exists to answer.
+    if session_factory is None:
+        raise HTTPException(409, "Attribution requires PERSISTENCE_MODE=postgres")
+    with session_factory() as session:
+        try:
+            return funding_attribution(session, funding_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except MixedCurrencyError as exc:
+            # Refusing beats presenting a total that silently added two currencies.
+            # Conversion with a traceable rate belongs to the financial adapter.
+            raise HTTPException(
+                409,
+                detail={"code": "MIXED_CURRENCY", "message": str(exc)},
+            ) from exc
 
 
 @app.get("/financial/transactions/{transaction_id}")

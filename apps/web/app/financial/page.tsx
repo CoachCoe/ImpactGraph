@@ -120,13 +120,13 @@ export default async function FinancialPage() {
           <section className="panel">
             <span className="eyebrow">FUNDING</span>
             {summary.funding.map((item) => (
-              <div className="scoreRow" key={item.id}>
+              <Link className="scoreRow" href={`/funding/${item.id}`} key={item.id}>
                 <span>
                   {item.funder}
-                  <small>{item.receivedOn}</small>
+                  <small>{item.receivedOn} · follow this contribution →</small>
                 </span>
                 <b>{formatMoney(item.amount, { maximumFractionDigits: 0 })}</b>
-              </div>
+              </Link>
             ))}
           </section>
 

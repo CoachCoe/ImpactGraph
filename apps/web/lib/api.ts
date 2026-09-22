@@ -36,12 +36,30 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 /** Server-side read. Returns null when the resource is absent or the API is unreachable. */
 export async function readFromApi<T>(path: string): Promise<T | null> {
+  const result = await readFromApiResult<T>(path);
+  return result.state === "ok" ? result.data : null;
+}
+
+export type ApiRead<T> =
+  | { state: "ok"; data: T }
+  | { state: "missing" }
+  | { state: "unavailable" };
+
+/**
+ * Server-side read that distinguishes an absent record from an absent server.
+ *
+ * `readFromApi` collapses the two, which is fine for a page that renders the same
+ * notice either way and wrong for one that would otherwise tell a visitor their record
+ * does not exist because the API is down.
+ */
+export async function readFromApiResult<T>(path: string): Promise<ApiRead<T>> {
   try {
     const response = await fetch(`${serverApiBase}${path}`, { cache: "no-store" });
-    if (!response.ok) return null;
-    return (await response.json()) as T;
+    if (response.status === 404) return { state: "missing" };
+    if (!response.ok) return { state: "unavailable" };
+    return { state: "ok", data: (await response.json()) as T };
   } catch {
     // The donor pages must still render when the API is down; callers show a notice.
-    return null;
+    return { state: "unavailable" };
   }
 }
