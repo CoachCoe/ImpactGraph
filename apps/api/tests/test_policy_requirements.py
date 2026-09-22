@@ -204,7 +204,11 @@ def test_only_stale_attestations_is_reported_as_such():
 
 
 def test_the_same_verifier_twice_does_not_meet_a_threshold_of_two():
-    """Otherwise one organisation signing twice would look like independent corroboration."""
+    """Otherwise one organisation signing twice would look like independent corroboration.
+
+    Counted by distinct issuer, so the repeat collapses rather than being rejected: the
+    threshold is simply not met.
+    """
     decision = decide(
         required_verifications=2,
         verifications=(
@@ -212,8 +216,36 @@ def test_the_same_verifier_twice_does_not_meet_a_threshold_of_two():
             ConfirmedVerification(VERIFIER, BUNDLE),
         ),
     )
-    failed = {item.requirement for item in decision.requirements if item.status == Result.FAIL}
-    assert "ACTOR_SEPARATION" in failed
+    independent = next(
+        item for item in decision.requirements if item.requirement == "INDEPENDENT_VERIFICATION"
+    )
+    assert independent.status == Result.FAIL
+    assert "1 of 2" in independent.reason
+    assert decision.status != ClaimStatus.VERIFIED
+
+
+def test_a_verifier_who_attested_twice_still_satisfies_a_threshold_of_one():
+    """A retry is not a second opinion, but neither is it an objection.
+
+    The verifier page sends a fresh idempotency key on each attempt, so one verifier
+    retrying leaves two confirmed attestations. Rejecting that combination failed a claim
+    the single-verifier policy had always verified.
+    """
+    decision = decide(
+        required_verifications=1,
+        verifications=(
+            ConfirmedVerification(VERIFIER, BUNDLE),
+            ConfirmedVerification(VERIFIER, BUNDLE),
+        ),
+    )
+    assert decision.status == ClaimStatus.VERIFIED
+
+
+def test_an_attestation_with_no_bundle_cannot_cover_a_claim_with_no_bundle():
+    decision = decide(
+        current_bundle_hash="",
+        verifications=(ConfirmedVerification(VERIFIER, ""),),
+    )
     assert decision.status != ClaimStatus.VERIFIED
 
 

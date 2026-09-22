@@ -16,6 +16,12 @@ const SCORE_LABELS: Record<string, string> = {
   evidenceConsistency: "Evidence consistency",
 };
 
+// A requirement can also warn: something a reader should see that does not stop the
+// claim verifying. Rendering anything that is not a pass as a red cross put a failure
+// mark beside a verified claim.
+const REQUIREMENT_TONE: Record<string, string> = { PASS: "pass", WARNING: "warning", FAIL: "fail" };
+const REQUIREMENT_MARK: Record<string, string> = { PASS: "✓", WARNING: "!", FAIL: "×" };
+
 const REQUIREMENT_LABELS: Record<string, string> = {
   PROVENANCE_COMPLETE: "Provenance is complete",
   EVIDENCE_REGISTERED: "Evidence is committed onchain",
@@ -186,9 +192,9 @@ export default async function ClaimInspector({ params }: { params: Promise<{ id:
               {verification?.requirements.map((requirement) => (
                 <li
                   key={requirement.requirement}
-                  className={requirement.status === "PASS" ? "pass" : "fail"}
+                  className={REQUIREMENT_TONE[requirement.status] ?? "fail"}
                 >
-                  <b aria-hidden>{requirement.status === "PASS" ? "✓" : "×"}</b>
+                  <b aria-hidden>{REQUIREMENT_MARK[requirement.status] ?? "×"}</b>
                   <span>
                     {REQUIREMENT_LABELS[requirement.requirement] ?? requirement.requirement}
                     <small>{requirement.reason}</small>

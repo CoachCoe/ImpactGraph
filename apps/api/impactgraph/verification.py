@@ -42,6 +42,10 @@ class VerificationContext:
     @property
     def _current(self) -> tuple[ConfirmedVerification, ...]:
         """Attestations covering the evidence as it stands, from anyone."""
+        if not self.current_bundle_hash:
+            # An attestation whose bundle hash is also empty would otherwise compare equal
+            # and count as covering a claim that has no bundle to cover.
+            return ()
         return tuple(
             item for item in self.verifications if item.bundle_hash == self.current_bundle_hash
         )
@@ -65,11 +69,6 @@ class VerificationContext:
     @property
     def operator_verified(self) -> bool:
         return any(item.issuer_id == self.operator_id for item in self._current)
-
-    @property
-    def duplicate_verifier(self) -> bool:
-        issuers = [item.issuer_id for item in self._current]
-        return len(issuers) != len(set(issuers))
 
 
 class VerificationPolicyService:
@@ -118,11 +117,9 @@ class VerificationPolicyService:
             self._bundle_current(context),
             self._require(
                 "ACTOR_SEPARATION",
-                not context.operator_verified and not context.duplicate_verifier,
-                "Verifiers are distinct from the operator and from each other",
-                "Operator cannot independently verify its own claim"
-                if context.operator_verified
-                else "The same verifier cannot count towards the threshold twice",
+                not context.operator_verified,
+                "Every counted verifier is independent of the operator",
+                "Operator cannot independently verify its own claim",
             ),
         )
         failed = any(item.status == Result.FAIL for item in items)
