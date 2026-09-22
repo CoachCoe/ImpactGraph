@@ -42,7 +42,7 @@ case "${1:-up}" in
       if [[ "$code" == "200" ]]; then printf '  ok    %s\n' "$1"
       else printf '  FAIL  %s (HTTP %s)\n' "$1" "${code:-none}"; fail=1; fi
     }
-    check "api health"         "$api/health"
+    check "api readiness"      "$api/health/ready"
     check "claim read model"   "$api/claims/claim-water-12-200"
     check "provenance graph"   "$api/claims/claim-water-12-200/provenance"
     check "money trail"        "$api/financial/programs/program-clean-water-kenya-2026"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
@@ -18,7 +19,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from .auth import (
     SESSION_COOKIE,
@@ -522,9 +523,76 @@ def import_financial_statement(
         return {"provider": financial_provider.name, **result.as_dict()}
 
 
+#: Readiness probes must not outlast the interval an orchestrator polls them on.
+READINESS_TIMEOUT_SECONDS = 3
+
+
+def _probe_database() -> None:
+    if session_factory is None:
+        raise RuntimeError("no database is configured")
+    with session_factory() as session:
+        session.execute(text("SELECT 1"))
+
+
+def _probe_chain() -> None:
+    if not settings.registry_address:
+        raise RuntimeError("no registry address is configured")
+    from web3 import Web3
+
+    web3 = Web3(
+        Web3.HTTPProvider(
+            settings.rpc_url, request_kwargs={"timeout": READINESS_TIMEOUT_SECONDS}
+        )
+    )
+    reported = web3.eth.chain_id
+    if reported != settings.chain_id:
+        # Reachable is not the same as correct. A wallet or a worker pointed at the wrong
+        # chain is the failure this catches, and it looks healthy by every other measure.
+        raise RuntimeError(f"chain reports {reported}, expected {settings.chain_id}")
+
+
+def _probe_evidence_storage() -> None:
+    root = settings.evidence_storage_path
+    # Accessibility only. A write probe would prove more and would also mutate the store
+    # this application promises never to alter outside an upload.
+    if not root.is_dir() or not os.access(root, os.R_OK | os.W_OK):
+        raise RuntimeError("evidence storage is not readable and writable")
+
+
+READINESS_PROBES = {
+    "database": _probe_database,
+    "chain": _probe_chain,
+    "evidenceStorage": _probe_evidence_storage,
+}
+
+
 @app.get("/health")
-def health():
+@app.get("/health/live")
+def health_live():
+    """Liveness: this process is serving. Deliberately touches nothing else.
+
+    The container HEALTHCHECK polls this. A dependency-aware probe there would let a
+    transient database or RPC fault mark the process for replacement, which fixes nothing
+    and loses whatever it was doing.
+    """
     return {"status": "ok", "mode": settings.demo_mode, "chainId": settings.chain_id}
+
+
+@app.get("/health/ready")
+def health_ready(response: Response):
+    """Readiness: the dependencies this API cannot serve without are answering."""
+    components: dict[str, Any] = {}
+    for name, probe in READINESS_PROBES.items():
+        try:
+            probe()
+            components[name] = {"status": "ok"}
+        except Exception as exc:  # noqa: BLE001 -- a probe reports, it does not raise
+            # The class, never the text: an RPC or database URL may embed credentials.
+            components[name] = {"status": "unavailable", "error": exc.__class__.__name__}
+    ready = all(item["status"] == "ok" for item in components.values())
+    if not ready:
+        response.status_code = 503
+    return {"status": "ready" if ready else "unavailable", "components": components}
 
 
 @app.get("/programs")

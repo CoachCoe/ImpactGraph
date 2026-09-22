@@ -19,7 +19,7 @@ export default defineConfig({
   webServer: [
     {
       command: "../api/.venv/bin/uvicorn impactgraph.main:app --app-dir ../api --host 127.0.0.1 --port 8000",
-      url: "http://127.0.0.1:8000/health",
+      url: "http://127.0.0.1:8000/health/ready",
       reuseExistingServer: true,
       timeout: 30_000,
     },

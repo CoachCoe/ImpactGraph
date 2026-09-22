@@ -111,7 +111,7 @@ case "${1:-release}" in
       if [[ "$code" == "$expected" ]]; then printf '  ok    %s\n' "$label"
       else printf '  FAIL  %s (HTTP %s)\n' "$label" "${code:-none}"; fail=1; fi
     }
-    check "api health"          "$api/health"
+    check "api readiness"       "$api/health/ready"
     check "program read model"  "$api/programs/program-clean-water-kenya-2026"
     check "claim read model"    "$api/claims/claim-water-12-200"
     check "provenance graph"    "$api/claims/claim-water-12-200/provenance"
