@@ -20,6 +20,7 @@ from .blockchain import (
     entity_id_bytes,
 )
 from .domain import BlockchainStatus, ClaimStatus, EvidenceWorkflowStatus
+from .metrics import chain_operations, outbox_submissions
 from .observability import correlation_context, logger
 from .persistence import (
     AttestationRecord,
@@ -127,6 +128,7 @@ class BlockchainOutboxWorker:
                 error_type=exc.__class__.__name__,
                 attempt=attempt,
             )
+            outbox_submissions.labels(topic=topic, outcome="failed").inc()
             return False
 
         with self.session_factory() as session, session.begin():
@@ -147,6 +149,7 @@ class BlockchainOutboxWorker:
         # After the block, so a rolled-back commit cannot leave a log line claiming a
         # transition that did not happen.
         log.info("outbox.submitted", topic=topic, entity_id=entity_id, transaction_hash=transaction_hash)
+        outbox_submissions.labels(topic=topic, outcome="submitted").inc()
         return True
 
     def observe_submitted(self, batch_size: int = 20) -> tuple[int, int]:
@@ -212,6 +215,7 @@ class BlockchainOutboxWorker:
             status=status,
             confirmations=confirmations,
         )
+        chain_operations.labels(operation_type=operation_type, status=status).inc()
         return BlockchainStatus(status)
 
     def _apply_observation(
