@@ -94,6 +94,10 @@ services:
       AI_PROVIDER: ${AI_PROVIDER:-mock}
     volumes:
       - evidence-data:/data/evidence
+    # Scraped separately from the API: the worker is its own process and its
+    # counters live in its own memory.
+    ports:
+      - "${WORKER_METRICS_PORT:-9100}:9100"
     restart: unless-stopped
 
   web:

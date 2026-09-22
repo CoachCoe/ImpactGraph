@@ -82,6 +82,7 @@ class Settings:
         "text/plain",
     )
     ai_provider: str = "mock"
+    worker_metrics_port: int = 9100
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -112,6 +113,7 @@ class Settings:
                 if item.strip()
             ),
             ai_provider=os.getenv("AI_PROVIDER", "mock"),
+            worker_metrics_port=int(os.getenv("WORKER_METRICS_PORT", "9100")),
         )
         if value.demo_mode == "sepolia" and value.chain_id != 11155111:
             raise ValueError("DEMO_MODE=sepolia requires CHAIN_ID=11155111")

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+from prometheus_client import start_http_server
 from sqlalchemy import select
 from web3 import Web3
 
@@ -28,6 +29,7 @@ from .demo import INVOICE_BYTES, store
 from .domain import BlockchainStatus
 from .evidence import FileEvidenceStorage
 from .hashing import claim_hash, hash_fields, sha256_bytes
+from .metrics import REGISTRY
 from .observability import configure_logging, logger
 from .persistence import (
     BlockchainOperationRecord,
@@ -554,6 +556,20 @@ def worker_loop(interval_seconds: float) -> None:
     settings = Settings.from_env()
     if not settings.registry_address:
         raise RuntimeError("IMPACT_REGISTRY_ADDRESS is required for the EVM worker")
+    # Its own server on its own port: the worker is a separate process, so counters it
+    # increments are invisible to the API's /metrics and Prometheus scrapes the two
+    # independently. Telemetry must never stop the thing it observes, so a port already
+    # in use costs the exporter and not the outbox.
+    try:
+        start_http_server(settings.worker_metrics_port, registry=REGISTRY)
+        log.info("worker.metrics_listening", port=settings.worker_metrics_port)
+    except OSError as exc:
+        log.error(
+            "worker.metrics_unavailable",
+            port=settings.worker_metrics_port,
+            error_type=exc.__class__.__name__,
+        )
+
     worker = BlockchainOutboxWorker(
         session_factory=create_session_factory(settings.database_url),
         blockchain=EvmBlockchainService.from_foundry_artifact(

@@ -9,11 +9,13 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -133,6 +135,18 @@ class OutboxRecord(EntityMixin, Base):
     correlation_id: Mapped[str] = mapped_column(String(80), index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The worker polls `processed_at IS NULL ORDER BY created_at` on every tick, and the
+    # metrics scrape asks the same question. Partial rather than a plain index on
+    # processed_at: only unsubmitted rows are ever looked for, so the index stays the size
+    # of the backlog rather than the size of everything the system has ever sent.
+    __table_args__ = (
+        Index(
+            "ix_outbox_pending",
+            "created_at",
+            postgresql_where=text("processed_at IS NULL"),
+            sqlite_where=text("processed_at IS NULL"),
+        ),
+    )
 
 
 class ProcessedChainEventRecord(EntityMixin, Base):

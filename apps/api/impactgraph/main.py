@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Annotated, Any
 from uuid import UUID, uuid4
@@ -19,8 +20,9 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import CONTENT_TYPE_LATEST
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 
 from .auth import (
     SESSION_COOKIE,
@@ -54,6 +56,7 @@ from .financial import (
     transaction_response,
 )
 from .hashing import sha256_bytes
+from .metrics import REGISTRY, OutboxCollector, integrity_checks, render
 from .observability import configure_logging, correlation_context, logger
 from .persistence import (
     AttestationRecord,
@@ -61,6 +64,7 @@ from .persistence import (
     DomainEntityRecord,
     EvidenceRecord,
     FinancialTransactionRecord,
+    OutboxRecord,
     ProgramRecord,
     UserRecord,
 )
@@ -599,6 +603,31 @@ async def _run_probe(name: str, probe) -> None:
     await asyncio.wait_for(
         asyncio.to_thread(release_when_done), timeout=READINESS_TIMEOUT_SECONDS
     )
+
+
+def _outbox_backlog() -> tuple[int, float]:
+    """Rows waiting, and how long the oldest has waited. Empty is zero for both."""
+    if session_factory is None:
+        return 0, 0.0
+    with session_factory() as session:
+        pending, oldest = session.execute(
+            select(func.count(OutboxRecord.id), func.min(OutboxRecord.created_at)).where(
+                OutboxRecord.processed_at.is_(None)
+            )
+        ).one()
+    if not pending or oldest is None:
+        return 0, 0.0
+    if oldest.tzinfo is None:
+        oldest = oldest.replace(tzinfo=UTC)
+    return pending, max(0.0, (datetime.now(UTC) - oldest).total_seconds())
+
+
+REGISTRY.register(OutboxCollector(_outbox_backlog))
+
+
+@app.get("/metrics")
+def metrics():
+    return Response(content=render(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/health/live")
@@ -1222,6 +1251,7 @@ def integrity(evidence_id: str, user: CurrentUser = None):
             registered_hash = _registered_evidence_hash(record)
             matched, current = verify_integrity(content, registered_hash)
             record.integrity_status = "MATCH" if matched else "MISMATCH"
+            integrity_checks.labels(result=record.integrity_status).inc()
             # The mismatch is detected on the evidence, but it is the claim that carries
             # the trust signal a donor reads. Restate it in the same transaction, or the
             # claim keeps its verified badge above a failing requirement list.
