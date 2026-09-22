@@ -28,6 +28,7 @@ from .demo import INVOICE_BYTES, store
 from .domain import BlockchainStatus
 from .evidence import FileEvidenceStorage
 from .hashing import claim_hash, hash_fields, sha256_bytes
+from .observability import configure_logging, logger
 from .persistence import (
     BlockchainOperationRecord,
     EvidenceRecord,
@@ -43,6 +44,8 @@ from .read_model import (
     seed_read_model,
 )
 from .worker import BlockchainOutboxWorker
+
+log = logger("impactgraph.worker")
 
 
 def seed() -> None:
@@ -517,6 +520,7 @@ def bootstrap_chain() -> None:
 
 
 def worker_once() -> None:
+    configure_logging()
     settings = Settings.from_env()
     if not settings.registry_address:
         raise RuntimeError("IMPACT_REGISTRY_ADDRESS is required for the EVM worker")
@@ -546,6 +550,7 @@ def worker_loop(interval_seconds: float) -> None:
     durable path: a deployment needs a process that keeps draining it after a restart or a
     failed submission.
     """
+    configure_logging()
     settings = Settings.from_env()
     if not settings.registry_address:
         raise RuntimeError("IMPACT_REGISTRY_ADDRESS is required for the EVM worker")
@@ -559,23 +564,21 @@ def worker_loop(interval_seconds: float) -> None:
         ),
         confirmations_required=settings.confirmations_required,
     )
-    print(f"outbox worker started (interval {interval_seconds}s)", flush=True)
+    log.info("worker.started", interval_seconds=interval_seconds)
     while True:
         try:
             result = worker.run_once()
             if result.submitted or result.confirmed or result.failed:
-                print(
-                    json.dumps(
-                        {
-                            "submitted": result.submitted,
-                            "confirmed": result.confirmed,
-                            "failed": result.failed,
-                        }
-                    ),
-                    flush=True,
+                log.info(
+                    "worker.batch",
+                    submitted=result.submitted,
+                    confirmed=result.confirmed,
+                    failed=result.failed,
                 )
         except Exception as exc:  # noqa: BLE001 -- a worker must outlive a transient RPC fault
-            print(json.dumps({"error": str(exc)}), flush=True)
+            # The class, never the text: a web3 fault can carry the RPC URL, and that URL
+            # may embed credentials.
+            log.error("worker.batch_failed", error_type=exc.__class__.__name__)
         time.sleep(interval_seconds)
 
 
