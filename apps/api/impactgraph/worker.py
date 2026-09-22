@@ -119,13 +119,14 @@ class BlockchainOutboxWorker:
                     "BLOCKCHAIN_TX_FAILED",
                     {"error": str(exc), "attempt": outbox.attempts},
                 )
-                log.warning(
-                    "outbox.submission_failed",
-                    topic=topic,
-                    entity_id=operation.entity_id,
-                    error_type=exc.__class__.__name__,
-                    attempt=outbox.attempts,
-                )
+                entity_id, attempt = operation.entity_id, outbox.attempts
+            log.warning(
+                "outbox.submission_failed",
+                topic=topic,
+                entity_id=entity_id,
+                error_type=exc.__class__.__name__,
+                attempt=attempt,
+            )
             return False
 
         with self.session_factory() as session, session.begin():
@@ -142,12 +143,10 @@ class BlockchainOutboxWorker:
             self._audit(
                 session, operation, "BLOCKCHAIN_TX_SUBMITTED", {"transactionHash": transaction_hash}
             )
-            log.info(
-                "outbox.submitted",
-                topic=topic,
-                entity_id=operation.entity_id,
-                transaction_hash=transaction_hash,
-            )
+            entity_id = operation.entity_id
+        # After the block, so a rolled-back commit cannot leave a log line claiming a
+        # transition that did not happen.
+        log.info("outbox.submitted", topic=topic, entity_id=entity_id, transaction_hash=transaction_hash)
         return True
 
     def observe_submitted(self, batch_size: int = 20) -> tuple[int, int]:
@@ -199,6 +198,34 @@ class BlockchainOutboxWorker:
         result = confirm_operation(operation, observation, self.confirmations_required)
         if observation is None:
             return result
+        decided = self._apply_observation(operation_id, operation, observation, result)
+        if decided is None:
+            return None
+        status, entity_id, operation_type, confirmations = decided
+        # The persisted status, not `result`: the onchain checks inside the transaction
+        # lower a CONFIRMED receipt to FAILED when the registry committed something other
+        # than what was reviewed, and that is the answer every caller wants.
+        log.info(
+            "chain.operation_observed",
+            operation_type=operation_type,
+            entity_id=entity_id,
+            status=status,
+            confirmations=confirmations,
+        )
+        return BlockchainStatus(status)
+
+    def _apply_observation(
+        self,
+        operation_id: UUID,
+        operation: BlockchainOperation,
+        observation: ReceiptObservation,
+        result: BlockchainStatus,
+    ) -> tuple[str, str, str, int] | None:
+        """Persist what the receipt proves, and report the state that was committed.
+
+        Returns after the transaction commits, so a caller that logs the outcome cannot
+        announce a transition that rolled back.
+        """
         with self.session_factory() as session, session.begin():
             record = session.get(BlockchainOperationRecord, operation_id)
             if record is None or record.status != BlockchainStatus.SUBMITTED:
@@ -224,7 +251,12 @@ class BlockchainOutboxWorker:
                             BlockchainStatus.FAILED,
                         )
                         self._audit(session, record, "BLOCKCHAIN_TX_FAILED", {"error": onchain_error})
-                        return BlockchainStatus.FAILED
+                        return (
+                            record.status,
+                            record.entity_id,
+                            record.operation_type,
+                            record.confirmations,
+                        )
                     evidence.workflow_status, evidence.blockchain_status = (
                         EvidenceWorkflowStatus.REGISTERED_ONCHAIN,
                         BlockchainStatus.CONFIRMED,
@@ -262,14 +294,12 @@ class BlockchainOutboxWorker:
                     if attestation:
                         attestation.status = "FAILED"
                 self._audit(session, record, "BLOCKCHAIN_TX_FAILED", {"error": operation.error})
-        log.info(
-            "chain.operation_observed",
-            operation_type=operation.operation_type,
-            entity_id=operation.entity_id,
-            status=result,
-            confirmations=operation.confirmations,
-        )
-        return result
+            return (
+                record.status,
+                record.entity_id,
+                record.operation_type,
+                record.confirmations,
+            )
 
     @staticmethod
     def _evidence(session: Session, evidence_id: str) -> EvidenceRecord:
