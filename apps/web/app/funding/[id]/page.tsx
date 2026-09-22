@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Status } from "@/components/Status";
-import { readFromApi } from "@/lib/api";
+import { readFromApiResult } from "@/lib/api";
 import { formatMoney } from "@/lib/money";
 import type { FundingAttribution } from "@/lib/types";
 
@@ -18,11 +18,27 @@ export default async function FundingAttributionPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const trail = await readFromApi<FundingAttribution>(`/financial/funding/${id}/attribution`);
+  const result = await readFromApiResult<FundingAttribution>(
+    `/financial/funding/${id}/attribution`,
+  );
 
-  // readFromApi returns null for a 404 and for an unreachable API alike, and answering
-  // 200 to a request for a record that does not exist is its own small dishonesty.
-  if (!trail) notFound();
+  if (result.state === "missing") notFound();
+  if (result.state === "unavailable") {
+    // Not the same as a contribution that does not exist, and this page must not say so.
+    return (
+      <div className="inspector">
+        <section className="panel">
+          <h2>This contribution cannot be traced right now</h2>
+          <p className="subtle">
+            The records are unavailable, which is not the same as their being absent. The
+            contribution may well be here; the service that reads it is not answering.
+          </p>
+          <Link href="/financial">Back to the money trail →</Link>
+        </section>
+      </div>
+    );
+  }
+  const trail = result.data;
 
   const idle = trail.uncommitted.amountMinor;
 

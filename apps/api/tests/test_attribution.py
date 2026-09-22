@@ -94,3 +94,61 @@ def test_the_basis_of_the_attribution_is_stated_with_the_numbers():
 def test_attribution_is_public_and_unknown_funding_is_a_404(client):
     assert client.get(f"/financial/funding/{JANE}/attribution").status_code == 200
     assert client.get("/financial/funding/funding-nope/attribution").status_code == 404
+
+
+def test_a_currency_that_does_not_match_the_funding_is_refused_not_added():
+    """`Money` refuses to combine currencies without a recorded rate, and so does this.
+
+    Comparing minor units across currencies is meaningless even when the subtraction that
+    follows would have raised anyway, so the guard sits before the comparison.
+    """
+    from impactgraph.attribution import MixedCurrencyError, _remainder
+    from impactgraph.domain import Money
+
+    with pytest.raises(MixedCurrencyError):
+        _remainder(Money(1000, "USD"), Money(2000, "KES"))
+    with pytest.raises(MixedCurrencyError):
+        _remainder(Money(5000, "USD"), Money(1, "KES"))
+
+
+def test_a_mixed_currency_allocation_answers_409_rather_than_500(client, monkeypatch):
+    from impactgraph import attribution
+
+    def mixed(*args, **kwargs):
+        raise attribution.MixedCurrencyError("allocation-x is in KES, not USD")
+
+    monkeypatch.setattr("impactgraph.main.funding_attribution", mixed)
+    response = client.get(f"/financial/funding/{JANE}/attribution")
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "MIXED_CURRENCY"
+
+
+def test_spend_that_names_no_allocation_is_reported_rather_than_omitted():
+    """It cannot be attributed to a funder, but a total that quietly excludes it reads as
+    the whole of the program's spending when it is not."""
+    result = trace(JANE)
+    assert "unallocatedProgramSpend" in result
+    assert "Only spend that names an allocation is traced" in result["method"]["limits"]
+
+
+def test_the_traversal_does_not_issue_a_query_per_node():
+    """Public and unauthenticated: one request must not fan out across a program."""
+    from sqlalchemy import event
+
+    assert session_factory is not None
+    statements: list[str] = []
+    with session_factory() as session:
+        bind = session.get_bind()
+
+        def record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+
+        event.listen(bind, "before_cursor_execute", record)
+        try:
+            funding_attribution(session, JANE)
+        finally:
+            event.remove(bind, "before_cursor_execute", record)
+
+    # One per level: funding, allocations, transactions, deliveries, outcomes, edges,
+    # claims, unallocated spend. A per-node traversal grows with the data instead.
+    assert len(statements) <= 10, f"{len(statements)} queries for one contribution"
