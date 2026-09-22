@@ -52,6 +52,7 @@ from .financial import (
     transaction_response,
 )
 from .hashing import sha256_bytes
+from .observability import configure_logging, correlation_context, logger
 from .persistence import (
     AttestationRecord,
     BlockchainOperationRecord,
@@ -95,6 +96,9 @@ analysis_provider = MockEvidenceAnalysisProvider()
 reconciliation_service = ReconciliationService()
 evidence_reconciliation = EvidenceReconciliationService(reconciliation_service)
 financial_provider = MockFinancialDataProvider()
+configure_logging()
+log = logger("impactgraph.api")
+
 app = FastAPI(title="ImpactGraph Transparency API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
@@ -109,9 +113,10 @@ app.add_middleware(
 async def correlation_id(request: Request, call_next):
     value = request.headers.get("x-correlation-id", str(uuid4()))
     request.state.correlation_id = value
-    response = await call_next(request)
-    response.headers["x-correlation-id"] = value
-    return response
+    with correlation_context(value):
+        response = await call_next(request)
+        response.headers["x-correlation-id"] = value
+        return response
 
 
 def _refuse_demo_store_route() -> None:
@@ -386,10 +391,14 @@ def login(body: LoginRequest, response: Response):
             token, user = authenticate(session, body.email, body.password)
         except AuthenticationError as exc:
             # One message for both unknown account and wrong password: distinguishing
-            # them would let an unauthenticated caller enumerate valid accounts.
+            # them would let an unauthenticated caller enumerate valid accounts. The
+            # operational log carries no identifier for the same reason -- it would
+            # reconstruct the enumeration the response refuses to give.
+            log.info("auth.login_failed")
             raise HTTPException(
                 401, detail={"code": "INVALID_CREDENTIALS", "message": str(exc)}
             ) from exc
+        log.info("auth.login_succeeded", user_id=str(user.user_id), role=user.role)
         payload = _session_payload(user)
     response.set_cookie(
         SESSION_COOKIE,

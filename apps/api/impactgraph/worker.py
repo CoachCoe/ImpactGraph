@@ -20,6 +20,7 @@ from .blockchain import (
     entity_id_bytes,
 )
 from .domain import BlockchainStatus, ClaimStatus, EvidenceWorkflowStatus
+from .observability import correlation_context, logger
 from .persistence import (
     AttestationRecord,
     AuditLogRecord,
@@ -30,6 +31,8 @@ from .persistence import (
     ProcessedChainEventRecord,
 )
 from .verification import evaluate_persisted_claim
+
+log = logger("impactgraph.worker")
 
 
 @dataclass(frozen=True)
@@ -85,7 +88,14 @@ class BlockchainOutboxWorker:
                 outbox.processed_at = datetime.now(UTC)
                 return None
             topic, payload = outbox.topic, dict(outbox.payload)
+            correlation_id = outbox.correlation_id
 
+        with correlation_context(correlation_id):
+            return self._submit_prepared(outbox_id, topic, payload)
+
+    def _submit_prepared(
+        self, outbox_id: UUID, topic: str, payload: dict[str, Any]
+    ) -> bool | None:
         try:
             if topic != "blockchain.register_evidence":
                 raise ValueError(f"Unsupported outbox topic: {topic}")
@@ -109,6 +119,13 @@ class BlockchainOutboxWorker:
                     "BLOCKCHAIN_TX_FAILED",
                     {"error": str(exc), "attempt": outbox.attempts},
                 )
+                log.warning(
+                    "outbox.submission_failed",
+                    topic=topic,
+                    entity_id=operation.entity_id,
+                    error_type=exc.__class__.__name__,
+                    attempt=outbox.attempts,
+                )
             return False
 
         with self.session_factory() as session, session.begin():
@@ -124,6 +141,12 @@ class BlockchainOutboxWorker:
             outbox.processed_at = datetime.now(UTC)
             self._audit(
                 session, operation, "BLOCKCHAIN_TX_SUBMITTED", {"transactionHash": transaction_hash}
+            )
+            log.info(
+                "outbox.submitted",
+                topic=topic,
+                entity_id=operation.entity_id,
+                transaction_hash=transaction_hash,
             )
         return True
 
@@ -166,6 +189,12 @@ class BlockchainOutboxWorker:
                 record.error,
             )
 
+        with correlation_context(operation.correlation_id):
+            return self._observe_prepared(operation_id, operation)
+
+    def _observe_prepared(
+        self, operation_id: UUID, operation: BlockchainOperation
+    ) -> BlockchainStatus | None:
         observation = self.blockchain.get_transaction(operation.transaction_hash or "")
         result = confirm_operation(operation, observation, self.confirmations_required)
         if observation is None:
@@ -233,6 +262,13 @@ class BlockchainOutboxWorker:
                     if attestation:
                         attestation.status = "FAILED"
                 self._audit(session, record, "BLOCKCHAIN_TX_FAILED", {"error": operation.error})
+        log.info(
+            "chain.operation_observed",
+            operation_type=operation.operation_type,
+            entity_id=operation.entity_id,
+            status=result,
+            confirmations=operation.confirmations,
+        )
         return result
 
     @staticmethod
