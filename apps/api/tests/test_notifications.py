@@ -73,7 +73,8 @@ def client() -> TestClient:
 def follow(email: str, claim_id: str = CLAIM_ID, confirm: bool = True) -> str:
     assert session_factory is not None
     with session_factory.begin() as session:
-        token, _ = subscribe(session, email=email, claim_id=claim_id)
+        token = subscribe(session, email=email, claim_id=claim_id)
+    assert token is not None
     if confirm:
         TestClient(app).post("/notifications/confirm", params={"token": token})
     return token
@@ -205,3 +206,100 @@ def test_an_unknown_claim_cannot_be_followed(client):
         client.post("/claims/claim-nope/follow", json={"email": "a@example.com"}).status_code
         == 404
     )
+
+
+def test_a_stranger_cannot_resubscribe_someone_who_opted_out(client):
+    """An unsubscribe a third party can reverse is not an unsubscribe.
+
+    The address and the claim id are both public, so clearing the opt-out while keeping
+    the confirmation would let anyone re-enrol anyone, with no message to say so.
+    """
+    token = follow("donor@example.com")
+    client.post("/notifications/unsubscribe", params={"token": token})
+
+    client.post(f"/claims/{CLAIM_ID}/follow", json={"email": "donor@example.com"})
+
+    assert session_factory is not None
+    with session_factory() as session:
+        row = session.scalar(select(NotificationSubscriptionRecord))
+    assert row is not None
+    assert row.confirmed_at is None, "re-subscribing must require confirming again"
+
+    with session_factory.begin() as session:
+        enqueue_claim_status_change(
+            session, claim_id=CLAIM_ID, status="CHALLENGED", correlation_id="c"
+        )
+    transport = RecordingTransport()
+    assert dispatch(transport) == 0
+    assert transport.sent == []
+
+
+def test_following_answers_the_same_way_whether_or_not_you_already_follow(client):
+    """Two answers would let a caller ask who is watching what."""
+    first = client.post(f"/claims/{CLAIM_ID}/follow", json={"email": "donor@example.com"})
+    follow("donor@example.com")
+    second = client.post(f"/claims/{CLAIM_ID}/follow", json={"email": "donor@example.com"})
+    assert first.json() == second.json()
+
+
+def test_an_established_follower_keeps_the_token_they_were_given(client):
+    """Reissuing on every request would let anyone break someone's unsubscribe link."""
+    token = follow("donor@example.com")
+    client.post(f"/claims/{CLAIM_ID}/follow", json={"email": "donor@example.com"})
+    assert client.post("/notifications/unsubscribe", params={"token": token}).status_code == 200
+
+
+def test_a_crash_between_claiming_and_sending_does_not_lose_the_message(client, sign_in):
+    """A delivery row is a claim on the work, not proof it was done.
+
+    Existence alone would mean a process that died after claiming never retries: the
+    second attempt loses the insert and sends nothing, for ever.
+    """
+    make_verified()
+    follow("donor@example.com")
+    sign_in(client, ADMIN)
+    client.post(f"/demo/evidence/{EVIDENCE_ID}/tamper")
+
+    # A send that fails leaves exactly the row a crash would have left behind.
+    assert dispatch(FailingTransport()) == 0
+    transport = RecordingTransport()
+    assert dispatch(transport) == 1, "the unsent delivery was never retried"
+    assert transport.sent[0].to == "donor@example.com"
+
+
+def test_an_outage_does_not_mark_the_change_as_dealt_with(client, sign_in):
+    """Otherwise every status change during a transport outage is silently dropped."""
+    make_verified()
+    follow("donor@example.com")
+    sign_in(client, ADMIN)
+    client.post(f"/demo/evidence/{EVIDENCE_ID}/tamper")
+
+    dispatch(FailingTransport())
+    assert session_factory is not None
+    with session_factory() as session:
+        intent = session.scalar(
+            select(OutboxRecord).where(OutboxRecord.topic == CLAIM_STATUS_CHANGED)
+        )
+    assert intent is not None
+    assert intent.processed_at is None, "a failed batch must stay available to retry"
+    assert intent.attempts == 1
+
+
+def test_a_permanently_failing_address_is_eventually_given_up_on(client, sign_in):
+    """Without a cap one unreachable address holds its outbox row for ever."""
+    from impactgraph.notifications import MAX_DELIVERY_ATTEMPTS
+
+    make_verified()
+    follow("donor@example.com")
+    sign_in(client, ADMIN)
+    client.post(f"/demo/evidence/{EVIDENCE_ID}/tamper")
+
+    for _ in range(MAX_DELIVERY_ATTEMPTS):
+        dispatch(FailingTransport())
+
+    assert session_factory is not None
+    with session_factory() as session:
+        intent = session.scalar(
+            select(OutboxRecord).where(OutboxRecord.topic == CLAIM_STATUS_CHANGED)
+        )
+    assert intent is not None and intent.processed_at is not None

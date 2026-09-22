@@ -667,11 +667,7 @@ notification_transport = ConsoleNotificationTransport()
 
 @app.post("/claims/{claim_id}/follow", status_code=202)
 def follow_claim(claim_id: str, body: FollowRequest):
-    """Ask to be told when this claim changes. No account, by design.
-
-    Always answers the same way whether or not the address already follows the claim:
-    a different response would turn this into a way to ask who is watching what.
-    """
+    """Ask to be told when this claim changes. No account, by design."""
     if session_factory is None:
         raise HTTPException(409, "Following a claim requires PERSISTENCE_MODE=postgres")
     with session_factory.begin() as session:
@@ -680,11 +676,11 @@ def follow_claim(claim_id: str, body: FollowRequest):
         )
         if claim is None:
             raise HTTPException(404, "Claim not found")
-        token, already_confirmed = subscribe(session, email=body.email, claim_id=claim_id)
+        token = subscribe(session, email=body.email, claim_id=claim_id)
 
-    if not already_confirmed:
-        # Nothing else is ever sent to an address that has not answered this first
-        # message, so the endpoint cannot be used to mail someone repeatedly.
+    if token is not None:
+        # Nothing further is ever sent to an address that has not answered this, so the
+        # endpoint cannot be used to mail someone who did not ask.
         notification_transport.send(
             Message(
                 to=body.email.strip().lower(),
@@ -697,7 +693,9 @@ def follow_claim(claim_id: str, body: FollowRequest):
                 manage_url_path=f"/notifications/confirm?token={token}",
             )
         )
-    return {"status": "pending_confirmation" if not already_confirmed else "already_following"}
+    # One answer whether or not this address already follows the claim. Two would let a
+    # caller ask who is watching what.
+    return {"status": "check_your_email"}
 
 
 @app.post("/notifications/confirm")

@@ -33,6 +33,10 @@ log = logger("impactgraph.notifications")
 NOTIFICATION_TOPIC_PREFIX = "notification."
 CLAIM_STATUS_CHANGED = "notification.claim_status_changed"
 
+#: Retries before a change is given up on and said to be given up on. Without a cap a
+#: permanently unreachable address holds its outbox row for ever.
+MAX_DELIVERY_ATTEMPTS = 5
+
 #: What a reader is told, in the product's own words rather than a marketing paraphrase.
 STATUS_HEADLINE = {
     "VERIFIED": "A claim you follow is now independently verified",
@@ -82,12 +86,18 @@ def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def subscribe(session: Session, *, email: str, claim_id: str) -> tuple[str, bool]:
-    """Record an interest in a claim. Returns the raw token, which is never stored.
+def subscribe(session: Session, *, email: str, claim_id: str) -> str | None:
+    """Record an interest in a claim. Returns a token to confirm, or None if there is
+    nothing to send.
 
-    Re-subscribing an address that already follows this claim reissues its token rather
-    than creating a second row, so a repeated request cannot be used to send repeated
-    mail to an address that never asked.
+    An address that already follows the claim is left entirely alone. Reissuing its token
+    would let anyone who knows the address break the unsubscribe link in the message it
+    was already sent.
+
+    An address that unsubscribed has to confirm again. Clearing `unsubscribed_at` while
+    keeping `confirmed_at` would let a stranger who knows the address and the claim -- both
+    public -- re-enrol someone who opted out, with no message to tell them so. An
+    unsubscribe a third party can reverse is not an unsubscribe.
     """
     normalized = email.strip().lower()
     existing = session.scalar(
@@ -96,17 +106,21 @@ def subscribe(session: Session, *, email: str, claim_id: str) -> tuple[str, bool
             NotificationSubscriptionRecord.claim_id == claim_id,
         )
     )
+    if existing is not None and existing.confirmed_at is not None and existing.unsubscribed_at is None:
+        return None
+
     token = secrets.token_urlsafe(48)
     if existing is not None:
         existing.token_hash = token_hash(token)
+        existing.confirmed_at = None
         existing.unsubscribed_at = None
-        return token, existing.confirmed_at is not None
+        return token
     session.add(
         NotificationSubscriptionRecord(
             email=normalized, claim_id=claim_id, token_hash=token_hash(token)
         )
     )
-    return token, False
+    return token
 
 
 def resolve_token(session: Session, token: str) -> NotificationSubscriptionRecord | None:
@@ -154,6 +168,7 @@ class NotificationDispatcher:
                     )
                     .order_by(OutboxRecord.created_at)
                     .limit(batch_size)
+                    .with_for_update(skip_locked=True)
                 )
             )
             pending = [(row.id, row.topic, dict(row.payload)) for row in rows]
@@ -166,6 +181,7 @@ class NotificationDispatcher:
     def _dispatch(self, outbox_id, topic: str, payload: dict[str, Any]) -> int:
         if topic != CLAIM_STATUS_CHANGED:
             log.warning("notification.unknown_topic", topic=topic)
+            self._retire(outbox_id, "unknown topic")
             return 0
         claim_id, status = payload["claimId"], payload["status"]
         with self.session_factory() as session, session.begin():
@@ -181,23 +197,52 @@ class NotificationDispatcher:
             targets = [(row.id, row.email) for row in subscribers]
 
         sent = 0
+        outstanding = False
         for subscription_id, email in targets:
-            if self._deliver_once(subscription_id, email, str(outbox_id), claim_id, status):
+            outcome = self._deliver_once(
+                subscription_id, email, str(outbox_id), claim_id, status
+            )
+            if outcome == "sent":
                 sent += 1
+            elif outcome == "failed":
+                outstanding = True
 
+        with self.session_factory() as session, session.begin():
+            outbox = session.get(OutboxRecord, outbox_id)
+            if outbox is None:
+                return sent
+            if not outstanding:
+                outbox.processed_at = datetime.now(UTC)
+                return sent
+            # Someone has not been told. Marking this processed because the attempt
+            # happened would lose every message sent during a transport outage.
+            outbox.attempts += 1
+            if outbox.attempts >= MAX_DELIVERY_ATTEMPTS:
+                outbox.processed_at = datetime.now(UTC)
+                log.error(
+                    "notification.abandoned",
+                    claim_id=claim_id,
+                    status=status,
+                    attempts=outbox.attempts,
+                )
+        return sent
+
+    def _retire(self, outbox_id, reason: str) -> None:
         with self.session_factory() as session, session.begin():
             outbox = session.get(OutboxRecord, outbox_id)
             if outbox is not None:
                 outbox.processed_at = datetime.now(UTC)
-        return sent
+        log.warning("notification.retired", reason=reason)
 
     def _deliver_once(
         self, subscription_id, email: str, event_key: str, claim_id: str, status: str
-    ) -> bool:
-        """Claim the delivery before sending it.
+    ) -> str:
+        """Send once, and say which of sent, already or failed happened.
 
-        The unique constraint on (subscription, event) is what makes this safe to retry:
-        a second attempt for the same change loses the insert and sends nothing.
+        A delivery row is a claim on the work, not proof it was done. Treating its mere
+        existence as delivered means a crash between claiming and sending loses the
+        message for ever: the retry loses the insert and sends nothing. `sent_at` is what
+        distinguishes the two.
         """
         from sqlalchemy.exc import IntegrityError
 
@@ -213,7 +258,15 @@ class NotificationDispatcher:
                     )
                 )
         except IntegrityError:
-            return False
+            with self.session_factory() as session:
+                existing = session.scalar(
+                    select(NotificationDeliveryRecord).where(
+                        NotificationDeliveryRecord.subscription_id == subscription_id,
+                        NotificationDeliveryRecord.event_key == event_key,
+                    )
+                )
+            if existing is not None and existing.sent_at is not None:
+                return "already"
 
         headline = STATUS_HEADLINE.get(status, f"A claim you follow is now {status}")
         try:
@@ -230,22 +283,18 @@ class NotificationDispatcher:
                 )
             )
         except Exception as exc:  # noqa: BLE001 -- a failed send is recorded, not raised
-            with self.session_factory() as session, session.begin():
-                record = session.scalar(
-                    select(NotificationDeliveryRecord).where(
-                        NotificationDeliveryRecord.subscription_id == subscription_id,
-                        NotificationDeliveryRecord.event_key == event_key,
-                    )
-                )
-                if record is not None:
-                    record.error = exc.__class__.__name__
+            self._mark(subscription_id, event_key, error=exc.__class__.__name__)
             log.warning(
                 "notification.send_failed",
                 claim_id=claim_id,
                 error_type=exc.__class__.__name__,
             )
-            return False
+            return "failed"
 
+        self._mark(subscription_id, event_key, sent=True)
+        return "sent"
+
+    def _mark(self, subscription_id, event_key: str, *, sent: bool = False, error: str | None = None) -> None:
         with self.session_factory() as session, session.begin():
             record = session.scalar(
                 select(NotificationDeliveryRecord).where(
@@ -253,6 +302,10 @@ class NotificationDispatcher:
                     NotificationDeliveryRecord.event_key == event_key,
                 )
             )
-            if record is not None:
+            if record is None:
+                return
+            if sent:
                 record.sent_at = datetime.now(UTC)
-        return True
+                record.error = None
+            else:
+                record.error = error
