@@ -38,6 +38,9 @@ class ProgramRecord(EntityMixin, Base):
     operator_org_ref: Mapped[str] = mapped_column(String(160), default="")
     region: Mapped[str] = mapped_column(String(240))
     status: Mapped[str] = mapped_column(String(40))
+    # How many distinct independent verifiers this program's claims require. One is what
+    # every program did implicitly before the column existed.
+    verification_threshold: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
 
 class DomainEntityRecord(EntityMixin, Base):
