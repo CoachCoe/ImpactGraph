@@ -34,7 +34,9 @@ RUN useradd --system --uid 10001 impactgraph \
 USER impactgraph
 
 EXPOSE 8000
+# urlopen raises on any status at or above 400, so the call is the assertion; comparing
+# .status afterwards only reads as a check that never runs.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
-  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3).status==200 else 1)"
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3)"
 
 CMD ["uvicorn", "impactgraph.main:app", "--host", "0.0.0.0", "--port", "8000"]

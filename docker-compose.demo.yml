@@ -88,6 +88,21 @@ services:
       BLOCKCHAIN_CONFIRMATIONS_REQUIRED: "1"
     volumes: ["evidence-data:/data/evidence"]
     ports: ["${API_PORT:-8000}:8000"]
+    # The image probes liveness, so a transient dependency fault cannot get the
+    # process replaced. The service_healthy gates below mean "the API can serve",
+    # which is readiness, so this overrides the image default.
+    healthcheck:
+      # urlopen raises on 503, so the call is the assertion. Comparing .status after it
+      # would be a branch that never runs.
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     restart: unless-stopped
 
   worker:

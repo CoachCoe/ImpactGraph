@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from functools import lru_cache
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
@@ -18,7 +20,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from .auth import (
     SESSION_COOKIE,
@@ -522,9 +524,121 @@ def import_financial_statement(
         return {"provider": financial_provider.name, **result.as_dict()}
 
 
-@app.get("/health")
-def health():
+#: Readiness probes must not outlast the interval an orchestrator polls them on.
+READINESS_TIMEOUT_SECONDS = 3
+
+
+def _probe_database() -> None:
+    if session_factory is None:
+        raise RuntimeError("no database is configured")
+    with session_factory() as session:
+        if session.bind is not None and session.bind.dialect.name == "postgresql":
+            # Bounds the query server side, so a database that accepts the connection and
+            # then stops answering releases the thread instead of holding it forever.
+            session.execute(
+                text(f"SET LOCAL statement_timeout = {READINESS_TIMEOUT_SECONDS * 1000}")
+            )
+        session.execute(text("SELECT 1"))
+
+
+@lru_cache(maxsize=1)
+def _readiness_web3():
+    from web3 import Web3
+
+    return Web3(
+        Web3.HTTPProvider(
+            settings.rpc_url, request_kwargs={"timeout": READINESS_TIMEOUT_SECONDS}
+        )
+    )
+
+
+def _probe_chain() -> None:
+    if not settings.registry_address:
+        raise RuntimeError("no registry address is configured")
+    # The request timeout does not bound name resolution, so a stalled DNS lookup can
+    # still hold a worker. One reused provider keeps that bounded to one socket rather
+    # than one per probe.
+    reported = _readiness_web3().eth.chain_id
+    if reported != settings.chain_id:
+        # Reachable is not the same as correct. A wallet or a worker pointed at the wrong
+        # chain is the failure this catches, and it looks healthy by every other measure.
+        raise RuntimeError(f"chain reports {reported}, expected {settings.chain_id}")
+
+
+def _probe_evidence_storage() -> None:
+    root = settings.evidence_storage_path
+    # Accessibility only. A write probe would prove more and would also mutate the store
+    # this application promises never to alter outside an upload.
+    if not root.is_dir() or not os.access(root, os.R_OK | os.W_OK):
+        raise RuntimeError("evidence storage is not readable and writable")
+
+
+READINESS_PROBES = {
+    "database": _probe_database,
+    "chain": _probe_chain,
+    "evidenceStorage": _probe_evidence_storage,
+}
+
+#: Components whose probe has not come back yet. Python cannot interrupt a blocked call,
+#: so a probe that overruns leaves its thread working; without this a dependency that
+#: stopped answering would strand one more thread on every poll, for ever.
+_probes_in_flight: set[str] = set()
+
+
+async def _run_probe(name: str, probe) -> None:
+    if name in _probes_in_flight:
+        raise TimeoutError(f"the previous {name} probe has not returned")
+
+    def release_when_done() -> None:
+        try:
+            probe()
+        finally:
+            _probes_in_flight.discard(name)
+
+    _probes_in_flight.add(name)
+    await asyncio.wait_for(
+        asyncio.to_thread(release_when_done), timeout=READINESS_TIMEOUT_SECONDS
+    )
+
+
+@app.get("/health/live")
+def health_live():
+    """Liveness: this process is serving. Deliberately touches nothing else.
+
+    The container HEALTHCHECK polls this. A dependency-aware probe there would let a
+    transient database or RPC fault mark the process for replacement, which fixes nothing
+    and loses whatever it was doing.
+    """
     return {"status": "ok", "mode": settings.demo_mode, "chainId": settings.chain_id}
+
+
+@app.get("/health", include_in_schema=False)
+def health_alias():
+    """Containers and scripts deployed before the split still poll this."""
+    return health_live()
+
+
+@app.get("/health/ready")
+async def health_ready(response: Response):
+    """Readiness: the dependencies this API cannot serve without are answering.
+
+    Async, and every probe is bounded: a health check that blocks is a health check that
+    becomes the outage it exists to report. At most one probe per component is ever
+    outstanding, so a dependency that stops answering costs one stranded thread rather
+    than one on every poll.
+    """
+    components: dict[str, Any] = {}
+    for name, probe in READINESS_PROBES.items():
+        try:
+            await _run_probe(name, probe)
+            components[name] = {"status": "ok"}
+        except Exception as exc:  # noqa: BLE001 -- a probe reports, it does not raise
+            # The class, never the text: an RPC or database URL may embed credentials.
+            components[name] = {"status": "unavailable", "error": exc.__class__.__name__}
+    ready = all(item["status"] == "ok" for item in components.values())
+    if not ready:
+        response.status_code = 503
+    return {"status": "ready" if ready else "unavailable", "components": components}
 
 
 @app.get("/programs")
