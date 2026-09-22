@@ -384,13 +384,17 @@ def claims_supported_by(session: Session, evidence_id: str) -> list[ClaimRecord]
     )
 
 
-def restate_claims_for(session: Session, evidence_id: str) -> list[str]:
+def restate_claims_for(
+    session: Session, evidence_id: str, correlation_id: str = ""
+) -> list[str]:
     """Re-decide the claims this evidence supports, and persist any status that fell.
 
     An integrity mismatch is detected on the evidence, but it is the claim that carries
     the trust signal a donor reads. Without this the claim kept its VERIFIED badge while
     the requirement list beneath it showed the integrity check failing.
     """
+    from .notifications import enqueue_claim_status_change
+
     changed: list[str] = []
     for claim in claims_supported_by(session, evidence_id):
         decision, _, _ = evaluate_persisted_claim(session, claim)
@@ -398,5 +402,13 @@ def restate_claims_for(session: Session, evidence_id: str) -> list[str]:
             claim.status = decision.status.value
             if decision.status != ClaimStatus.VERIFIED:
                 claim.verified_at = None
+            # In this transaction, not after it. A message about a status that then
+            # rolled back has told someone something untrue and cannot be recalled.
+            enqueue_claim_status_change(
+                session,
+                claim_id=claim.external_id,
+                status=claim.status,
+                correlation_id=correlation_id,
+            )
             changed.append(claim.external_id)
     return changed

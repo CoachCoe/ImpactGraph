@@ -30,6 +30,7 @@ from .domain import BlockchainStatus
 from .evidence import FileEvidenceStorage
 from .hashing import claim_hash, hash_fields, sha256_bytes
 from .metrics import REGISTRY
+from .notifications import ConsoleNotificationTransport, NotificationDispatcher
 from .observability import configure_logging, logger
 from .persistence import (
     BlockchainOperationRecord,
@@ -598,6 +599,29 @@ def worker_loop(interval_seconds: float) -> None:
         time.sleep(interval_seconds)
 
 
+def notification_loop(interval_seconds: float) -> None:
+    """Drain notification intent from the outbox.
+
+    Separate from the chain worker: the two claim different topics from the same table,
+    and a slow or failing transport must not hold up a registration.
+    """
+    configure_logging()
+    settings = Settings.from_env()
+    dispatcher = NotificationDispatcher(
+        session_factory=create_session_factory(settings.database_url),
+        transport=ConsoleNotificationTransport(),
+    )
+    log.info("notifications.started", interval_seconds=interval_seconds)
+    while True:
+        try:
+            sent = dispatcher.run_once()
+            if sent:
+                log.info("notifications.batch", sent=sent)
+        except Exception as exc:  # noqa: BLE001 -- a sender must outlive a transient fault
+            log.error("notifications.batch_failed", error_type=exc.__class__.__name__)
+        time.sleep(interval_seconds)
+
+
 def new_demo_run(network: str) -> None:
     if network not in {"local", "sepolia"}:
         raise RuntimeError("Demo run network must be local or sepolia")
@@ -624,6 +648,8 @@ def main() -> None:
     sub.add_parser("worker-once")
     loop = sub.add_parser("worker")
     loop.add_argument("--interval", type=float, default=2.0)
+    notify = sub.add_parser("notifications")
+    notify.add_argument("--interval", type=float, default=5.0)
     deploy = sub.add_parser("deploy-registry")
     deploy.add_argument("--expect-address", default=None)
     sub.add_parser("bootstrap-chain")
@@ -643,6 +669,8 @@ def main() -> None:
         worker_once()
     elif args.command == "worker":
         worker_loop(args.interval)
+    elif args.command == "notifications":
+        notification_loop(args.interval)
     elif args.command == "deploy-registry":
         deploy_registry(args.expect_address)
     elif args.command == "bootstrap-chain":
