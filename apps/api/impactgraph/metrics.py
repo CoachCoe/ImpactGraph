@@ -16,6 +16,10 @@ from prometheus_client import CollectorRegistry, Counter, Histogram, generate_la
 from prometheus_client.core import GaugeMetricFamily
 from prometheus_client.registry import Collector
 
+from .observability import logger
+
+log = logger("impactgraph.metrics")
+
 #: Requests and RPC calls are labelled by operation, which is a closed set. Never by
 #: transaction hash, entity id, wallet, correlation id or exception text.
 REGISTRY = CollectorRegistry()
@@ -71,7 +75,10 @@ class OutboxCollector(Collector):
         )
         try:
             pending, oldest_seconds = self._read_backlog()
-        except Exception:  # noqa: BLE001 -- a scrape reports what it can, and never raises
+        except Exception as exc:  # noqa: BLE001 -- a scrape reports what it can, never raises
+            # Said out loud. A gauge that silently stops being exported is discovered
+            # months later, by which point nobody knows when it stopped.
+            log.warning("metrics.outbox_unreadable", error_type=exc.__class__.__name__)
             return
         depth.add_metric([], pending)
         age.add_metric([], oldest_seconds)

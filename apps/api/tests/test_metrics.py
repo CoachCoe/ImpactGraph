@@ -107,3 +107,89 @@ def test_an_integrity_check_counts_the_outcome_it_persisted(client):
     before = integrity_checks.labels(result="MATCH")._value.get()
     assert client.post("/evidence/ev-inv-8291/verify-integrity").status_code == 200
     assert integrity_checks.labels(result="MATCH")._value.get() == before + 1
+
+
+def test_an_operation_awaiting_confirmations_is_not_counted_on_every_poll():
+    """A total that grows because the worker looked is a measure of the polling interval.
+
+    An operation stays SUBMITTED until it reaches the required confirmation depth, and
+    `observe_submitted` re-reads it on every tick. Only the transition counts.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from impactgraph.blockchain import MockBlockchainService
+    from impactgraph.domain import Role
+    from impactgraph.metrics import chain_operations
+    from impactgraph.persistence import Base
+    from impactgraph.services import (
+        ApplicationActor,
+        EvidenceApplicationService,
+        mark_evidence_reviewed,
+    )
+    from impactgraph.worker import BlockchainOutboxWorker
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(engine, expire_on_commit=False)
+
+    service = EvidenceApplicationService(chain_id=31337)
+    actor = ApplicationActor("operator-1", Role.OPERATOR)
+    with factory.begin() as db:
+        service.create_uploaded(
+            db, actor=actor, evidence_id="ev-metrics", project_ref="project-water-12",
+            evidence_type="INVOICE", storage_uri="file:///safe/ev-metrics",
+            content_hash="sha256:" + "a" * 64, mime_type="application/pdf",
+            visibility="RESTRICTED", correlation_id="c", idempotency_key="k1",
+        )
+        from sqlalchemy import select
+
+        from impactgraph.persistence import EvidenceRecord
+        record = db.scalar(select(EvidenceRecord).where(EvidenceRecord.external_id == "ev-metrics"))
+        record.metadata_json = {"programId": "program-clean-water-kenya-2026"}
+        mark_evidence_reviewed(db, "ev-metrics")
+    with factory.begin() as db:
+        service.request_registration(
+            db, actor=actor, evidence_id="ev-metrics", correlation_id="c", idempotency_key="k2"
+        )
+
+    # Two confirmations required, mock reports one, so the operation never leaves SUBMITTED.
+    worker = BlockchainOutboxWorker(
+        session_factory=factory, blockchain=MockBlockchainService(), confirmations_required=2
+    )
+    worker.submit_pending()
+    before = chain_operations.labels(operation_type="REGISTER_EVIDENCE", status="SUBMITTED")._value.get()
+    for _ in range(3):
+        worker.observe_submitted()
+    after = chain_operations.labels(operation_type="REGISTER_EVIDENCE", status="SUBMITTED")._value.get()
+    assert after == before, f"three polls added {after - before} to a counter of transitions"
+
+
+def test_a_taken_metrics_port_does_not_stop_the_worker(monkeypatch):
+    """Telemetry must never be able to stop the thing it observes."""
+    from impactgraph import cli
+
+    def port_in_use(*args, **kwargs):
+        raise OSError(48, "Address already in use")
+
+    monkeypatch.setattr(cli, "start_http_server", port_in_use)
+    monkeypatch.setattr(cli.Settings, "from_env", classmethod(lambda cls: cls(registry_address="0x1")))
+
+    started = {}
+
+    class StopAfterFirstTick(Exception):
+        pass
+
+    def fake_worker(**kwargs):
+        started["yes"] = True
+        raise StopAfterFirstTick
+
+    monkeypatch.setattr(cli, "BlockchainOutboxWorker", fake_worker)
+    monkeypatch.setattr(cli, "create_session_factory", lambda url: None)
+    monkeypatch.setattr(
+        cli.EvmBlockchainService, "from_foundry_artifact", classmethod(lambda cls, **kw: None)
+    )
+
+    with pytest.raises(StopAfterFirstTick):
+        cli.worker_loop(1.0)
+    assert started, "the worker never got past the metrics server"

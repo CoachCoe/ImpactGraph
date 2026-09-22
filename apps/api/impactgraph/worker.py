@@ -215,7 +215,11 @@ class BlockchainOutboxWorker:
             status=status,
             confirmations=confirmations,
         )
-        chain_operations.labels(operation_type=operation_type, status=status).inc()
+        if status != BlockchainStatus.SUBMITTED:
+            # Only the transition. An operation waiting for confirmation depth is re-read
+            # on every tick and stays SUBMITTED, so counting each read would measure the
+            # polling interval rather than any work done.
+            chain_operations.labels(operation_type=operation_type, status=status).inc()
         return BlockchainStatus(status)
 
     def _apply_observation(
