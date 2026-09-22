@@ -240,6 +240,50 @@ class WalletChallengeRecord(EntityMixin, Base):
     )
 
 
+class NotificationSubscriptionRecord(EntityMixin, Base):
+    """Someone who asked to be told when a claim stops being true.
+
+    Deliberately not a user. Following a claim must not require an account, so this holds
+    an email address and a token whose hash is all that is stored -- the same shape as a
+    session, for the same reason: the link in the message is the credential.
+    """
+
+    __tablename__ = "notification_subscriptions"
+    __table_args__ = (
+        UniqueConstraint("email", "claim_id", name="uq_subscription_email_claim"),
+    )
+    email: Mapped[str] = mapped_column(String(320), index=True)
+    claim_id: Mapped[str] = mapped_column(String(160), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # Nothing is sent to an address that has not answered the first message. Otherwise
+    # this endpoint is a way to mail anyone, repeatedly, from someone else's domain.
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    unsubscribed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class NotificationDeliveryRecord(EntityMixin, Base):
+    """What was sent, to whom, about which change.
+
+    Recorded because "we told you on this date" is the sort of assertion this system
+    makes about everything else, and because the uniqueness constraint is what stops a
+    retry sending the same news twice.
+    """
+
+    __tablename__ = "notification_deliveries"
+    __table_args__ = (
+        UniqueConstraint("subscription_id", "event_key", name="uq_delivery_once"),
+    )
+    subscription_id: Mapped[UUID] = mapped_column(
+        ForeignKey("notification_subscriptions.id"), index=True
+    )
+    event_key: Mapped[str] = mapped_column(String(200), index=True)
+    event_type: Mapped[str] = mapped_column(String(48))
+    claim_id: Mapped[str] = mapped_column(String(160), index=True)
+    transport: Mapped[str] = mapped_column(String(48))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(String(200))
+
+
 class MoneyMixin:
     """Integer minor units and an ISO currency. Never a float, never a single column."""
 

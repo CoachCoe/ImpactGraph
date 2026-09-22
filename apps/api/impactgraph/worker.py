@@ -21,6 +21,7 @@ from .blockchain import (
 )
 from .domain import BlockchainStatus, ClaimStatus, EvidenceWorkflowStatus
 from .metrics import chain_operations, outbox_submissions
+from .notifications import enqueue_claim_status_change
 from .observability import correlation_context, logger
 from .persistence import (
     AttestationRecord,
@@ -34,6 +35,9 @@ from .persistence import (
 from .verification import evaluate_persisted_claim
 
 log = logger("impactgraph.worker")
+
+#: Topics this worker claims. Others belong to a different sender.
+BLOCKCHAIN_TOPIC_PREFIX = "blockchain."
 
 
 @dataclass(frozen=True)
@@ -67,7 +71,13 @@ class BlockchainOutboxWorker:
             ids = list(
                 session.scalars(
                     select(OutboxRecord.id)
-                    .where(OutboxRecord.processed_at.is_(None))
+                    .where(
+                        OutboxRecord.processed_at.is_(None),
+                        # Claim only what this worker knows how to send. The outbox is
+                        # shared, and an unknown topic here is marked failed and its
+                        # entity looked up as evidence, which it is not.
+                        OutboxRecord.topic.startswith(BLOCKCHAIN_TOPIC_PREFIX),
+                    )
                     .order_by(OutboxRecord.created_at)
                     .limit(batch_size)
                     .with_for_update(skip_locked=True)
@@ -452,6 +462,12 @@ class BlockchainOutboxWorker:
         decision, _, _ = evaluate_persisted_claim(session, claim)
         if decision.status == ClaimStatus.VERIFIED:
             claim.status, claim.verified_at = "VERIFIED", datetime.now(UTC)
+            enqueue_claim_status_change(
+                session,
+                claim_id=claim.external_id,
+                status=claim.status,
+                correlation_id=operation.correlation_id,
+            )
         self._audit(
             session,
             operation,

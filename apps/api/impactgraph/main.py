@@ -58,10 +58,17 @@ from .financial import (
 )
 from .hashing import sha256_bytes
 from .metrics import REGISTRY, OutboxCollector, integrity_checks, render
+from .notifications import (
+    ConsoleNotificationTransport,
+    Message,
+    resolve_token,
+    subscribe,
+)
 from .observability import configure_logging, correlation_context, logger
 from .persistence import (
     AttestationRecord,
     BlockchainOperationRecord,
+    ClaimRecord,
     DomainEntityRecord,
     EvidenceRecord,
     FinancialTransactionRecord,
@@ -649,6 +656,75 @@ REGISTRY.register(OutboxCollector(_outbox_backlog))
 @app.get("/metrics")
 def metrics():
     return Response(content=render(), media_type=CONTENT_TYPE_LATEST)
+
+
+class FollowRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
+notification_transport = ConsoleNotificationTransport()
+
+
+@app.post("/claims/{claim_id}/follow", status_code=202)
+def follow_claim(claim_id: str, body: FollowRequest):
+    """Ask to be told when this claim changes. No account, by design.
+
+    Always answers the same way whether or not the address already follows the claim:
+    a different response would turn this into a way to ask who is watching what.
+    """
+    if session_factory is None:
+        raise HTTPException(409, "Following a claim requires PERSISTENCE_MODE=postgres")
+    with session_factory.begin() as session:
+        claim = session.scalar(
+            select(ClaimRecord).where(ClaimRecord.external_id == claim_id)
+        )
+        if claim is None:
+            raise HTTPException(404, "Claim not found")
+        token, already_confirmed = subscribe(session, email=body.email, claim_id=claim_id)
+
+    if not already_confirmed:
+        # Nothing else is ever sent to an address that has not answered this first
+        # message, so the endpoint cannot be used to mail someone repeatedly.
+        notification_transport.send(
+            Message(
+                to=body.email.strip().lower(),
+                subject="Confirm that you want updates on this claim",
+                body=(
+                    f"Someone asked for updates when claim {claim_id} changes. If that "
+                    "was you, follow the link. If it was not, ignore this and nothing "
+                    "further will be sent."
+                ),
+                manage_url_path=f"/notifications/confirm?token={token}",
+            )
+        )
+    return {"status": "pending_confirmation" if not already_confirmed else "already_following"}
+
+
+@app.post("/notifications/confirm")
+def confirm_following(token: str):
+    if session_factory is None:
+        raise HTTPException(409, "Notifications require PERSISTENCE_MODE=postgres")
+    with session_factory.begin() as session:
+        subscription = resolve_token(session, token)
+        if subscription is None:
+            raise HTTPException(404, "This link is not valid")
+        if subscription.confirmed_at is None:
+            subscription.confirmed_at = datetime.now(UTC)
+        subscription.unsubscribed_at = None
+        return {"status": "following", "claimId": subscription.claim_id}
+
+
+@app.post("/notifications/unsubscribe")
+def unsubscribe_from_claim(token: str):
+    """One click, no account, and honoured immediately."""
+    if session_factory is None:
+        raise HTTPException(409, "Notifications require PERSISTENCE_MODE=postgres")
+    with session_factory.begin() as session:
+        subscription = resolve_token(session, token)
+        if subscription is None:
+            raise HTTPException(404, "This link is not valid")
+        subscription.unsubscribed_at = datetime.now(UTC)
+        return {"status": "unsubscribed", "claimId": subscription.claim_id}
 
 
 @app.get("/health/live")
@@ -1247,7 +1323,7 @@ def _registered_evidence_hash(record: EvidenceRecord) -> str:
 
 
 @app.post("/evidence/{evidence_id}/verify-integrity")
-def integrity(evidence_id: str, user: CurrentUser = None):
+def integrity(request: Request, evidence_id: str, user: CurrentUser = None):
     # Deliberately public: verifying that evidence still matches its published commitment
     # is the product's central claim, and a donor must be able to check it without an
     # account. Visibility is enforced instead -- non-public evidence requires a session.
@@ -1276,7 +1352,7 @@ def integrity(evidence_id: str, user: CurrentUser = None):
             # The mismatch is detected on the evidence, but it is the claim that carries
             # the trust signal a donor reads. Restate it in the same transaction, or the
             # claim keeps its verified badge above a failing requirement list.
-            restate_claims_for(session, evidence_id)
+            restate_claims_for(session, evidence_id, request.state.correlation_id)
             return _integrity_response(
                 evidence_id,
                 registered_hash,
@@ -1309,13 +1385,14 @@ def integrity(evidence_id: str, user: CurrentUser = None):
 
 
 @app.post("/demo/evidence/{evidence_id}/tamper")
-def tamper(evidence_id: str, user: CurrentUser = None):
+def tamper(request: Request, evidence_id: str, user: CurrentUser = None):
     require_user(user, {Role.ADMIN})
     if settings.demo_mode == "sepolia":
         raise HTTPException(409, "Refusing to alter evidence in a public demo run")
     storage_uri = _evidence_storage_uri(evidence_id)
     evidence_storage.overwrite(storage_uri, TAMPERED_INVOICE_BYTES)
-    return integrity(evidence_id, user=user)
+    # The same correlation identifier covers the tamper and the check that detects it.
+    return integrity(request, evidence_id, user=user)
 
 
 def _evidence_storage_uri(evidence_id: str) -> str:
