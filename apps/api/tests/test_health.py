@@ -89,3 +89,57 @@ def test_the_chain_probe_refuses_when_no_registry_is_configured():
 def test_the_database_and_storage_probes_pass_against_the_test_sandbox():
     main._probe_database()
     main._probe_evidence_storage()
+
+
+def test_an_overrunning_probe_is_reported_rather_than_waited_on(client, monkeypatch):
+    """A health check that blocks becomes the outage it exists to report."""
+    import time
+
+    monkeypatch.setattr(main, "READINESS_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(main, "READINESS_PROBES", {"database": lambda: time.sleep(1.5)})
+
+    response = client.get("/health/ready")
+    assert response.status_code == 503
+    database = response.json()["components"]["database"]
+    assert database["status"] == "unavailable"
+    # The timeout is what produced this, not the probe raising something of its own.
+    assert database["error"] == "TimeoutError"
+
+
+def test_only_one_probe_per_component_is_ever_outstanding(monkeypatch):
+    """Otherwise a dependency that stopped answering strands a thread on every poll.
+
+    Counting starts rather than outcomes: without the guard each call would submit its
+    own thread and time out identically, so the error alone proves nothing.
+    """
+    import asyncio as aio
+    import time
+
+    monkeypatch.setattr(main, "READINESS_TIMEOUT_SECONDS", 0.2)
+    main._probes_in_flight.clear()
+    starts = 0
+
+    def slow() -> None:
+        nonlocal starts
+        starts += 1
+        time.sleep(1.0)
+
+    async def poll_three_times() -> None:
+        for _ in range(3):
+            with pytest.raises(TimeoutError):
+                await main._run_probe("database", slow)
+
+    try:
+        aio.run(poll_three_times())
+        assert starts == 1, f"{starts} threads were started; the guard let extras through"
+    finally:
+        time.sleep(1.1)
+        main._probes_in_flight.clear()
+
+
+def test_the_alias_is_kept_out_of_the_generated_schema():
+    """Two routes on one handler gave a generated client two methods for one operation."""
+    paths = app.openapi()["paths"]
+    assert "/health/live" in paths
+    assert "/health/ready" in paths
+    assert "/health" not in paths

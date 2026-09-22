@@ -92,12 +92,13 @@ services:
     # process replaced. The service_healthy gates below mean "the API can serve",
     # which is readiness, so this overrides the image default.
     healthcheck:
+      # urlopen raises on 503, so the call is the assertion. Comparing .status after it
+      # would be a branch that never runs.
       test:
         - CMD-SHELL
         - >-
-          python -c "import urllib.request,sys;
-          sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready',
-          timeout=3).status==200 else 1)"
+          python -c "import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"
       interval: 10s
       timeout: 5s
       retries: 12

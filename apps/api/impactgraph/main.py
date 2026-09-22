@@ -532,6 +532,12 @@ def _probe_database() -> None:
     if session_factory is None:
         raise RuntimeError("no database is configured")
     with session_factory() as session:
+        if session.bind is not None and session.bind.dialect.name == "postgresql":
+            # Bounds the query server side, so a database that accepts the connection and
+            # then stops answering releases the thread instead of holding it forever.
+            session.execute(
+                text(f"SET LOCAL statement_timeout = {READINESS_TIMEOUT_SECONDS * 1000}")
+            )
         session.execute(text("SELECT 1"))
 
 
@@ -573,8 +579,28 @@ READINESS_PROBES = {
     "evidenceStorage": _probe_evidence_storage,
 }
 
+#: Components whose probe has not come back yet. Python cannot interrupt a blocked call,
+#: so a probe that overruns leaves its thread working; without this a dependency that
+#: stopped answering would strand one more thread on every poll, for ever.
+_probes_in_flight: set[str] = set()
 
-@app.get("/health")
+
+async def _run_probe(name: str, probe) -> None:
+    if name in _probes_in_flight:
+        raise TimeoutError(f"the previous {name} probe has not returned")
+
+    def release_when_done() -> None:
+        try:
+            probe()
+        finally:
+            _probes_in_flight.discard(name)
+
+    _probes_in_flight.add(name)
+    await asyncio.wait_for(
+        asyncio.to_thread(release_when_done), timeout=READINESS_TIMEOUT_SECONDS
+    )
+
+
 @app.get("/health/live")
 def health_live():
     """Liveness: this process is serving. Deliberately touches nothing else.
@@ -586,13 +612,25 @@ def health_live():
     return {"status": "ok", "mode": settings.demo_mode, "chainId": settings.chain_id}
 
 
+@app.get("/health", include_in_schema=False)
+def health_alias():
+    """Containers and scripts deployed before the split still poll this."""
+    return health_live()
+
+
 @app.get("/health/ready")
-def health_ready(response: Response):
-    """Readiness: the dependencies this API cannot serve without are answering."""
+async def health_ready(response: Response):
+    """Readiness: the dependencies this API cannot serve without are answering.
+
+    Async, and every probe is bounded: a health check that blocks is a health check that
+    becomes the outage it exists to report. At most one probe per component is ever
+    outstanding, so a dependency that stops answering costs one stranded thread rather
+    than one on every poll.
+    """
     components: dict[str, Any] = {}
     for name, probe in READINESS_PROBES.items():
         try:
-            probe()
+            await _run_probe(name, probe)
             components[name] = {"status": "ok"}
         except Exception as exc:  # noqa: BLE001 -- a probe reports, it does not raise
             # The class, never the text: an RPC or database URL may embed credentials.
