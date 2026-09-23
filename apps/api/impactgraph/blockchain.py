@@ -77,6 +77,13 @@ class MockBlockchainService:
         self.sender = sender
 
     def _submit(self, event: str, entity_id: str, **args: Any) -> str:
+        """Emit one event, shaped as the registry shapes it.
+
+        The entity is derived from the arguments exactly as the EVM adapter derives it, so
+        this cannot accept a receipt the real decoder would produce no entity for. It did:
+        RoleGranted names an account rather than an entity, and a grant that succeeded on
+        chain was recorded as a missing event because only this mock supplied one.
+        """
         self._counter += 1
         tx = "0x" + f"{self._counter:064x}"
         self.receipts[tx] = ReceiptObservation(
@@ -84,35 +91,54 @@ class MockBlockchainService:
             tx,
             1000 + self._counter,
             1,
-            ({"event": event, "entityId": entity_id, "logIndex": 0, "args": args},),
+            (
+                {
+                    "event": event,
+                    "entityId": entity_id_from_args(args),
+                    "logIndex": 0,
+                    "args": args,
+                },
+            ),
             self.sender,
             "0x" + "9" * 40,
         )
         return tx
 
     def create_program(self, entity_id: str, commitment: str) -> str:
-        # The commitment is part of ProgramCreated on chain, and the worker checks a
-        # receipt against it. A mock that omitted it made that check unexercisable.
         return self._submit(
-            "ProgramCreated", entity_id, commitment=Web3.to_hex(digest_bytes(commitment))
+            "ProgramCreated",
+            entity_id,
+            programId=Web3.to_hex(entity_id_bytes(entity_id)),
+            commitment=Web3.to_hex(digest_bytes(commitment)),
         )
 
     def record_funding(self, entity_id: str, program_id: str, commitment: str) -> str:
-        return self._submit("FundingRecorded", entity_id)
+        return self._submit(
+            "FundingRecorded", entity_id, fundingId=Web3.to_hex(entity_id_bytes(entity_id))
+        )
 
     def record_allocation(self, entity_id: str, program_id: str, commitment: str) -> str:
-        return self._submit("AllocationRecorded", entity_id)
+        return self._submit(
+            "AllocationRecorded", entity_id, allocationId=Web3.to_hex(entity_id_bytes(entity_id))
+        )
 
     def record_financial_transaction(self, entity_id: str, program_id: str, commitment: str) -> str:
-        return self._submit("FinancialTransactionRecorded", entity_id)
+        return self._submit(
+            "FinancialTransactionRecorded",
+            entity_id,
+            financialTransactionId=Web3.to_hex(entity_id_bytes(entity_id)),
+        )
 
     def record_delivery(self, entity_id: str, program_id: str, commitment: str) -> str:
-        return self._submit("DeliveryRecorded", entity_id)
+        return self._submit(
+            "DeliveryRecorded", entity_id, deliveryId=Web3.to_hex(entity_id_bytes(entity_id))
+        )
 
     def register_evidence(self, entity_id: str, program_id: str, commitment: str) -> str:
         return self._submit(
             "EvidenceRegistered",
             entity_id,
+            evidenceId=Web3.to_hex(entity_id_bytes(entity_id)),
             programId=Web3.to_hex(entity_id_bytes(program_id)),
             contentHash=Web3.to_hex(digest_bytes(commitment)),
         )
@@ -123,6 +149,7 @@ class MockBlockchainService:
         return self._submit(
             "AttestationCreated",
             entity_id,
+            attestationId=Web3.to_hex(entity_id_bytes(entity_id)),
             subjectId=Web3.to_hex(entity_id_bytes(subject_id)),
             attestationType=INDEPENDENT_VERIFIER_ATTESTATION,
             statementHash=Web3.to_hex(digest_bytes(statement_hash)),
@@ -131,7 +158,9 @@ class MockBlockchainService:
         )
 
     def record_outcome(self, entity_id: str, program_id: str, commitment: str) -> str:
-        return self._submit("OutcomeRecorded", entity_id)
+        return self._submit(
+            "OutcomeRecorded", entity_id, outcomeId=Web3.to_hex(entity_id_bytes(entity_id))
+        )
 
     def grant_verifier_role(self, address: str) -> str:
         return self._submit(
@@ -142,6 +171,7 @@ class MockBlockchainService:
         return self._submit(
             "ClaimCreated",
             entity_id,
+            claimId=Web3.to_hex(entity_id_bytes(entity_id)),
             programId=Web3.to_hex(entity_id_bytes(program_id)),
             claimHash=Web3.to_hex(digest_bytes(commitment)),
         )
@@ -156,20 +186,24 @@ class MockBlockchainService:
         return datetime.fromtimestamp(1_756_000_000 + block_number, tz=UTC).isoformat()
 
     def entity_exists(self, entity_id: str) -> bool:
+        # Against the encoded form, because that is what an event carries. Comparing the
+        # raw identifier worked only while this mock stored one the registry never emits.
+        encoded = Web3.to_hex(entity_id_bytes(entity_id))
         return any(
-            event["entityId"] == entity_id
+            same_entity(event["entityId"], encoded)
             for receipt in self.receipts.values()
             for event in receipt.events
         )
 
     def find_evidence_registration(self, entity_id: str) -> ReceiptObservation | None:
+        encoded = Web3.to_hex(entity_id_bytes(entity_id))
         return next(
             (
                 receipt
                 for receipt in self.receipts.values()
                 for event in receipt.events
                 if event["event"] == "EvidenceRegistered"
-                and event["entityId"] == entity_id
+                and same_entity(event["entityId"], encoded)
             ),
             None,
         )
@@ -190,7 +224,25 @@ ENTITY_ID_ARGUMENTS = (
     "outcomeId",
     "claimId",
     "edgeId",
+    # RoleGranted is about an account, not a registry entity, and carries no *Id argument.
+    # Without this the receipt for a grant decodes with no entity at all, and a grant that
+    # succeeded on chain was recorded as a missing event.
+    "account",
 )
+
+
+def entity_id_from_args(args: dict[str, Any]) -> Any | None:
+    """Which argument of an event names the thing the event is about."""
+    return next((value for key, value in args.items() if key in ENTITY_ID_ARGUMENTS), None)
+
+
+def same_entity(left: Any, right: Any) -> bool:
+    """Whether two rendered identifiers name the same thing.
+
+    Case-insensitively: an address is the same address whether or not it carries checksum
+    capitals, and a hex digest is the same digest in either case.
+    """
+    return isinstance(left, str) and isinstance(right, str) and left.lower() == right.lower()
 
 
 def _hexify(value: Any) -> Any:
@@ -450,10 +502,7 @@ class EvmBlockchainService:
                 if Web3.to_checksum_address(decoded["address"]) != self.contract.address:
                     continue
                 args = {key: _hexify(value) for key, value in decoded["args"].items()}
-                entity_value = next(
-                    (value for key, value in args.items() if key in ENTITY_ID_ARGUMENTS),
-                    None,
-                )
+                entity_value = entity_id_from_args(args)
                 events.append(
                     {
                         "event": event_name,
@@ -491,7 +540,10 @@ def confirm_operation(
     )
     expected = any(
         event.get("event") == operation.expected_event
-        and event.get("entityId") in {operation.entity_id, expected_entity_id}
+        and (
+            same_entity(event.get("entityId"), operation.entity_id)
+            or same_entity(event.get("entityId"), expected_entity_id)
+        )
         for event in observation.events
     )
     if not expected:

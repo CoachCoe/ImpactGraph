@@ -437,3 +437,56 @@ def test_a_receipt_carrying_the_wrong_role_or_account_is_refused():
     assert "different account" in (guard(other, wallet) or "")
 
     assert "No RoleGranted" in (guard((), wallet) or "")
+
+
+def test_the_mock_names_the_same_entity_the_registry_would():
+    """This mock was the more forgiving of the two, twice.
+
+    It supplied an entityId directly while the EVM adapter derives one from the event's
+    arguments, so a RoleGranted -- which names an account and no entity -- decoded here
+    with an entity and on chain without one. The grant succeeded on Anvil and was recorded
+    as a missing event. Every event this mock emits now carries the arguments the contract
+    declares, and the entity is derived from them by the same function both sides use.
+    """
+    from web3 import Web3
+
+    from impactgraph.blockchain import MockBlockchainService, entity_id_bytes, entity_id_from_args
+
+    chain = MockBlockchainService(sender="0x" + "1" * 40)
+    emitted = {
+        "EvidenceRegistered": chain.register_evidence("ev-1", "program-1", "sha256:" + "a" * 64),
+        "ProgramCreated": chain.create_program("program-1", "sha256:" + "b" * 64),
+        "ClaimCreated": chain.create_claim("claim-1", "program-1", "sha256:" + "c" * 64),
+        "OutcomeRecorded": chain.record_outcome("outcome-1", "program-1", "sha256:" + "d" * 64),
+        "AttestationCreated": chain.create_attestation(
+            "att-1", "claim-1", "sha256:" + "e" * 64, "sha256:" + "f" * 64
+        ),
+    }
+    for entity, transaction in zip(
+        ["ev-1", "program-1", "claim-1", "outcome-1", "att-1"], emitted.values(), strict=True
+    ):
+        event = chain.receipts[transaction].events[0]
+        assert event["entityId"] == entity_id_from_args(event["args"]), event["event"]
+        assert event["entityId"] == Web3.to_hex(entity_id_bytes(entity)), event["event"]
+
+    # RoleGranted is the exception that started this: it names an account, not an entity.
+    wallet = "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+    grant = chain.receipts[chain.grant_verifier_role(wallet)].events[0]
+    assert grant["entityId"] == wallet
+    assert entity_id_from_args(grant["args"]) == wallet
+
+
+def test_an_address_matches_however_it_is_capitalised():
+    """Checksum capitals are a checksum, not an identity, and the two sides of this
+    comparison are rendered by different libraries."""
+    from impactgraph.blockchain import BlockchainOperation, MockBlockchainService, confirm_operation
+    from impactgraph.domain import BlockchainStatus
+
+    wallet = "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+    chain = MockBlockchainService()
+    transaction = chain.grant_verifier_role(wallet)
+    operation = BlockchainOperation(
+        "op", wallet.lower(), "GRANT_VERIFIER_ROLE", "RoleGranted",
+        BlockchainStatus.SUBMITTED, transaction, "corr", 0, None,
+    )
+    assert confirm_operation(operation, chain.get_transaction(transaction), 1) == "CONFIRMED"
