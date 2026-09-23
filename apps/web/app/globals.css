@@ -193,6 +193,10 @@ h1,h2,h3,p{margin-top:0}
 .button:disabled{opacity:.65;cursor:default}
 .secondary,.danger{font-family:var(--font-display);font-weight:700;font-size:15px;border:1.5px solid var(--ghost-line);background:transparent;color:var(--ink);border-radius:var(--radius-pill);padding:12px 24px;cursor:pointer}
 .secondary:hover,.danger:hover{border-color:var(--ink)}
+/* The secondary control is styled for a button. An anchor has to be told to lay out like one, or a download link renders as inline text with padding. */
+a.secondary{display:inline-block;text-align:center;text-decoration:none}
+a.secondary+a.secondary{margin-top:10px}
+
 .danger{color:var(--fail);border-color:var(--fail)}
 .full{width:100%;margin-top:16px}
 

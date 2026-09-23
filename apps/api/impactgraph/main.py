@@ -49,6 +49,13 @@ from .evidence import (
     ReconciliationService,
     verify_integrity,
 )
+from .export import (
+    claim_exists,
+    evidence_csv,
+    money_trail_csv,
+    outcomes_csv,
+    provenance_csv,
+)
 from .financial import (
     EvidenceReconciliationService,
     FinancialIngestionService,
@@ -723,6 +730,62 @@ def unsubscribe_from_claim(token: str):
             raise HTTPException(404, "This link is not valid")
         subscription.unsubscribed_at = datetime.now(UTC)
         return {"status": "unsubscribed", "claimId": subscription.claim_id}
+
+
+def _csv_response(body: str, filename: str) -> Response:
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/export/programs/{program_id}/money-trail.csv")
+def export_money_trail(program_id: str):
+    """Public, like the money trail it serialises."""
+    if session_factory is None:
+        raise HTTPException(409, "Export requires PERSISTENCE_MODE=postgres")
+    with session_factory() as session:
+        body = money_trail_csv(session, program_id)
+    return _csv_response(body, f"{program_id}-money-trail.csv")
+
+
+@app.get("/export/programs/{program_id}/outcomes.csv")
+def export_outcomes(program_id: str):
+    if session_factory is None:
+        raise HTTPException(409, "Export requires PERSISTENCE_MODE=postgres")
+    with session_factory() as session:
+        body = outcomes_csv(session, program_id)
+    return _csv_response(body, f"{program_id}-outcomes.csv")
+
+
+@app.get("/export/claims/{claim_id}/provenance.csv")
+def export_provenance(claim_id: str):
+    if session_factory is None:
+        raise HTTPException(409, "Export requires PERSISTENCE_MODE=postgres")
+    with session_factory() as session:
+        if not claim_exists(session, claim_id):
+            raise HTTPException(404, "Claim not found")
+        body = provenance_csv(session, claim_id)
+    return _csv_response(body, f"{claim_id}-provenance.csv")
+
+
+@app.get("/export/claims/{claim_id}/evidence.csv")
+def export_evidence(claim_id: str, user: CurrentUser = None):
+    """Restricted evidence is included only for a reader who could already open it.
+
+    Decided here against the session rather than inside the serialiser, so an export
+    cannot become the one route that answers what every other route refuses.
+    """
+    if session_factory is None:
+        raise HTTPException(409, "Export requires PERSISTENCE_MODE=postgres")
+    with session_factory() as session:
+        if not claim_exists(session, claim_id):
+            raise HTTPException(404, "Claim not found")
+        body = evidence_csv(
+            session, claim_id, include_restricted=user is not None and user.role == Role.ADMIN
+        )
+    return _csv_response(body, f"{claim_id}-evidence.csv")
 
 
 @app.get("/health/live")

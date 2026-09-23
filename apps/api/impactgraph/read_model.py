@@ -362,6 +362,20 @@ def reset_read_model(session: Session, storage: EvidenceStorage | None = None) -
     seed_read_model(session, storage)
 
 
+def _evidence_title(item: EvidenceRecord) -> str:
+    """What to call this evidence on a graph anyone can read.
+
+    Provenance is public, and deliberately so: a reader has to be able to see that the
+    chain is complete. The extracted contents of a document are a different matter. A
+    restricted invoice appearing here under its invoice number would publish a field out
+    of a document the same reader is refused when they ask for it directly, so the node
+    keeps its place in the chain under its identifier instead.
+    """
+    if item.visibility != "PUBLIC":
+        return item.external_id
+    return str((item.extraction or {}).get("invoiceNumber") or item.external_id)
+
+
 class TransparencyReadRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
@@ -623,9 +637,7 @@ class TransparencyReadRepository:
                 # The real status, not a fixed "Integrity confirmed" label that would
                 # keep reassuring a reader after the evidence stopped matching.
                 "detail": _INTEGRITY_DETAIL.get(item.integrity_status, _UNKNOWN_INTEGRITY),
-                "title": str(
-                    (item.extraction or {}).get("invoiceNumber") or item.external_id
-                ),
+                "title": _evidence_title(item),
             }
             for item in evidence_records
         )

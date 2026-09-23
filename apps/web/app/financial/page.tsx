@@ -177,6 +177,24 @@ export default async function FinancialPage() {
               Follow it to the claim <span aria-hidden>→</span>
             </Link>
           </section>
+
+          <section className="panel">
+            <span className="eyebrow">TAKE IT WITH YOU</span>
+            <h2>Check it somewhere else</h2>
+            <p className="subtle">
+              Everything above can be read in your own tools. Rows carry the hashes needed
+              to check them against the registry, so nothing here has to be taken on our
+              word.
+            </p>
+            {/* Plain links rather than fetches: the browser saves the file, and the
+                endpoints are public, so no session is involved. */}
+            <a className="secondary full" href={`/api/export/programs/${PROGRAM_ID}/money-trail.csv`}>
+              Money trail (CSV)
+            </a>
+            <a className="secondary full" href={`/api/export/programs/${PROGRAM_ID}/outcomes.csv`}>
+              Outcomes and their methods (CSV)
+            </a>
+          </section>
         </aside>
       </div>
     </div>
