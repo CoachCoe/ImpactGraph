@@ -314,3 +314,55 @@ def test_the_document_is_confirmed_field_by_field_after_a_real_read(offline_prov
     flagged = review_required_fields(result.extraction)
     assert set(RECONCILIATION_KEYS) <= set(flagged)
     assert "vendor" not in flagged
+
+
+def test_two_uploads_arriving_together_build_one_renderer(monkeypatch):
+    """A sync FastAPI endpoint runs in a threadpool, so a cold process really does get two
+    analyses at once. Both used to enter the builder, and each rebound the tokenizer and
+    renderer the other was already decoding with -- returning a document carrying fields
+    from someone else's reply, with a confidence figure in the invoice number.
+    """
+    import sys
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+
+    from impactgraph.extraction import TinkerEvidenceAnalysisProvider
+
+    builds = []
+
+    def slow_tokenizer():
+        # Wide enough that every thread is inside the builder before the first one leaves.
+        time.sleep(0.05)
+        builds.append(threading.current_thread().name)
+        return SimpleNamespace(decode=lambda tokens: "")
+
+    for name, module in {
+        "tinker": SimpleNamespace(
+            ServiceClient=lambda: SimpleNamespace(
+                create_sampling_client=lambda base_model: SimpleNamespace()
+            )
+        ),
+        "tml_renderers": SimpleNamespace(),
+        "tml_renderers.tokenizers": SimpleNamespace(o200k_base_chat=slow_tokenizer),
+        "tml_renderers.v0": SimpleNamespace(Renderer=lambda tokenizer: SimpleNamespace()),
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    provider = TinkerEvidenceAnalysisProvider(model="thinkingmachines/Inkling-Small")
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda _: provider._ensure(), range(8)))
+
+    assert len(builds) == 1, f"built {len(builds)} times; the second rebinds the first's state"
+
+
+def test_the_readiness_flag_is_never_set_before_what_it_stands_for():
+    """`_ensure` returns early on `_client` without taking the lock, so a thread that sees
+    it set must find the tokenizer and renderer already there."""
+    import inspect
+
+    from impactgraph.extraction import TinkerEvidenceAnalysisProvider
+
+    body = inspect.getsource(TinkerEvidenceAnalysisProvider._build)
+    assert body.index("self._tokenizer") < body.index("self._client = client")

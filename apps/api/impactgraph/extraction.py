@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
+import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -160,10 +161,25 @@ class TinkerEvidenceAnalysisProvider:
         self._client = None
         self._renderer = None
         self._tokenizer = None
+        self._lock = threading.Lock()
 
     def _ensure(self) -> None:
+        """Build the tokenizer, renderer and client exactly once.
+
+        FastAPI runs a sync endpoint in a threadpool, so two uploads arriving together on a
+        cold process both entered here, each built a renderer, and each rebound the
+        attributes the other was already decoding with. The result was not an error: one
+        document came back with fields from the other's reply, the invoice number holding a
+        confidence figure. Reproduced with two concurrent uploads after a restart.
+        """
         if self._client is not None:
             return
+        with self._lock:
+            if self._client is not None:
+                return
+            self._build()
+
+    def _build(self) -> None:
         try:
             import tinker
             from tml_renderers.tokenizers import o200k_base_chat
@@ -173,9 +189,13 @@ class TinkerEvidenceAnalysisProvider:
                 "AI_PROVIDER=tinker needs the tinker extra: pip install '.[tinker]'"
             ) from exc
 
-        self._tokenizer = o200k_base_chat()
-        self._renderer = Renderer(self._tokenizer)
-        self._client = tinker.ServiceClient().create_sampling_client(base_model=self.model)
+        tokenizer = o200k_base_chat()
+        renderer = Renderer(tokenizer)
+        client = tinker.ServiceClient().create_sampling_client(base_model=self.model)
+        # Assigned together, and _client last: it is the flag the unlocked fast path reads,
+        # so nothing may observe it set while the other two are still missing.
+        self._tokenizer, self._renderer = tokenizer, renderer
+        self._client = client
 
     def analyze(self, content: bytes, mime_type: str) -> AnalysisResult:
         self._ensure()
