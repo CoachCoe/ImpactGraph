@@ -31,6 +31,7 @@ from .persistence import (
     AuditLogRecord,
     BlockchainOperationRecord,
     ClaimRecord,
+    DataProtectionRecord,
     DeliveryRecord,
     DomainEntityRecord,
     EvidenceRecord,
@@ -77,7 +78,12 @@ def seed_read_model(session: Session, storage: EvidenceStorage | None = None) ->
     """Idempotently installs the deterministic showcase without deleting user records."""
     # Restore the showcase bytes before the early return below. Seeding is what makes the
     # demo repeatable, so it has to undo a tamper even when the rows are already present.
-    evidence_store = storage or FileEvidenceStorage(Settings.from_env().evidence_storage_path)
+    _settings = Settings.from_env()
+    evidence_store = storage or FileEvidenceStorage(
+        _settings.evidence_storage_path,
+        _settings.evidence_encryption_key,
+        _settings.evidence_key_path,
+    )
     storage_uri = evidence_store.uri_for(EVIDENCE_ID)
     evidence_store.overwrite(storage_uri, INVOICE_BYTES)
     if session.scalar(select(ProgramRecord).where(ProgramRecord.slug == PROGRAM_ID)):
@@ -355,6 +361,10 @@ def reset_read_model(session: Session, storage: EvidenceStorage | None = None) -
         BlockchainOperationRecord,
         IdempotencyRecord,
         AuditLogRecord,
+        # Before the evidence it describes: a record of what made holding an object
+        # lawful must not outlive the object and attach itself to the next one reusing
+        # the identifier.
+        DataProtectionRecord,
         ProvenanceEdgeRecord,
         AttestationRecord,
         ClaimRecord,

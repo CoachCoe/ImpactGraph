@@ -10,6 +10,8 @@ with a green suite. This is the product's central claim.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -61,9 +63,18 @@ def test_the_stored_object_is_byte_identical_to_what_was_sent():
         record = session.scalar(
             select(EvidenceRecord).where(EvidenceRecord.external_id == "ev-storage-check")
         )
-    storage = FileEvidenceStorage(Settings.from_env().evidence_storage_path)
+    settings = Settings.from_env()
+    storage = FileEvidenceStorage(
+        settings.evidence_storage_path,
+        settings.evidence_encryption_key,
+        settings.evidence_key_path,
+    )
     assert storage.retrieve(record.storage_uri) == payload
     assert record.content_hash == sha256_bytes(payload)
+    # And the bytes on disk are not those bytes: evidence is encrypted at rest, so the
+    # object is readable only through a key that can be destroyed.
+    on_disk = Path(record.storage_uri.removeprefix("file://")).read_bytes()
+    assert payload not in on_disk
 
 
 def test_a_one_byte_difference_produces_a_different_commitment():

@@ -46,6 +46,7 @@ from .demo import INVOICE_BYTES, TAMPERED_INVOICE_BYTES, store
 from .domain import BlockchainStatus, Role, Visibility
 from .evidence import (
     EvidenceAnalysisProvider,
+    EvidenceUnrecoverable,
     FileEvidenceStorage,
     MockEvidenceAnalysisProvider,
     ReconciliationService,
@@ -94,6 +95,7 @@ from .services import (
     ApplicationActor,
     AuditService,
     AuthorizationError,
+    DataProtectionApplicationService,
     DomainConflictError,
     EvidenceApplicationService,
     IdempotencyConflictError,
@@ -110,7 +112,11 @@ session_factory = (
     if settings.persistence_mode == "postgres"
     else None
 )
-evidence_storage = FileEvidenceStorage(settings.evidence_storage_path)
+evidence_storage = FileEvidenceStorage(
+    settings.evidence_storage_path,
+    settings.evidence_encryption_key,
+    settings.evidence_key_path,
+)
 # Accepting a provider name and then using the mock anyway would be the silent fallback
 # the specification forbids for chains, so an unknown name is refused at startup by
 # Settings rather than degraded here.
@@ -334,6 +340,37 @@ class ClaimCreateRequest(BaseModel):
     projectId: str = Field(min_length=1, max_length=160)
     statement: str = Field(min_length=1, max_length=1000)
     outcomeId: str = Field(min_length=1, max_length=160)
+
+
+class DataProtectionRequest(BaseModel):
+    """What makes holding this object lawful. Not a consent form.
+
+    An organisation that delivers the aid it photographs cannot obtain freely given
+    consent from the person receiving it, so the basis is stated rather than assumed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lawfulBasis: Literal[
+        "CONSENT",
+        "CONTRACT",
+        "LEGAL_OBLIGATION",
+        "VITAL_INTERESTS",
+        "PUBLIC_TASK",
+        "LEGITIMATE_INTEREST",
+    ]
+    specialCategory: bool = False
+    controllerOrgRef: str = Field(min_length=1, max_length=160)
+    jointControllerOrgRef: str | None = Field(default=None, max_length=160)
+    subjectReference: str = Field(min_length=1, max_length=160)
+    purpose: str = Field(min_length=1, max_length=1000)
+    retainUntil: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class ErasureRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=1000)
 
 
 class EvidenceReviewRequest(BaseModel):
@@ -1247,6 +1284,10 @@ async def upload_evidence(
     evidence_type: Annotated[str, Form()],
     file: Annotated[UploadFile, File()],
     visibility: Annotated[str, Form()] = "RESTRICTED",
+    # Declared by the operator, because nothing else can know whether a photograph has a
+    # person in it. Registration is refused for such an object until a lawful basis and a
+    # controller have been recorded against it.
+    personal_data: Annotated[bool, Form()] = False,
     user: CurrentUser = None,
     idempotency_key: str | None = Header(default=None),
 ):
@@ -1281,6 +1322,7 @@ async def upload_evidence(
                     content_hash=content_hash,
                     mime_type=file.content_type or "application/octet-stream",
                     visibility=normalized_visibility,
+                    personal_data=personal_data,
                     correlation_id=request.state.correlation_id,
                     idempotency_key=key,
                 )
@@ -1432,6 +1474,83 @@ def _require_confirmation(analyzed: dict[str, Any] | None, confirmed: list[str])
             },
         )
     return sorted(set(confirmed) & set(SCHEMA_FIELDS))
+
+
+@app.get("/data-subjects/{subject_reference}")
+def data_subject_record(subject_reference: str, user: CurrentUser = None):
+    """Everything held about one person, for answering a subject access request.
+
+    Scoped to the controller: an operator sees the subjects of programmes its own
+    organisation is answerable for, and an administrator sees all of them. It reports what
+    is held rather than the contents, so this cannot become a way to read every restricted
+    object in the system by guessing a reference.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    if session_factory is None:
+        raise HTTPException(503, "This requires PERSISTENCE_MODE=postgres")
+    service = DataProtectionApplicationService(evidence_storage)
+    with session_factory() as session:
+        return service.subject_record(
+            session, actor=actor, subject_reference=subject_reference
+        )
+
+
+@app.post("/evidence/{evidence_id}/data-protection", status_code=201)
+def declare_data_protection(
+    request: Request,
+    evidence_id: str,
+    body: DataProtectionRequest,
+    user: CurrentUser = None,
+):
+    """Record what makes holding this evidence lawful, and who is answerable for it."""
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    _require_evidence_management(evidence_id, user)
+    if session_factory is None:
+        raise HTTPException(503, "Recording this requires PERSISTENCE_MODE=postgres")
+    service = DataProtectionApplicationService(evidence_storage)
+    return _tenant_write(
+        lambda session: service.declare(
+            session,
+            actor=actor,
+            evidence_id=evidence_id,
+            lawful_basis=body.lawfulBasis,
+            special_category=body.specialCategory,
+            controller_org_ref=body.controllerOrgRef,
+            joint_controller_org_ref=body.jointControllerOrgRef,
+            subject_reference=body.subjectReference,
+            purpose=body.purpose,
+            retain_until=body.retainUntil,
+            correlation_id=request.state.correlation_id,
+        )
+    )
+
+
+@app.post("/evidence/{evidence_id}/erase")
+def erase_evidence(
+    request: Request,
+    evidence_id: str,
+    body: ErasureRequest,
+    user: CurrentUser = None,
+):
+    """Destroy the key, making the object unrecoverable, and restate what rested on it.
+
+    The onchain commitment is not withdrawn and the response says so. It records that
+    these bytes were once committed, which remains true after the bytes are gone.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    _require_evidence_management(evidence_id, user)
+    if session_factory is None:
+        raise HTTPException(503, "Erasure requires PERSISTENCE_MODE=postgres")
+    service = DataProtectionApplicationService(evidence_storage)
+    return _tenant_write(
+        lambda session: service.erase(
+            session,
+            actor=actor,
+            evidence_id=evidence_id,
+            reason=body.reason,
+            correlation_id=request.state.correlation_id,
+        )
+    )
 
 
 @app.post("/evidence/{evidence_id}/review")
@@ -1772,6 +1891,20 @@ def integrity(request: Request, evidence_id: str, user: CurrentUser = None):
                 raise HTTPException(404, "Evidence not found")
             try:
                 content = evidence_storage.retrieve(record.storage_uri)
+            except EvidenceUnrecoverable as exc:
+                # Erased, not broken and not absent. Saying "could not be read back" here
+                # would describe a fault, when what happened is that someone exercised a
+                # right and this system did what it said it would.
+                record.integrity_status = "UNRECOVERABLE"
+                raise HTTPException(
+                    410,
+                    detail={
+                        "code": "EVIDENCE_ERASED",
+                        "message": "This evidence was erased at the request of its subject "
+                        "or by its retention schedule. The onchain commitment remains and "
+                        "still records that these bytes were once committed.",
+                    },
+                ) from exc
             except (OSError, ValueError) as exc:
                 raise HTTPException(
                     409,

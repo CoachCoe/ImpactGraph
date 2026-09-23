@@ -46,6 +46,7 @@ from .read_model import (
     reset_read_model,
     seed_read_model,
 )
+from .retention import RetentionResult, RetentionWorker
 from .worker import BlockchainOutboxWorker
 
 log = logger("impactgraph.worker")
@@ -53,7 +54,11 @@ log = logger("impactgraph.worker")
 
 def seed() -> None:
     settings = Settings.from_env()
-    storage = FileEvidenceStorage(settings.evidence_storage_path)
+    storage = FileEvidenceStorage(
+        settings.evidence_storage_path,
+        settings.evidence_encryption_key,
+        settings.evidence_key_path,
+    )
     invoice_uri = storage.uri_for("ev-inv-8291")
     storage.overwrite(invoice_uri, INVOICE_BYTES)
     store.reset()
@@ -95,7 +100,11 @@ def demo_reset(local_only: bool) -> None:
     settings = Settings.from_env()
     if not local_only or settings.demo_mode == "sepolia":
         raise RuntimeError("Demo reset is restricted to an explicitly selected local environment")
-    storage = FileEvidenceStorage(settings.evidence_storage_path)
+    storage = FileEvidenceStorage(
+        settings.evidence_storage_path,
+        settings.evidence_encryption_key,
+        settings.evidence_key_path,
+    )
     if settings.persistence_mode == "postgres":
         factory = create_session_factory(settings.database_url)
         with factory.begin() as session:
@@ -599,6 +608,50 @@ def worker_loop(interval_seconds: float) -> None:
         time.sleep(interval_seconds)
 
 
+def retention_once() -> RetentionResult:
+    """Erase everything past its retention schedule, once."""
+    configure_logging()
+    settings = Settings.from_env()
+    worker = RetentionWorker(
+        session_factory=create_session_factory(settings.database_url),
+        storage=FileEvidenceStorage(
+            settings.evidence_storage_path,
+            settings.evidence_encryption_key,
+            settings.evidence_key_path,
+        ),
+    )
+    result = worker.run_once()
+    log.info("retention.batch", erased=result.erased, failed=result.failed)
+    return result
+
+
+def retention_loop(interval_seconds: float) -> None:
+    """Enforce retention continuously.
+
+    Its own process rather than a step inside the chain worker: an erasure that is already
+    overdue must not wait on a registration, and a failing RPC must not postpone it.
+    """
+    configure_logging()
+    settings = Settings.from_env()
+    worker = RetentionWorker(
+        session_factory=create_session_factory(settings.database_url),
+        storage=FileEvidenceStorage(
+            settings.evidence_storage_path,
+            settings.evidence_encryption_key,
+            settings.evidence_key_path,
+        ),
+    )
+    log.info("retention.started", interval_seconds=interval_seconds)
+    while True:
+        try:
+            result = worker.run_once()
+            if result.erased or result.failed:
+                log.info("retention.batch", erased=result.erased, failed=result.failed)
+        except Exception as exc:  # noqa: BLE001 -- must outlive a transient database fault
+            log.error("retention.batch_failed", error_type=exc.__class__.__name__)
+        time.sleep(interval_seconds)
+
+
 def notification_loop(interval_seconds: float) -> None:
     """Drain notification intent from the outbox.
 
@@ -650,6 +703,11 @@ def main() -> None:
     loop.add_argument("--interval", type=float, default=2.0)
     notify = sub.add_parser("notifications")
     notify.add_argument("--interval", type=float, default=5.0)
+    sub.add_parser("retention-once")
+    retention = sub.add_parser("retention")
+    # Hourly by default: a retention period is measured in years, and checking more often
+    # would be load without meaning.
+    retention.add_argument("--interval", type=float, default=3600.0)
     deploy = sub.add_parser("deploy-registry")
     deploy.add_argument("--expect-address", default=None)
     sub.add_parser("bootstrap-chain")
@@ -671,6 +729,10 @@ def main() -> None:
         worker_loop(args.interval)
     elif args.command == "notifications":
         notification_loop(args.interval)
+    elif args.command == "retention-once":
+        retention_once()
+    elif args.command == "retention":
+        retention_loop(args.interval)
     elif args.command == "deploy-registry":
         deploy_registry(args.expect_address)
     elif args.command == "bootstrap-chain":

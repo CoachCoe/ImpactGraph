@@ -21,6 +21,9 @@ dependencies = [
   "web3>=7.7,<8",
   "structlog>=25.1,<26",
   "prometheus-client>=0.21,<1",
+  # AES-GCM for evidence at rest. Authenticated encryption is not something to hand-write,
+  # and the standard library has no AEAD.
+  "cryptography>=44,<47",
 ]
 
 [project.optional-dependencies]

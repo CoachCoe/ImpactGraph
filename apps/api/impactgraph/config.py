@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +14,25 @@ from dotenv import load_dotenv
 PUBLIC_CHAIN_IDS = frozenset({1, 11155111})
 
 ARTIFACT_RELATIVE_PATH = Path("contracts/out/ImpactRegistry.sol/ImpactRegistry.json")
+
+
+def _decode_encryption_key(configured: str) -> bytes:
+    """The 32-byte key that wraps every object's data key.
+
+    Refused rather than padded or hashed into shape: a key that is silently accepted at the
+    wrong length is a key nobody checks, and the whole erasure story rests on this one.
+    """
+    if not configured:
+        return b""
+    try:
+        key = base64.b64decode(configured, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("EVIDENCE_ENCRYPTION_KEY must be base64") from exc
+    if len(key) != 32:
+        raise ValueError(
+            f"EVIDENCE_ENCRYPTION_KEY must decode to 32 bytes, got {len(key)}"
+        )
+    return key
 
 
 def _resolve_artifact_path(configured: str | None) -> Path:
@@ -74,6 +95,12 @@ class Settings:
     explorer_url: str = ""
     confirmations_required: int = 1
     evidence_storage_path: Path = Path("./var/evidence")
+    #: Where the wrapped per-object keys live. Separate from the objects because erasure
+    #: destroys a key, and one backup containing both undoes every erasure on restore.
+    evidence_key_path: Path = Path("./var/evidence-keys")
+    #: Wraps each object's own data key. Destroying a wrapped key is how evidence is
+    #: erased while the commitment to it stays true -- see ADR-011.
+    evidence_encryption_key: bytes = b""
     max_upload_bytes: int = 10_485_760
     allowed_upload_types: tuple[str, ...] = (
         "application/pdf",
@@ -104,6 +131,12 @@ class Settings:
             explorer_url=os.getenv("BLOCK_EXPLORER_URL", ""),
             confirmations_required=int(os.getenv("BLOCKCHAIN_CONFIRMATIONS_REQUIRED", "1")),
             evidence_storage_path=Path(os.getenv("EVIDENCE_STORAGE_PATH", "./var/evidence")),
+            evidence_key_path=Path(
+                os.getenv("EVIDENCE_KEY_PATH", "./var/evidence-keys")
+            ),
+            evidence_encryption_key=_decode_encryption_key(
+                os.getenv("EVIDENCE_ENCRYPTION_KEY", "")
+            ),
             max_upload_bytes=int(os.getenv("MAX_UPLOAD_BYTES", "10485760")),
             allowed_upload_types=tuple(
                 item.strip()
@@ -125,6 +158,12 @@ class Settings:
             raise ValueError("Sepolia requires RPC_URL and IMPACT_REGISTRY_ADDRESS")
         if value.confirmations_required < 1:
             raise ValueError("BLOCKCHAIN_CONFIRMATIONS_REQUIRED must be positive")
+        if not value.evidence_encryption_key:
+            raise ValueError(
+                "EVIDENCE_ENCRYPTION_KEY is required: evidence is encrypted at rest so that "
+                "destroying a key erases it. Generate one with "
+                "`python -c \"import base64,os;print(base64.b64encode(os.urandom(32)).decode())\"`"
+            )
         if value.ai_provider not in {"mock", "tinker"}:
             raise ValueError("AI_PROVIDER must be mock or tinker")
         if value.ai_provider == "tinker" and not os.getenv("TINKER_API_KEY"):

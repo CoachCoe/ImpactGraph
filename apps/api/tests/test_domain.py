@@ -1,4 +1,7 @@
+import os
+import tempfile
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -37,6 +40,7 @@ from impactgraph.verification import (
     VerificationContext,
     VerificationPolicyService,
 )
+from tests.conftest import TEST_ENCRYPTION_KEY
 
 
 def make_claim() -> Claim:
@@ -141,7 +145,7 @@ def test_bundle_hash_is_order_independent_but_changes_with_evidence():
 
 
 def test_original_bytes_are_immutable_and_integrity_detects_changes(tmp_path: Path):
-    storage = FileEvidenceStorage(tmp_path)
+    storage = FileEvidenceStorage(tmp_path, TEST_ENCRYPTION_KEY)
     content = b"Invoice INV-8291"
     uri = storage.store("ev-1", content)
     expected = sha256_bytes(content)
@@ -293,7 +297,6 @@ def test_registry_commitment_is_read_from_the_matching_event():
 
 def test_the_seed_does_not_fabricate_a_registry_reference():
     """A made-up transaction hash would be believed by anything reading the registry."""
-    import tempfile
     from pathlib import Path
 
     from sqlalchemy import create_engine, select
@@ -306,7 +309,7 @@ def test_the_seed_does_not_fabricate_a_registry_reference():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     factory = sessionmaker(engine, expire_on_commit=False)
-    storage = FileEvidenceStorage(Path(tempfile.mkdtemp()))
+    storage = FileEvidenceStorage(Path(tempfile.mkdtemp()), TEST_ENCRYPTION_KEY)
     with factory.begin() as session:
         seed_read_model(session, storage)
     with factory() as session:
@@ -345,7 +348,7 @@ def test_seeding_registers_the_evidence_when_a_signer_is_configured(tmp_path, mo
     Base.metadata.create_all(engine)
     factory = sessionmaker(engine, expire_on_commit=False)
     with factory.begin() as session:
-        seed_read_model(session, FileEvidenceStorage(Path(tmp_path / "evidence")))
+        seed_read_model(session, FileEvidenceStorage(Path(tmp_path / "evidence"), TEST_ENCRYPTION_KEY))
 
     monkeypatch.setattr(cli, "create_session_factory", lambda _url: factory)
     settings = Settings.from_env()
@@ -401,7 +404,7 @@ def test_seeding_a_fresh_database_against_a_surviving_chain_does_not_re_register
         Base.metadata.create_all(engine)
         made = sessionmaker(engine, expire_on_commit=False)
         with made.begin() as session:
-            seed_read_model(session, FileEvidenceStorage(_Path(tmp_path / "evidence")))
+            seed_read_model(session, FileEvidenceStorage(_Path(tmp_path / "evidence"), TEST_ENCRYPTION_KEY))
         return url, made
 
     settings = Settings.from_env()
@@ -466,3 +469,65 @@ def test_seeding_reports_why_it_did_not_register():
     object.__setattr__(settings, "registry_address", "0x" + "9" * 40)
     assert register_seeded_evidence(settings) is None
     assert "holds no signing key" in seeded_registration_note(settings)
+
+
+def test_the_migrations_build_the_schema_the_models_describe():
+    """The suite creates tables from the models and production runs the migrations, so the
+    two can disagree and only the deployment finds out.
+
+    They did. A new table's created_at was declared NOT NULL with no server default, which
+    every other migration supplies and which the model relies on -- so every insert worked
+    against the test database and failed against PostgreSQL with a not-null violation.
+
+    Run against PostgreSQL, because that is what the migrations are written for. One of
+    them alters a column's nullability, which SQLite accepts only in versions newer than
+    the one CI ships -- so checking this on SQLite passed here and failed there while
+    proving nothing about either.
+    """
+    postgres = os.environ.get("TEST_POSTGRES_URL")
+    if not postgres:
+        pytest.skip("TEST_POSTGRES_URL is not set; the migrations need PostgreSQL")
+
+    from alembic.config import Config
+    from sqlalchemy import create_engine, inspect, text
+
+    from alembic import command
+    from impactgraph.persistence import Base
+
+    # Its own database rather than a schema: alembic reads its settings through
+    # configparser, and a search_path option in the URL is percent-encoded, which
+    # configparser reads as interpolation syntax and refuses.
+    database = f"drift_{uuid4().hex[:12]}"
+    admin = create_engine(postgres, isolation_level="AUTOCOMMIT")
+    with admin.connect() as connection:
+        connection.execute(text(f'CREATE DATABASE "{database}"'))
+    url = postgres.rsplit("/", 1)[0] + f"/{database}"
+
+    root = Path(__file__).resolve().parents[1]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "alembic"))
+    # env.py takes the URL from the settings rather than the config.
+    original = os.environ["DATABASE_URL"]
+    os.environ["DATABASE_URL"] = url
+    try:
+        command.upgrade(config, "head")
+        migrated = create_engine(url)
+        inspector = inspect(migrated)
+        migrated_tables = set(inspector.get_table_names())
+
+        for table in sorted(Base.metadata.tables):
+            assert table in migrated_tables, f"{table} has no table in the migrations"
+            columns = {c["name"]: c for c in inspector.get_columns(table)}
+            expected = set(Base.metadata.tables[table].columns.keys())
+            assert expected <= set(columns), (
+                f"{table} is missing {expected - set(columns)} in the migrations"
+            )
+            assert columns["created_at"]["default"] is not None, (
+                f"{table}.created_at has no server default in the migrations, so every "
+                "insert relying on the model's will fail"
+            )
+    finally:
+        os.environ["DATABASE_URL"] = original
+        migrated.dispose()
+        with admin.connect() as connection:
+            connection.execute(text(f'DROP DATABASE "{database}" WITH (FORCE)'))

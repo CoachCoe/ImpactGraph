@@ -24,6 +24,12 @@ x-chain: &chain
   # Real extraction: the demo reads the uploaded document with a model rather than
   # returning a fixture. The key is never baked into the image or this file -- it is read
   # from the host environment, and scripts/demo.sh refuses to start without it.
+  # Throwaway, like everything else in this stack. A deployment generates its own and
+  # keeps it somewhere the evidence disk is not, because destroying it is the erasure.
+  # A volume of its own, because erasure destroys a key and one backup holding both the
+  # objects and their keys undoes every erasure the moment it is restored.
+  EVIDENCE_KEY_PATH: /data/evidence-keys
+  EVIDENCE_ENCRYPTION_KEY: "${EVIDENCE_ENCRYPTION_KEY:-aW1wYWN0Z3JhcGgtZGVtby1rZXktbm90LXNlY3JldCE=}"
   AI_PROVIDER: tinker
   # Not ${VAR:?...}: that would fail `demo.sh down` and `logs` too. Absent, the API
   # refuses to start, and scripts/demo.sh says so before anything is built.
@@ -72,7 +78,7 @@ services:
       chain: {condition: service_healthy}
       postgres: {condition: service_healthy}
     environment: *chain
-    volumes: ["evidence-data:/data/evidence"]
+    volumes: ["evidence-data:/data/evidence", "evidence-keys:/data/evidence-keys"]
     restart: "no"
     command:
       - /bin/sh
@@ -93,7 +99,7 @@ services:
       <<: *chain
       APP_ENV: demo
       BLOCKCHAIN_CONFIRMATIONS_REQUIRED: "1"
-    volumes: ["evidence-data:/data/evidence"]
+    volumes: ["evidence-data:/data/evidence", "evidence-keys:/data/evidence-keys"]
     ports: ["${API_PORT:-8000}:8000"]
     # The image probes liveness, so a transient dependency fault cannot get the
     # process replaced. The service_healthy gates below mean "the API can serve",
@@ -119,7 +125,7 @@ services:
     environment:
       <<: *chain
       BLOCKCHAIN_CONFIRMATIONS_REQUIRED: "1"
-    volumes: ["evidence-data:/data/evidence"]
+    volumes: ["evidence-data:/data/evidence", "evidence-keys:/data/evidence-keys"]
     command: ["python", "-m", "impactgraph.cli", "worker", "--interval", "2"]
     # Scraped separately from the API: the worker is its own process and its counters
     # live in its own memory.
@@ -137,7 +143,7 @@ services:
     depends_on:
       api: {condition: service_healthy}
     environment: *chain
-    volumes: ["evidence-data:/data/evidence"]
+    volumes: ["evidence-data:/data/evidence", "evidence-keys:/data/evidence-keys"]
     command:
       - /bin/sh
       - -c
@@ -180,3 +186,6 @@ services:
 
 volumes:
   evidence-data:
+  # Separate from the objects on purpose. A deployment gives this its own backup policy,
+  # because a restore that predates an erasure brings the key back and undoes it.
+  evidence-keys:
