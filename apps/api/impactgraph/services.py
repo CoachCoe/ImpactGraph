@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .blockchain import digest_bytes, entity_id_bytes
-from .domain import BlockchainStatus, EvidenceWorkflowStatus, Role
+from .domain import BlockchainStatus, EvidenceWorkflowStatus, ReconciliationStatus, Result, Role
 from .hashing import claim_hash, hash_fields, program_hash
 from .notifications import enqueue_claim_status_change
 from .persistence import (
@@ -22,6 +22,7 @@ from .persistence import (
     DataProtectionRecord,
     DomainEntityRecord,
     EvidenceRecord,
+    FinancialTransactionRecord,
     FundingRecord,
     IdempotencyRecord,
     OrganizationRecord,
@@ -1528,4 +1529,101 @@ class ClaimPublicationService:
             "alreadyPublished": False,
             "note": "This page now shows whatever the claim's status becomes, including if "
             "it is later challenged or revoked. There is no way to unpublish it.",
+        }
+
+
+class SettlementService:
+    """What happens to a claim when the payment under it stops being real.
+
+    A reversal is not an evidence change, so it does not travel the path an integrity
+    failure takes and would otherwise never reach the claim. Left alone, a donor would
+    read a verified badge over a payment the bank had taken back.
+    """
+
+    def __init__(self) -> None:
+        self.audit = AuditService()
+
+    @staticmethod
+    def evidence_resting_on(session: Session, transaction_ref: str) -> list[str]:
+        return [
+            record.external_id
+            for record in session.scalars(select(EvidenceRecord))
+            if (record.reconciliation or {}).get("transactionRef") == transaction_ref
+        ]
+
+    def mark_reversed(
+        self,
+        session: Session,
+        *,
+        actor: ApplicationActor,
+        transaction_ref: str,
+        reason: str,
+        correlation_id: str,
+    ) -> dict[str, Any]:
+        if actor.role not in {Role.OPERATOR, Role.ADMIN}:
+            raise AuthorizationError("Only an operator or administrator may record this")
+        transaction = session.scalar(
+            select(FinancialTransactionRecord).where(
+                FinancialTransactionRecord.external_id == transaction_ref
+            )
+        )
+        if transaction is None:
+            raise LookupError("Financial transaction not found")
+        if transaction.settlement == "REVERSED":
+            return {
+                "transactionRef": transaction_ref,
+                "alreadyReversed": True,
+                "claimsRestated": [],
+            }
+
+        transaction.settlement = "REVERSED"
+        transaction.reversed_at = datetime.now(UTC)
+        # The money is not spent any more, so it stops counting against the allocation --
+        # otherwise a reversal permanently consumes budget that was never spent.
+        transaction.match_status = "UNMATCHED"
+        session.flush()
+
+        restated: list[str] = []
+        for evidence_id in self.evidence_resting_on(session, transaction_ref):
+            evidence = session.scalar(
+                select(EvidenceRecord).where(EvidenceRecord.external_id == evidence_id)
+            )
+            if evidence is None:
+                continue
+            # The policy reads the evidence's reconciliation, not the transaction's
+            # settlement, so changing only the latter left the claim standing over a
+            # payment that had been withdrawn. The reconciliation has to say so.
+            reconciliation = dict(evidence.reconciliation or {})
+            reconciliation["status"] = ReconciliationStatus.CONFLICT
+            reconciliation["checks"] = [
+                *reconciliation.get("checks", []),
+                {
+                    "check": "PAYMENT_REVERSED",
+                    "result": Result.FAIL,
+                    # CONFLICT rather than UNMATCHED on purpose: a reader should see that
+                    # this was matched to a payment later taken back, which is a different
+                    # and more alarming fact than never having been matched at all.
+                    "message": f"The payment {transaction_ref} was reversed after this was "
+                    "reconciled against it",
+                },
+            ]
+            evidence.reconciliation = reconciliation
+            session.flush()
+            restated.extend(restate_claims_for(session, evidence_id, correlation_id))
+
+        self.audit.record(
+            session,
+            actor=actor,
+            action="PAYMENT_REVERSED",
+            entity_type="FINANCIAL_TRANSACTION",
+            entity_id=transaction_ref,
+            correlation_id=correlation_id,
+            metadata={"reason": reason, "claimsRestated": restated},
+        )
+        return {
+            "transactionRef": transaction_ref,
+            "alreadyReversed": False,
+            "claimsRestated": restated,
+            "note": "The payment is recorded as reversed and no longer counts against its "
+            "allocation. Claims that rested on it have been re-evaluated.",
         }

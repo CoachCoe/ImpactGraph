@@ -404,6 +404,20 @@ class FinancialTransactionRecord(MoneyMixin, EntityMixin, Base):
     source_ref: Mapped[str] = mapped_column(String(160))
     # MATCHED / PARTIAL_MATCH / UNMATCHED / CONFLICT, set by reconciliation against evidence.
     match_status: Mapped[str] = mapped_column(String(24), default="UNMATCHED", index=True)
+    # A bank reports a payment before it settles and can reverse it afterwards. Only a
+    # settled payment is a fact about the world; a pending one has not happened yet and a
+    # reversed one did not happen, and neither may support a claim.
+    settlement: Mapped[str] = mapped_column(
+        String(16), default="SETTLED", server_default="SETTLED", index=True
+    )
+    #: When the provider reported the reversal, so a claim that fell can be traced to it.
+    reversed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: What a converted figure came from, so it can always be traced to the rate that
+    #: produced it rather than being a number nobody can reproduce.
+    rate_source: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    rate_numerator: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rate_denominator: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rate_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class DeliveryRecord(EntityMixin, Base):

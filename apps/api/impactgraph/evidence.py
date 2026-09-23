@@ -198,6 +198,7 @@ class ReconciliationService:
         """
         if financial_transaction is None:
             return {
+                "transactionRef": None,
                 "status": ReconciliationStatus.UNMATCHED,
                 "checks": [
                     {
@@ -297,7 +298,15 @@ class ReconciliationService:
             if failures
             else (ReconciliationStatus.PARTIAL_MATCH if warnings else ReconciliationStatus.MATCHED)
         )
-        return {"status": status, "checks": checks, "reasons": [item["message"] for item in checks]}
+        return {
+            "status": status,
+            "checks": checks,
+            "reasons": [item["message"] for item in checks],
+            # Which payment this was reconciled against. The messages name it, but a link
+            # recovered by reading prose is not a link -- and a reversal has to find every
+            # piece of evidence resting on the payment that did not happen.
+            "transactionRef": financial_transaction["id"],
+        }
 
     @staticmethod
     def _check(name: str, passes: bool, success: str, failure: str) -> dict[str, Any]:

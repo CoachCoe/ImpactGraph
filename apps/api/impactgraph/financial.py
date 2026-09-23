@@ -398,3 +398,8 @@ class EvidenceReconciliationService:
                 result["status"].value if hasattr(result["status"], "value") else result["status"]
             )
         return result
+
+
+#: A bank reports a payment before it settles and can withdraw it afterwards. Only the
+#: middle one of these is a fact about the world.
+SETTLEMENT_STATES = ("PENDING", "SETTLED", "REVERSED")

@@ -103,6 +103,7 @@ from .services import (
     FunderNameService,
     IdempotencyConflictError,
     OnboardingApplicationService,
+    SettlementService,
     TenantApplicationService,
     VerificationApplicationService,
 )
@@ -591,6 +592,39 @@ def wallet_verify(body: WalletProofRequest, user: CurrentUser = None):
             raise _unauthenticated()
         record.wallet_address = address
     return {"walletAddress": address}
+
+
+class ReversalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+@app.post("/financial/transactions/{transaction_ref}/reversal")
+def record_reversal(
+    request: Request,
+    transaction_ref: str,
+    body: ReversalRequest,
+    user: CurrentUser = None,
+):
+    """Record that the bank took a payment back.
+
+    A reversal is not an evidence change, so nothing else would carry it to the claim. A
+    donor would otherwise read a verified badge over a payment that did not happen.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    if session_factory is None:
+        raise HTTPException(503, "Recording a reversal requires PERSISTENCE_MODE=postgres")
+    service = SettlementService()
+    return _tenant_write(
+        lambda session: service.mark_reversed(
+            session,
+            actor=actor,
+            transaction_ref=transaction_ref,
+            reason=body.reason,
+            correlation_id=request.state.correlation_id,
+        )
+    )
 
 
 @app.get("/financial/programs/{program_id}")

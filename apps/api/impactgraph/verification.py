@@ -383,6 +383,24 @@ def claims_supported_by(session: Session, evidence_id: str) -> list[ClaimRecord]
     )
 
 
+def claims_resting_on_payment(session: Session, transaction_ref: str) -> list[str]:
+    """Evidence reconciled against this payment.
+
+    A reversal is not an evidence change, so it does not arrive through the path an
+    integrity failure takes. It still has to reach the claim: a payment that did not
+    happen cannot go on supporting one, and the reconciliation that matched them is the
+    link between the two.
+    """
+    from .persistence import EvidenceRecord
+
+    matched: list[str] = []
+    for evidence in session.scalars(select(EvidenceRecord)):
+        reconciliation = evidence.reconciliation or {}
+        if reconciliation.get("transactionRef") == transaction_ref:
+            matched.append(evidence.external_id)
+    return matched
+
+
 def restate_claims_for(
     session: Session, evidence_id: str, correlation_id: str = ""
 ) -> list[str]:
