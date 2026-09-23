@@ -43,7 +43,10 @@ function RiskQueue() {
   const [findings, setFindings] = useState<Finding[] | null>(null);
   const [precision, setPrecision] = useState<Precision>({});
   const [scanning, setScanning] = useState(false);
+  // Page-level problems only. A refusal to close one finding belongs beside that
+  // finding, not at the top of a queue the reviewer may have scrolled past.
   const [error, setError] = useState<string | null>(null);
+  const [findingError, setFindingError] = useState<Record<string, string>>({});
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -79,14 +82,24 @@ function RiskQueue() {
     }
   };
 
+  const failFinding = (id: string, message: string) =>
+    setFindingError((current) => ({ ...current, [id]: message }));
+
   const dispose = async (finding: Finding, state: Finding["state"]) => {
     const note = (notes[finding.id] ?? "").trim();
     if ((state === "CONFIRMED" || state === "DISMISSED") && !note) {
-      setError("Say why before closing a finding. The note is what makes this measurable.");
+      failFinding(
+        finding.id,
+        "Say why before closing this one. The note is what makes these checks measurable.",
+      );
       return;
     }
     setBusy(finding.id);
-    setError(null);
+    setFindingError((current) => {
+      const next = { ...current };
+      delete next[finding.id];
+      return next;
+    });
     try {
       await api(`/risk/findings/${finding.id}/disposition`, {
         method: "POST",
@@ -96,7 +109,10 @@ function RiskQueue() {
       setNotes((current) => ({ ...current, [finding.id]: "" }));
       await load();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The decision was not recorded.");
+      failFinding(
+        finding.id,
+        reason instanceof Error ? reason.message : "The decision was not recorded.",
+      );
     } finally {
       setBusy(null);
     }
@@ -219,6 +235,11 @@ function RiskQueue() {
               Not a problem
             </button>
           </div>
+          {findingError[finding.id] ? (
+            <p className="errorMessage" role="alert">
+              {findingError[finding.id]}
+            </p>
+          ) : null}
           <p className="note">
             Confirming records what you found. It does not change the claim, notify anyone
             outside your organisation, or make an accusation — deciding what to do about it

@@ -31,8 +31,11 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     <html lang="en" className={`${sans.variable} ${display.variable} ${mono.variable}`}>
       <body>
         <SessionProvider>
+          <a className="skipLink" href="#main">
+            Skip to content
+          </a>
           <Header />
-          <main>{children}</main>
+          <main id="main">{children}</main>
           <footer>
             ImpactGraph · Transparent provenance for real-world impact
             <span>

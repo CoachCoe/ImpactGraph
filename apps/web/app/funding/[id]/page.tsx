@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Status } from "@/components/Status";
@@ -10,6 +11,11 @@ const CLAIM_TONE: Record<string, "verified" | "warning" | "failed" | "pending"> 
   CHALLENGED: "warning",
   REJECTED: "failed",
   REVOKED: "failed",
+};
+
+export const metadata: Metadata = {
+  title: "Where this contribution went — ImpactGraph",
+  description: "Follow one contribution through to the claims it paid for.",
 };
 
 export default async function FundingAttributionPage({

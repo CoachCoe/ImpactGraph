@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { IntegrityCheck } from "@/components/IntegrityCheck";
 import { Status } from "@/components/Status";
@@ -8,6 +9,20 @@ import { crossCheckSentence } from "@/lib/sentences";
 
 const money = (minor: number, currency: string) =>
   new Intl.NumberFormat("en-US", { style: "currency", currency }).format(minor / 100);
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const evidence = await readFromApi<Evidence>(`/evidence/${(await params).id}`);
+  if (!evidence) return { title: "No such evidence — ImpactGraph", robots: { index: false } };
+  return {
+    title: `Evidence ${evidence.id} — ImpactGraph`,
+    description:
+      "The document behind a claim, its cryptographic commitment, and whether it still matches.",
+  };
+}
 
 export default async function EvidenceInspector({
   params,

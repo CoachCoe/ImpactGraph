@@ -516,3 +516,12 @@ footer{margin-top:24px;padding:36px var(--gutter) 56px;background:var(--ink-deep
 .riskNote{width:100%;margin-top:6px;padding:11px 12px;border:1px solid var(--ghost-line);border-radius:8px;background:var(--field);color:var(--ink);font-family:var(--font-sans);font-size:15px;line-height:1.5;min-height:76px;resize:vertical}
 .riskActions{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
 .riskActions button{flex:1 1 auto;min-width:150px}
+
+/* --- keyboard entry --- */
+/* Off-screen until focused rather than display:none, which would take it out of the tab
+   order and defeat the purpose. Every page puts a full navigation bar before its content,
+   and without this a keyboard user tabs through all of it on every page. */
+/* No transition: a keyboard user tabbing quickly should not wait to see where focus
+   went, and the motion budget does not stretch to an affordance that exists to be fast. */
+.skipLink{position:absolute;left:16px;top:-56px;z-index:20;padding:11px 18px;border-radius:var(--radius-pill);background:var(--brand);color:var(--paper);font-family:var(--font-mono);font-size:11px;letter-spacing:var(--track-label-sm);text-transform:uppercase;text-decoration:none}
+.skipLink:focus{top:12px}

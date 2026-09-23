@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { ImportStatement } from "@/components/ImportStatement";
 import { Status } from "@/components/Status";
@@ -5,6 +6,12 @@ import { readFromApi } from "@/lib/api";
 import { formatMoney } from "@/lib/money";
 import { resolveProgram } from "@/lib/programs";
 import type { FinancialSummary } from "@/lib/types";
+
+export const metadata: Metadata = {
+  title: "The money trail — ImpactGraph",
+  description:
+    "Every payment in a programme, what evidence was filed against it, and what reconciled.",
+};
 
 const MATCH_LABEL: Record<string, string> = {
   MATCHED: "Evidenced",
