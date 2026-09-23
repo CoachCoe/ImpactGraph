@@ -491,3 +491,19 @@ footer{margin-top:24px;padding:36px var(--gutter) 56px;background:var(--ink-deep
   .hash{word-break:break-all;font-size:9pt}
   a[href]::after{content:""}
 }
+
+/* Field capture. Sized for one hand on a 360px phone: the control that takes a photograph
+   is the biggest thing on the screen, and nothing needs a second hand to reach. */
+.capturePanel{margin-bottom:18px}
+.captureButton{display:flex;align-items:center;justify-content:center;min-height:56px;margin:16px 0 0;border:1px solid var(--ok);border-radius:10px;background:var(--ok-quiet);color:var(--ok-ink);font-weight:600;cursor:pointer}
+.captureButton input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.captureStatus{margin:14px 0 0;font-size:13px;line-height:1.55}
+.captureStatus.offline{color:var(--warn)}
+.captureList{list-style:none;margin:14px 0 0;padding:0;display:grid;gap:8px}
+.captureList li{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 13px;border:1px solid var(--line);border-radius:8px;background:var(--card-quiet);font-size:13px}
+.captureList small{display:block;color:var(--muted);margin-top:3px;font-size:11px}
+.captureList em{flex-shrink:0;font-style:normal;font-family:var(--font-mono);font-size:10px;letter-spacing:var(--track-label-sm);text-transform:uppercase;color:var(--muted)}
+.captureList li.uploaded em{color:var(--ok)}
+.captureList li.failed em{color:var(--fail)}
+.captureList li.uploading em{color:var(--warn)}
+.captureStatus.filed{color:var(--ok-ink)}
