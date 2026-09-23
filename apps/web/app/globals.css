@@ -462,6 +462,10 @@ footer{margin-top:24px;padding:36px var(--gutter) 56px;background:var(--ink-deep
 .basisPanel input,.basisPanel select{width:100%;margin-top:5px;padding:9px;border:1px solid var(--ghost-line);border-radius:7px;background:var(--field);color:var(--ink);font-family:var(--font-sans);font-size:14px;letter-spacing:0;text-transform:none}
 .basisPanel .button{margin-top:16px}
 .proof{max-width:840px;margin:0 auto;display:grid;gap:22px}
+/* A grid item will not shrink below its content without this, so one unbroken hash or
+   the embed snippet widens the whole page rather than scrolling inside its own box. */
+.proof>*{min-width:0}
+.proof .hash{overflow-wrap:anywhere}
 .proofHead{padding:28px 0 4px}
 .proofHead h1{margin:8px 0 6px;font-size:clamp(24px,4vw,34px);line-height:1.25}
 .proofBy{color:var(--muted);margin:0 0 14px}
