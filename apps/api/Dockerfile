@@ -17,7 +17,7 @@ COPY apps/api/impactgraph ./impactgraph
 RUN python -m venv /opt/venv \
  && /opt/venv/bin/pip install --upgrade pip \
  && /opt/venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch \
- && /opt/venv/bin/pip install .
+ && /opt/venv/bin/pip install '.[tinker]'
 
 FROM base AS runtime
 COPY --from=build /opt/venv /opt/venv

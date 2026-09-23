@@ -78,6 +78,25 @@ def _first_json_object(text: str) -> dict[str, Any]:
     return json.loads(match.group(0))
 
 
+def _conform(raw: dict[str, Any]) -> dict[str, Any]:
+    """Reduce the reply to the shape the review boundary accepts.
+
+    A model asked for nine keys sometimes returns ten, and an unexpected key is refused at
+    review -- in front of an operator who can do nothing about it. A key it omitted becomes
+    an explicit None, which `review_required_fields` puts in front of that operator instead.
+    """
+    stated = raw.get("selfReportedConfidence")
+    stated = stated if isinstance(stated, dict) else {}
+    return {
+        **{field: raw.get(field) for field in _SCHEMA_FIELDS},
+        "selfReportedConfidence": {
+            field: float(value)
+            for field, value in stated.items()
+            if field in _SCHEMA_FIELDS and isinstance(value, int | float) and 0 <= value <= 1
+        },
+    }
+
+
 def review_required_fields(extraction: dict[str, Any]) -> list[str]:
     """Which fields a person has to confirm before this is registered."""
     confidence = extraction.get("selfReportedConfidence") or {}
@@ -108,9 +127,14 @@ class TinkerEvidenceAnalysisProvider:
     def _ensure(self) -> None:
         if self._client is not None:
             return
-        import tinker
-        from tml_renderers.tokenizers import o200k_base_chat
-        from tml_renderers.v0 import Renderer
+        try:
+            import tinker
+            from tml_renderers.tokenizers import o200k_base_chat
+            from tml_renderers.v0 import Renderer
+        except ImportError as exc:  # pragma: no cover - a deployment fault, not a path
+            raise RuntimeError(
+                "AI_PROVIDER=tinker needs the tinker extra: pip install '.[tinker]'"
+            ) from exc
 
         self._tokenizer = o200k_base_chat()
         self._renderer = Renderer(self._tokenizer)
@@ -143,12 +167,7 @@ class TinkerEvidenceAnalysisProvider:
             ).result()
 
         text = self._tokenizer.decode(list(response.sequences[0].tokens))
-        extraction = _first_json_object(text)
-        confidence = extraction.get("selfReportedConfidence") or {}
-        overall = min(
-            (value for value in confidence.values() if isinstance(value, int | float)),
-            default=0.0,
-        )
+        extraction = _conform(_first_json_object(text))
         # Never the extracted content: the document is the operator's, and an extraction
         # carries whatever the document carries.
         log.info(
@@ -163,7 +182,6 @@ class TinkerEvidenceAnalysisProvider:
             provider=self.name,
             model=self.model,
             processed_at=started.isoformat(),
-            confidence=float(overall),
             raw_response={
                 "reply": text,
                 "confidenceBasis": "self-reported by the model, not measured",

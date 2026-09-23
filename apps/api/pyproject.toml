@@ -21,15 +21,15 @@ dependencies = [
   "web3>=7.7,<8",
   "structlog>=25.1,<26",
   "prometheus-client>=0.21,<1",
-  # Document extraction. tml-renderers is required rather than optional for the
-  # Inkling models, which refuse get_tokenizer, and it imports torch at module load.
-  "tinker>=0.30,<1",
-  "tml-renderers>=0.1,<1",
-  "pillow>=11,<12",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3,<9", "httpx>=0.28,<1", "ruff>=0.9,<1", "mypy>=1.14,<2"]
+# AI_PROVIDER=tinker only. Separated because tml-renderers -- which the Inkling models
+# require, refusing get_tokenizer -- imports torch at module load, and a default install
+# that is mock-backed should not pay several hundred megabytes for a code path it never
+# enters. The provider imports these lazily, so the API runs without them.
+tinker = ["tinker>=0.30,<1", "tml-renderers>=0.1,<1", "pillow>=11,<12"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["impactgraph"]

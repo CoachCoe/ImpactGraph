@@ -106,8 +106,15 @@ One command, nothing else installed but Docker:
 
 ```bash
 cd contracts && forge build && cd ..   # the API image deploys from this artifact
+export TINKER_API_KEY=...              # the demo reads uploaded documents with a model
 ./scripts/demo.sh up
 ```
+
+The demo runs `AI_PROVIDER=tinker`, so an uploaded invoice is read by
+`thinkingmachines/Inkling-Small` rather than matched against a fixture. `demo.sh up`
+refuses to start without a key rather than failing on the operator's first upload. To run
+it offline instead, set `AI_PROVIDER=mock` in `docker-compose.demo.yml`; the fixture
+reader recognises only the seeded `INV-8291`.
 
 That starts a disposable chain, deploys the registry, creates the onchain program and
 claim entities, migrates, seeds, and smoke-tests the result — then prints the URLs. The
@@ -311,8 +318,15 @@ What is not:
 - **No payment *initiation*, by design.** ImpactGraph observes financial activity through
   a `FinancialDataProvider` and never moves money. The provider is a deterministic mock;
   a real adapter implements the same interface without anything downstream changing.
-- **No AI.** The extractor is a fixed dictionary returned for documents containing
-  `INV-8291`. `AI_PROVIDER` set to anything but `mock` fails at startup rather than silently using the mock.
+- **Extraction confidence is self-reported.** A model asked how sure it is produces a
+  plausible number, not a calibrated one, so nothing downstream is gated on it. The fields
+  reconciliation resolves a payment against — invoice number, amount and currency — are
+  confirmed by an operator whatever the model claims, because a single misread digit turns
+  a matched payment into an unmatched one. `AI_PROVIDER` names `mock` or `tinker`, and
+  anything else fails at startup rather than silently using the mock.
+- **PDFs are refused, not read.** Only PNG, JPEG and plain text reach the model. A PDF
+  decoded as text is mojibake, and a model handed mojibake returns confident nonsense;
+  rendering pages to images is the fix and is not built.
 - **Incomplete verifier decisions.** Reject is implemented as an idempotent audited domain
   operation. Request-more-evidence remains disabled because the specification does not define
   whether it returns a claim to EVIDENCE_PENDING or leaves it VERIFICATION_PENDING.

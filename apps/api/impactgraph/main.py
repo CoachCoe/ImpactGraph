@@ -267,16 +267,22 @@ class InvoiceExtraction(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # Required, because reconciliation resolves a payment against these and an operator
+    # confirms every one of them before registration. The rest are nullable: a real
+    # document need not carry an equipment line, and a model that invents one to satisfy
+    # a schema is worse than a model that says the document did not contain it.
     documentType: str
     invoiceNumber: str
-    vendor: str
     amountMinor: int = Field(ge=0)
     currency: str = Field(pattern=r"^[A-Z]{3}$")
-    date: str
-    equipment: str
-    quantity: int = Field(ge=1)
-    projectReference: str
-    confidence: float = Field(ge=0, le=1)
+    vendor: str | None = None
+    date: str | None = None
+    equipment: str | None = None
+    quantity: int | None = Field(default=None, ge=1)
+    projectReference: str | None = None
+    # Self-reported by the model and per field, so the operator screen can mark the ones
+    # worth looking at rather than presenting one number for the whole document.
+    selfReportedConfidence: dict[str, Annotated[float, Field(ge=0, le=1)]]
 
 
 class EvidenceReviewRequest(BaseModel):

@@ -248,6 +248,10 @@ summary{font-size:13px;font-weight:700;cursor:pointer}
 .documentTitle small{color:var(--muted);margin-top:4px}
 .formGrid label{font-family:var(--font-mono);font-size:10px;letter-spacing:var(--track-label-sm);text-transform:uppercase;color:var(--muted)}
 .formGrid input{width:100%;margin-top:5px;border:1px solid var(--ghost-line);padding:10px;border-radius:7px;background:var(--field);color:var(--ink)}
+.reviewNote{background:var(--warn-wash);border-left:3px solid var(--warn);border-radius:0 8px 8px 0;padding:12px 14px;margin:20px 0 0;font-size:12px;line-height:1.55}
+.formGrid label.needsReview input[type=text],.formGrid label.needsReview>input{border-color:var(--warn)}
+.confirmField{display:flex;align-items:center;gap:7px;margin-top:6px;font-family:var(--font-sans);font-size:11px;letter-spacing:0;text-transform:none;color:var(--muted)}
+.confirmField input{width:auto;margin:0}
 .aiNote{display:flex;justify-content:space-between;background:var(--ok-quiet);border-radius:8px;padding:12px;font-family:var(--font-mono);font-size:11px}
 .aiNote span{color:var(--muted)}
 .uploadPanel{display:block}

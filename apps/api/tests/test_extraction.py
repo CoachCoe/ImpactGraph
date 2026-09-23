@@ -10,8 +10,11 @@ from __future__ import annotations
 import pytest
 
 from impactgraph.extraction import (
+    _INSTRUCTION,
+    _SCHEMA_FIELDS,
     RECONCILIATION_KEYS,
     REVIEW_THRESHOLD,
+    _conform,
     _first_json_object,
     review_required_fields,
 )
@@ -133,3 +136,45 @@ def test_an_unknown_provider_is_refused_rather_than_quietly_mocked():
             del os.environ["AI_PROVIDER"]
         else:
             os.environ["AI_PROVIDER"] = original
+
+
+def test_a_providers_extraction_is_accepted_by_the_boundary_that_registers_it():
+    """The shape produced and the shape accepted were allowed to drift apart once.
+
+    The review model forbids unknown keys, so a provider emitting per-field confidence
+    while the model expected a single `confidence` float made every real extraction fail
+    validation at the one point an operator submits it -- after the wait, after the review.
+    """
+    from impactgraph.evidence import MOCK_INVOICE_EXTRACTION
+    from impactgraph.main import InvoiceExtraction
+
+    InvoiceExtraction(**MOCK_INVOICE_EXTRACTION)
+    InvoiceExtraction(**_conform(dict(COMPLETE, selfReportedConfidence={"vendor": 0.98})))
+
+
+def test_the_prompt_and_the_boundary_describe_the_same_document():
+    """A field asked for but not accepted is rejected at review; a field accepted but
+    never asked for is always absent and so always flagged. Either way an operator pays."""
+    from impactgraph.main import InvoiceExtraction
+
+    accepted = set(InvoiceExtraction.model_fields) - {"selfReportedConfidence"}
+    assert accepted == set(_SCHEMA_FIELDS)
+    assert all(field in _INSTRUCTION for field in _SCHEMA_FIELDS)
+
+
+def test_a_key_the_model_invented_is_dropped_rather_than_refused_at_review():
+    conformed = _conform({**COMPLETE, "bankAccount": "GB29 NWBK 6016 1331 9268 19"})
+    assert "bankAccount" not in conformed
+
+
+def test_a_key_the_model_omitted_becomes_a_field_to_confirm():
+    conformed = _conform({"invoiceNumber": "MBS-4417"})
+    assert conformed["vendor"] is None
+    assert set(review_required_fields(conformed)) == set(_SCHEMA_FIELDS)
+
+
+def test_a_confidence_outside_zero_to_one_is_not_believed():
+    """It is a number the model chose, not a measurement, and 1.4 means nothing."""
+    conformed = _conform({**COMPLETE, "selfReportedConfidence": {"vendor": 1.4, "date": 0.95}})
+    assert conformed["selfReportedConfidence"] == {"date": 0.95}
+    assert "vendor" in review_required_fields(conformed)

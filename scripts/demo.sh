@@ -25,6 +25,9 @@ case "${1:-up}" in
   up)
     # The API image deploys the registry from this artifact, so it has to be built.
     [[ -f "$ARTIFACT" ]] || die "$ARTIFACT is missing. Run 'cd contracts && forge build' first."
+    # Checked here rather than at container start: a stack that comes up and then fails on
+    # the operator's first upload is a worse way to learn the key is missing.
+    [[ -n "${TINKER_API_KEY:-}" ]] || die "TINKER_API_KEY is not set. The demo reads uploaded documents with a model; export a key, or set AI_PROVIDER=mock in $COMPOSE_FILE to run the fixture reader instead."
     step "Building"
     compose build
     step "Starting (the chain is deployed and seeded on first start)"

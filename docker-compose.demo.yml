@@ -21,7 +21,14 @@ x-chain: &chain
   CHAIN_NAME: "Anvil local EVM"
   DEMO_MODE: local
   PERSISTENCE_MODE: postgres
-  AI_PROVIDER: mock
+  # Real extraction: the demo reads the uploaded document with a model rather than
+  # returning a fixture. The key is never baked into the image or this file -- it is read
+  # from the host environment, and scripts/demo.sh refuses to start without it.
+  AI_PROVIDER: tinker
+  # Not ${VAR:?...}: that would fail `demo.sh down` and `logs` too. Absent, the API
+  # refuses to start, and scripts/demo.sh says so before anything is built.
+  TINKER_API_KEY: "${TINKER_API_KEY:-}"
+  EXTRACTION_MODEL: "${EXTRACTION_MODEL:-thinkingmachines/Inkling-Small}"
   DATABASE_URL: postgresql+psycopg://impactgraph:impactgraph@postgres:5432/impactgraph
 
 services:

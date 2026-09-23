@@ -64,7 +64,6 @@ class AnalysisResult:
     provider: str
     model: str
     processed_at: str
-    confidence: float
     raw_response: dict[str, Any]
 
 
@@ -82,7 +81,19 @@ MOCK_INVOICE_EXTRACTION: dict[str, Any] = {
     "equipment": "AquaPure X200",
     "quantity": 2,
     "projectReference": "Water Project #12",
-    "confidence": 0.97,
+    # Per field, because that is what an operator confirms. A single number for a whole
+    # document says nothing about which part of it to look at.
+    "selfReportedConfidence": {
+        "documentType": 0.97,
+        "invoiceNumber": 0.97,
+        "vendor": 0.97,
+        "amountMinor": 0.97,
+        "currency": 0.97,
+        "date": 0.97,
+        "equipment": 0.97,
+        "quantity": 0.97,
+        "projectReference": 0.97,
+    },
 }
 
 
@@ -97,7 +108,6 @@ class MockEvidenceAnalysisProvider:
             "mock",
             "impactgraph-invoice-v1",
             datetime.now(UTC).isoformat(),
-            0.97,
             {"fixture": "INV-8291", "schemaValid": True},
         )
 
