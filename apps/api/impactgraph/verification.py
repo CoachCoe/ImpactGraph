@@ -258,7 +258,12 @@ def claim_subgraph(
 
 def claim_provenance_complete(session: Session, claim_id: str) -> bool:
     """Validate the required connected path for one claim, never unrelated graph edges."""
-    edges = list(session.scalars(select(ProvenanceEdgeRecord)))
+    # Every edge consulted below hangs off something reachable backwards from the claim,
+    # so the scoped walk is the whole search space. Reading the table and filtering it in
+    # Python was the circularity claim_subgraph was written to avoid, and it put the cost
+    # of a public route in proportion to the size of the database rather than the length
+    # of one chain.
+    _, edges = claim_subgraph(session, claim_id)
 
     def sources(target_id: str, relationship: str, source_type: str) -> set[str]:
         return {
@@ -267,7 +272,6 @@ def claim_provenance_complete(session: Session, claim_id: str) -> bool:
             if edge.target_id == target_id
             and edge.relationship == relationship
             and edge.source_type == source_type
-            and edge.superseded_by is None
         }
 
     outcomes = sources(claim_id, "SUPPORTS", "OUTCOME")
@@ -418,24 +422,6 @@ def claims_supported_by(session: Session, evidence_id: str) -> list[ClaimRecord]
     return list(
         session.scalars(select(ClaimRecord).where(ClaimRecord.external_id.in_(claim_ids)))
     )
-
-
-def claims_resting_on_payment(session: Session, transaction_ref: str) -> list[str]:
-    """Evidence reconciled against this payment.
-
-    A reversal is not an evidence change, so it does not arrive through the path an
-    integrity failure takes. It still has to reach the claim: a payment that did not
-    happen cannot go on supporting one, and the reconciliation that matched them is the
-    link between the two.
-    """
-    from .persistence import EvidenceRecord
-
-    matched: list[str] = []
-    for evidence in session.scalars(select(EvidenceRecord)):
-        reconciliation = evidence.reconciliation or {}
-        if reconciliation.get("transactionRef") == transaction_ref:
-            matched.append(evidence.external_id)
-    return matched
 
 
 def restate_claims_for(

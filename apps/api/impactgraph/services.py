@@ -1547,11 +1547,14 @@ class SettlementService:
 
     @staticmethod
     def evidence_resting_on(session: Session, transaction_ref: str) -> list[str]:
-        return [
-            record.external_id
-            for record in session.scalars(select(EvidenceRecord))
-            if (record.reconciliation or {}).get("transactionRef") == transaction_ref
-        ]
+        return list(
+            session.scalars(
+                select(EvidenceRecord.external_id).where(
+                    EvidenceRecord.reconciliation["transactionRef"].as_string()
+                    == transaction_ref
+                )
+            )
+        )
 
     def mark_reversed(
         self,
