@@ -285,6 +285,11 @@ class EvmBlockchainService:
         "ClaimCreated",
         "ProvenanceLinked",
         "AttestationRevoked",
+        # Omitted until a role grant went through the outbox, at which point the receipt
+        # decoded with no events at all and a grant that succeeded on chain was recorded
+        # as a failure. A list of events this adapter will decode is a list of the things
+        # it can confirm, so anything the worker waits for has to be in it.
+        "RoleGranted",
     )
     relationships: ClassVar[dict[str, int]] = {
         "FUNDS": 0,

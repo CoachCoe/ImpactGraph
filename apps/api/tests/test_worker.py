@@ -490,3 +490,26 @@ def test_an_address_matches_however_it_is_capitalised():
         BlockchainStatus.SUBMITTED, transaction, "corr", 0, None,
     )
     assert confirm_operation(operation, chain.get_transaction(transaction), 1) == "CONFIRMED"
+
+
+def test_the_adapter_decodes_every_event_an_operation_waits_for():
+    """A receipt is only evidence of what the adapter will decode.
+
+    RoleGranted was missing from that list, so the grant's receipt decoded with no events
+    and the operation failed on a transaction that had succeeded. The registry said the
+    role was held; the database said the grant failed.
+    """
+    import json
+    from pathlib import Path
+
+    from impactgraph.blockchain import EvmBlockchainService
+
+    awaited = {"ProgramCreated", "ClaimCreated", "EvidenceRegistered", "AttestationCreated", "RoleGranted"}
+    assert awaited <= set(EvmBlockchainService.event_names)
+
+    # And each one is really declared by the contract, not merely spelled plausibly here.
+    artifact = json.loads(
+        Path("../../contracts/out/ImpactRegistry.sol/ImpactRegistry.json").read_text()
+    )
+    declared = {item["name"] for item in artifact["abi"] if item.get("type") == "event"}
+    assert set(EvmBlockchainService.event_names) <= declared
