@@ -197,26 +197,25 @@ def claim_subgraph(
     transitively from the claim, so an unrelated program's records are never in scope to
     begin with.
     """
-    edges = [
-        edge
-        for edge in session.scalars(select(ProvenanceEdgeRecord))
-        if edge.superseded_by is None
-    ]
-    incoming: dict[str, list[ProvenanceEdgeRecord]] = {}
-    for edge in edges:
-        incoming.setdefault(edge.target_id, []).append(edge)
-
     reachable = {claim_id}
     frontier = [claim_id]
+    scoped: list[ProvenanceEdgeRecord] = []
+
+    # One query per level rather than one for the whole table. The depth is the length of
+    # the chain, not the size of the database, and these routes are public.
     while frontier:
-        for edge in incoming.get(frontier.pop(), ()):
+        batch, frontier = frontier, []
+        for edge in session.scalars(
+            select(ProvenanceEdgeRecord).where(
+                ProvenanceEdgeRecord.target_id.in_(batch),
+                ProvenanceEdgeRecord.superseded_by.is_(None),
+            )
+        ):
+            scoped.append(edge)
             if edge.source_id not in reachable:
                 reachable.add(edge.source_id)
                 frontier.append(edge.source_id)
 
-    scoped = [
-        edge for edge in edges if edge.source_id in reachable and edge.target_id in reachable
-    ]
     return reachable, scoped
 
 

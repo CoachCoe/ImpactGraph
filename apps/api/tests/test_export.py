@@ -141,3 +141,53 @@ def test_the_column_contract_is_stable(client):
     ):
         header = client.get(path).text.splitlines()[0]
         assert header == ",".join(columns), path
+
+
+def test_a_cell_cannot_be_read_as_a_formula_by_whoever_opens_the_file():
+    """Quoting is not protection: a spreadsheet strips the quotes and evaluates.
+
+    Payee names and memos arrive from a payment provider, methods and sources are typed by
+    an operator, and the export is the route by which all of it reaches someone's laptop.
+    """
+    from impactgraph.export import MONEY_TRAIL_COLUMNS, _render
+
+    hostile = {
+        "record_type": "PAYMENT",
+        "id": "x",
+        "counterparty": '=HYPERLINK("http://evil","Refund")',
+        "amount_minor": 1,
+        "currency": "USD",
+        "memo": "=cmd|'/c calc'!A0",
+    }
+    body = _render(MONEY_TRAIL_COLUMNS, [hostile])
+    values = next(csv.reader(io.StringIO(body.splitlines()[1])))
+    assert all(not value.startswith(("=", "+", "-", "@")) for value in values if value)
+
+
+def test_the_export_refuses_nothing_the_evidence_endpoint_permits(client, sign_in):
+    """It must not be the one route that answers what others refuse, nor the one that
+    refuses what others answer."""
+    from sqlalchemy import select
+
+    from impactgraph.main import session_factory
+    from impactgraph.persistence import EvidenceRecord
+
+    assert session_factory is not None
+    with session_factory.begin() as session:
+        record = session.scalar(
+            select(EvidenceRecord).where(EvidenceRecord.external_id == EVIDENCE)
+        )
+        record.visibility = "INTERNAL"
+    try:
+        operator = TestClient(app)
+        sign_in(operator, "operator@globalwater.example")
+        # The operating organisation can open this on screen, so it is in their export.
+        assert operator.get(f"/evidence/{EVIDENCE}").status_code == 200
+        exported = rows(operator.get(f"/export/claims/{CLAIM}/evidence.csv").text)
+        assert any(item["evidence_id"] == EVIDENCE for item in exported)
+    finally:
+        with session_factory.begin() as session:
+            record = session.scalar(
+                select(EvidenceRecord).where(EvidenceRecord.external_id == EVIDENCE)
+            )
+            record.visibility = "PUBLIC"

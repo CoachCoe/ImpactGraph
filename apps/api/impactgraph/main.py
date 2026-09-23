@@ -772,20 +772,28 @@ def export_provenance(claim_id: str):
 
 @app.get("/export/claims/{claim_id}/evidence.csv")
 def export_evidence(claim_id: str, user: CurrentUser = None):
-    """Restricted evidence is included only for a reader who could already open it.
+    """Exactly the rows this reader could already open, one at a time.
 
     Decided here against the session rather than inside the serialiser, so an export
-    cannot become the one route that answers what every other route refuses.
+    cannot become the one route that answers what every other route refuses -- nor the one
+    that refuses what every other route permits. The per-row check is the same function
+    the evidence endpoint uses, so the two cannot drift apart.
     """
     if session_factory is None:
         raise HTTPException(409, "Export requires PERSISTENCE_MODE=postgres")
     with session_factory() as session:
         if not claim_exists(session, claim_id):
             raise HTTPException(404, "Claim not found")
-        body = evidence_csv(
-            session, claim_id, include_restricted=user is not None and user.role == Role.ADMIN
-        )
+        body = evidence_csv(session, claim_id, readable=lambda item: _may_read(item, user))
     return _csv_response(body, f"{claim_id}-evidence.csv")
+
+
+def _may_read(evidence_id: str, user: AuthenticatedUser | None) -> bool:
+    try:
+        _require_evidence_visibility(evidence_id, user)
+    except HTTPException:
+        return False
+    return True
 
 
 @app.get("/health/live")

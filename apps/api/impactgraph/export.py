@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import csv
 import io
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from sqlalchemy import select
@@ -78,12 +78,30 @@ EVIDENCE_COLUMNS = (
 )
 
 
+#: A spreadsheet evaluates a cell beginning with any of these as a formula. Quoting is
+#: not protection: Excel, LibreOffice and Sheets strip the quotes and evaluate what is
+#: left.
+_FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _defuse(value: Any) -> Any:
+    """Stop a cell being read as a formula by whoever opens the file.
+
+    Payee names and memos arrive from a payment provider; methods and sources are typed
+    by an operator. This product's premise is that data from parties nobody controls flows
+    in, and an export is the route by which it flows back out into someone's spreadsheet.
+    """
+    if isinstance(value, str) and value.startswith(_FORMULA_LEAD):
+        return "'" + value
+    return value
+
+
 def _render(columns: Iterable[str], rows: Iterable[dict[str, Any]]) -> str:
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=list(columns), extrasaction="ignore")
     writer.writeheader()
     for row in rows:
-        writer.writerow(row)
+        writer.writerow({key: _defuse(value) for key, value in row.items()})
     return buffer.getvalue()
 
 
@@ -197,12 +215,14 @@ def provenance_csv(session: Session, claim_id: str) -> str:
     )
 
 
-def evidence_csv(session: Session, claim_id: str, *, include_restricted: bool) -> str:
+def evidence_csv(
+    session: Session, claim_id: str, *, readable: Callable[[str], bool]
+) -> str:
     """Evidence supporting a claim, with the commitment needed to check it.
 
-    `include_restricted` is decided by the caller against the session, never inferred
-    here. An export must not become the one route that answers what every other route
-    refuses, so a reader who cannot open a piece of evidence does not receive its row.
+    `readable` is the caller's own visibility check, passed in rather than reimplemented,
+    because an export that decides for itself who may read what will drift away from the
+    endpoint that decides it for everything else.
     """
     entity_ids, _ = claim_subgraph(session, claim_id)
     records = session.scalars(
@@ -210,7 +230,7 @@ def evidence_csv(session: Session, claim_id: str, *, include_restricted: bool) -
     )
     rows = []
     for item in records:
-        if item.visibility != "PUBLIC" and not include_restricted:
+        if not readable(item.external_id):
             continue
         reference = (item.metadata_json or {}).get("blockchainReference") or {}
         rows.append(

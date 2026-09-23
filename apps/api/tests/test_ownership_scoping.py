@@ -138,7 +138,7 @@ def test_public_provenance_does_not_publish_a_restricted_document_field():
 
     from impactgraph.main import session_factory
     from impactgraph.persistence import EvidenceRecord
-    from impactgraph.read_model import _evidence_title
+    from impactgraph.read_model import public_evidence_reference
 
     assert session_factory is not None
     with session_factory() as db:
@@ -148,10 +148,14 @@ def test_public_provenance_does_not_publish_a_restricted_document_field():
         assert seeded is not None
         # The showcase evidence is public, so its invoice number is fair game.
         assert seeded.visibility == "PUBLIC"
-        assert _evidence_title(seeded) == "INV-8291"
+        assert public_evidence_reference(seeded.external_id, "PUBLIC") == "ev-inv-8291"
 
-        seeded.visibility = "RESTRICTED"
-        assert _evidence_title(seeded) == "ev-inv-8291", (
-            "a restricted document's extracted field was published on a public graph"
-        )
-        seeded.visibility = "PUBLIC"
+    # The seeded identifier carries the invoice number inside it, which is the convention
+    # this system establishes, so redacting the label and publishing the id would hide
+    # nothing at all.
+    redacted = public_evidence_reference("ev-inv-8291", "RESTRICTED")
+    assert "8291" not in redacted
+    assert redacted.startswith("evidence-")
+    assert public_evidence_reference("ev-inv-8291", "RESTRICTED") == redacted, (
+        "the reference has to be stable, or the same record looks like several"
+    )
