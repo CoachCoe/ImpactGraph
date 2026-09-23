@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
 from .domain import ReconciliationStatus, Result
 from .hashing import sha256_bytes
+
+
+class EvidenceUnrecoverable(LookupError):
+    """The object is still there and can no longer be read.
+
+    Distinct from a missing file on purpose: "this was erased" and "this was never here"
+    are different answers, and a data subject who asked for erasure is owed the first.
+    """
 
 
 class EvidenceStorage(Protocol):
@@ -15,34 +26,82 @@ class EvidenceStorage(Protocol):
     def overwrite(self, storage_uri: str, content: bytes) -> None: ...
     def retrieve(self, storage_uri: str) -> bytes: ...
     def exists(self, storage_uri: str) -> bool: ...
+    def destroy_key(self, storage_uri: str) -> bool: ...
 
 
 class FileEvidenceStorage:
-    def __init__(self, root: Path) -> None:
+    """Evidence at rest, encrypted under a key that can be destroyed.
+
+    Each object gets its own random data key, which encrypts the content and is itself
+    stored wrapped under the configured key-encryption key. Erasure destroys the wrapped
+    data key: the ciphertext may remain, and no longer means anything.
+
+    That is what makes ADR-011 workable. A commitment on an immutable ledger cannot be
+    withdrawn, so the erasable thing has to be the content rather than the record that
+    something was committed. Deleting the file instead would leave the same commitment
+    pointing at nothing, and could not be told apart from an object that never existed.
+    """
+
+    def __init__(self, root: Path, key: bytes) -> None:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        if len(key) != 32:
+            raise ValueError("The evidence encryption key must be 32 bytes")
+        self._cipher = AESGCM(key)
 
     def uri_for(self, evidence_id: str) -> str:
         return f"file://{self.root / f'{evidence_id}.bin'}"
+
+    def _paths(self, storage_uri: str) -> tuple[Path, Path]:
+        target = Path(storage_uri.removeprefix("file://")).resolve()
+        if self.root not in target.parents:
+            raise ValueError("Evidence path is outside configured storage")
+        return target, target.with_suffix(".key")
+
+    def _seal(self, target: Path, key_path: Path, content: bytes) -> None:
+        data_key = AESGCM.generate_key(bit_length=256)
+        nonce = secrets.token_bytes(12)
+        target.write_bytes(nonce + AESGCM(data_key).encrypt(nonce, content, None))
+        wrap_nonce = secrets.token_bytes(12)
+        key_path.write_bytes(wrap_nonce + self._cipher.encrypt(wrap_nonce, data_key, None))
+        key_path.chmod(0o600)
 
     def store(self, evidence_id: str, content: bytes) -> str:
         if not evidence_id.replace("-", "").replace("_", "").isalnum():
             raise ValueError("Unsafe evidence identifier")
         target = self.root / f"{evidence_id}.bin"
-        if target.exists() and target.read_bytes() != content:
-            raise FileExistsError("Evidence is immutable; create a new evidence identifier")
-        target.write_bytes(content)
+        key_path = target.with_suffix(".key")
+        if target.exists():
+            # Ciphertext differs for identical bytes, so immutability is checked against
+            # what was stored rather than against the encrypted form.
+            if not key_path.exists() or self.retrieve(f"file://{target}") != content:
+                raise FileExistsError("Evidence is immutable; create a new evidence identifier")
+            return f"file://{target}"
+        self._seal(target, key_path, content)
         return f"file://{target}"
 
     def retrieve(self, storage_uri: str) -> bytes:
-        target = Path(storage_uri.removeprefix("file://")).resolve()
-        if self.root not in target.parents:
-            raise ValueError("Evidence path is outside configured storage")
-        return target.read_bytes()
+        target, key_path = self._paths(storage_uri)
+        if not key_path.exists():
+            raise EvidenceUnrecoverable(
+                "The key for this evidence has been destroyed; its contents are unrecoverable"
+            )
+        wrapped = key_path.read_bytes()
+        data_key = self._cipher.decrypt(wrapped[:12], wrapped[12:], None)
+        sealed = target.read_bytes()
+        return AESGCM(data_key).decrypt(sealed[:12], sealed[12:], None)
 
     def exists(self, storage_uri: str) -> bool:
-        target = Path(storage_uri.removeprefix("file://")).resolve()
-        return self.root in target.parents and target.exists()
+        target, _ = self._paths(storage_uri)
+        return target.exists()
+
+    def destroy_key(self, storage_uri: str) -> bool:
+        """Make the object unrecoverable. Returns whether a key was there to destroy."""
+        _, key_path = self._paths(storage_uri)
+        if not key_path.exists():
+            return False
+        key_path.unlink()
+        return True
 
     def overwrite(self, storage_uri: str, content: bytes) -> None:
         """Replace stored bytes, bypassing the immutability guard in `store`.
@@ -52,10 +111,8 @@ class FileEvidenceStorage:
         divergence from the registered commitment. A flag the integrity check is separately
         told about would prove nothing. Operator uploads must always go through `store`.
         """
-        target = Path(storage_uri.removeprefix("file://")).resolve()
-        if self.root not in target.parents:
-            raise ValueError("Evidence path is outside configured storage")
-        target.write_bytes(content)
+        target, key_path = self._paths(storage_uri)
+        self._seal(target, key_path, content)
 
 
 @dataclass(frozen=True)

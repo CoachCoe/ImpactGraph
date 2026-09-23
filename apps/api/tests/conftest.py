@@ -6,6 +6,7 @@ actually runs on. It now runs against a throwaway SQLite database, which also ma
 authentication testable: sessions, users and organisations are database-backed.
 """
 
+import base64
 import os
 import tempfile
 from pathlib import Path
@@ -21,6 +22,12 @@ os.environ["PERSISTENCE_MODE"] = "postgres"
 os.environ["DATABASE_URL"] = f"sqlite+pysqlite:///{_TMP / 'test.db'}"
 os.environ["EVIDENCE_STORAGE_PATH"] = str(_TMP / "evidence")
 os.environ["AI_PROVIDER"] = "mock"
+# Generated per run, and thrown away with the sandbox. Evidence is encrypted at rest, so
+# every test that stores or reads an object goes through the same path production does.
+os.environ.setdefault(
+    "EVIDENCE_ENCRYPTION_KEY", base64.b64encode(os.urandom(32)).decode()
+)
+TEST_ENCRYPTION_KEY = base64.b64decode(os.environ["EVIDENCE_ENCRYPTION_KEY"])
 # The repository .env is loaded by config.py when running from a checkout. Clearing the
 # chain settings keeps the suite hermetic: otherwise a developer's configured registry
 # would make the outbox worker submit real transactions during tests.
@@ -38,7 +45,7 @@ from impactgraph.read_model import reset_read_model, seed_read_model
 
 _factory = create_session_factory(os.environ["DATABASE_URL"])
 Base.metadata.create_all(_factory.kw["bind"])
-_storage = FileEvidenceStorage(Path(os.environ["EVIDENCE_STORAGE_PATH"]))
+_storage = FileEvidenceStorage(Path(os.environ["EVIDENCE_STORAGE_PATH"]), TEST_ENCRYPTION_KEY)
 
 
 @pytest.fixture(autouse=True)

@@ -6,6 +6,7 @@ from impactgraph.evidence import FileEvidenceStorage
 from impactgraph.hashing import sha256_bytes
 from impactgraph.main import app, session_factory
 from impactgraph.persistence import EvidenceRecord, ProvenanceEdgeRecord
+from tests.conftest import TEST_ENCRYPTION_KEY
 
 OPERATOR = "operator@globalwater.example"
 VERIFIER = "verifier@impactverify.example"
@@ -190,7 +191,9 @@ def test_upload_rejects_an_unknown_visibility_before_storing(sign_in):
 def test_tamper_demo_alters_stored_bytes_and_integrity_detects_it(sign_in):
     admin = client()
     sign_in(admin, ADMIN)
-    storage = FileEvidenceStorage(Settings.from_env().evidence_storage_path)
+    storage = FileEvidenceStorage(
+        Settings.from_env().evidence_storage_path, TEST_ENCRYPTION_KEY
+    )
     uri = storage.uri_for(EVIDENCE_ID)
     before = storage.retrieve(uri)
 

@@ -53,7 +53,9 @@ log = logger("impactgraph.worker")
 
 def seed() -> None:
     settings = Settings.from_env()
-    storage = FileEvidenceStorage(settings.evidence_storage_path)
+    storage = FileEvidenceStorage(
+        settings.evidence_storage_path, settings.evidence_encryption_key
+    )
     invoice_uri = storage.uri_for("ev-inv-8291")
     storage.overwrite(invoice_uri, INVOICE_BYTES)
     store.reset()
@@ -95,7 +97,9 @@ def demo_reset(local_only: bool) -> None:
     settings = Settings.from_env()
     if not local_only or settings.demo_mode == "sepolia":
         raise RuntimeError("Demo reset is restricted to an explicitly selected local environment")
-    storage = FileEvidenceStorage(settings.evidence_storage_path)
+    storage = FileEvidenceStorage(
+        settings.evidence_storage_path, settings.evidence_encryption_key
+    )
     if settings.persistence_mode == "postgres":
         factory = create_session_factory(settings.database_url)
         with factory.begin() as session:

@@ -110,7 +110,9 @@ session_factory = (
     if settings.persistence_mode == "postgres"
     else None
 )
-evidence_storage = FileEvidenceStorage(settings.evidence_storage_path)
+evidence_storage = FileEvidenceStorage(
+    settings.evidence_storage_path, settings.evidence_encryption_key
+)
 # Accepting a provider name and then using the mock anyway would be the silent fallback
 # the specification forbids for chains, so an unknown name is refused at startup by
 # Settings rather than degraded here.

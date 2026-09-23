@@ -24,6 +24,9 @@ x-chain: &chain
   # Real extraction: the demo reads the uploaded document with a model rather than
   # returning a fixture. The key is never baked into the image or this file -- it is read
   # from the host environment, and scripts/demo.sh refuses to start without it.
+  # Throwaway, like everything else in this stack. A deployment generates its own and
+  # keeps it somewhere the evidence disk is not, because destroying it is the erasure.
+  EVIDENCE_ENCRYPTION_KEY: "${EVIDENCE_ENCRYPTION_KEY:-aW1wYWN0Z3JhcGgtZGVtby1rZXktbm90LXNlY3JldCE=}"
   AI_PROVIDER: tinker
   # Not ${VAR:?...}: that would fail `demo.sh down` and `logs` too. Absent, the API
   # refuses to start, and scripts/demo.sh says so before anything is built.

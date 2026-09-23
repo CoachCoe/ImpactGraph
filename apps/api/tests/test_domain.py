@@ -37,6 +37,7 @@ from impactgraph.verification import (
     VerificationContext,
     VerificationPolicyService,
 )
+from tests.conftest import TEST_ENCRYPTION_KEY
 
 
 def make_claim() -> Claim:
@@ -141,7 +142,7 @@ def test_bundle_hash_is_order_independent_but_changes_with_evidence():
 
 
 def test_original_bytes_are_immutable_and_integrity_detects_changes(tmp_path: Path):
-    storage = FileEvidenceStorage(tmp_path)
+    storage = FileEvidenceStorage(tmp_path, TEST_ENCRYPTION_KEY)
     content = b"Invoice INV-8291"
     uri = storage.store("ev-1", content)
     expected = sha256_bytes(content)
@@ -306,7 +307,7 @@ def test_the_seed_does_not_fabricate_a_registry_reference():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     factory = sessionmaker(engine, expire_on_commit=False)
-    storage = FileEvidenceStorage(Path(tempfile.mkdtemp()))
+    storage = FileEvidenceStorage(Path(tempfile.mkdtemp()), TEST_ENCRYPTION_KEY)
     with factory.begin() as session:
         seed_read_model(session, storage)
     with factory() as session:
@@ -345,7 +346,7 @@ def test_seeding_registers_the_evidence_when_a_signer_is_configured(tmp_path, mo
     Base.metadata.create_all(engine)
     factory = sessionmaker(engine, expire_on_commit=False)
     with factory.begin() as session:
-        seed_read_model(session, FileEvidenceStorage(Path(tmp_path / "evidence")))
+        seed_read_model(session, FileEvidenceStorage(Path(tmp_path / "evidence"), TEST_ENCRYPTION_KEY))
 
     monkeypatch.setattr(cli, "create_session_factory", lambda _url: factory)
     settings = Settings.from_env()
@@ -401,7 +402,7 @@ def test_seeding_a_fresh_database_against_a_surviving_chain_does_not_re_register
         Base.metadata.create_all(engine)
         made = sessionmaker(engine, expire_on_commit=False)
         with made.begin() as session:
-            seed_read_model(session, FileEvidenceStorage(_Path(tmp_path / "evidence")))
+            seed_read_model(session, FileEvidenceStorage(_Path(tmp_path / "evidence"), TEST_ENCRYPTION_KEY))
         return url, made
 
     settings = Settings.from_env()
