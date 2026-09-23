@@ -19,8 +19,10 @@ from .persistence import (
     DomainEntityRecord,
     EvidenceRecord,
     IdempotencyRecord,
+    OrganizationRecord,
     OutboxRecord,
     ProgramRecord,
+    UserRecord,
 )
 
 
@@ -814,6 +816,193 @@ class TenantApplicationService:
             operation="CREATE_CLAIM",
             request_hash=request_hash,
             response_status=201,
+            response_body=response,
+        )
+        return response
+
+
+class OnboardingApplicationService:
+    """Bringing an organisation onto the platform, and its first person with it.
+
+    Organisations and users existed only in the seed, so a second one needed a code change
+    and a database session. Admin-invited rather than self-service: there is no public
+    signup, and who may act as an operator or a verifier is not a thing to leave open.
+
+    An operator organisation needs nothing on chain. Every registry write is submitted by
+    the backend sender, which already holds OPERATOR_ROLE -- the operator signs nothing. A
+    verifier is different: `createAttestation` checks the role of `msg.sender`, and the
+    verifier's own wallet is what signs, so that wallet needs VERIFIER_ROLE on the registry
+    before it can attest to anything.
+    """
+
+    def __init__(self, chain_id: int) -> None:
+        self.chain_id = chain_id
+        self.idempotency = IdempotencyService()
+        self.audit = AuditService()
+
+    @staticmethod
+    def _administrator(actor: ApplicationActor) -> None:
+        if actor.role != Role.ADMIN:
+            raise AuthorizationError("Only an administrator may onboard an organisation")
+
+    def create_organization(
+        self,
+        session: Session,
+        *,
+        actor: ApplicationActor,
+        organization_id: str,
+        name: str,
+        kind: str,
+        user_email: str,
+        user_name: str,
+        password_hash: str,
+        correlation_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        self._administrator(actor)
+        request_hash = hash_fields(
+            "create_organization_request",
+            (("organization_id", organization_id), ("kind", kind), ("user_email", user_email)),
+        )
+        replay = self.idempotency.replay_or_validate(
+            session,
+            key=idempotency_key,
+            operation="CREATE_ORGANIZATION",
+            request_hash=request_hash,
+        )
+        if replay is not None:
+            return replay
+        if kind not in {Role.OPERATOR, Role.VERIFIER}:
+            raise DomainConflictError("An organisation is onboarded as OPERATOR or VERIFIER")
+        email = user_email.strip().lower()
+        if session.scalar(
+            select(OrganizationRecord).where(OrganizationRecord.external_id == organization_id)
+        ):
+            raise DomainConflictError(f"Organisation {organization_id!r} already exists")
+        if session.scalar(select(UserRecord).where(UserRecord.email == email)):
+            raise DomainConflictError(f"A user with the email {email!r} already exists")
+
+        organization = OrganizationRecord(external_id=organization_id, name=name, kind=kind)
+        session.add(organization)
+        session.flush()
+        session.add(
+            UserRecord(
+                email=email,
+                display_name=user_name,
+                password_hash=password_hash,
+                organization_id=organization.id,
+                # The organisation's kind decides it. A client that could name the role
+                # could invite itself an administrator.
+                role=kind,
+                disabled=False,
+            )
+        )
+        response = {
+            "id": organization_id,
+            "name": name,
+            "kind": kind,
+            "firstUser": {"email": email, "role": kind},
+            # A verifier cannot attest until an administrator grants its proven wallet
+            # VERIFIER_ROLE, which cannot happen until that wallet has been proven.
+            "chainRoleRequired": kind == Role.VERIFIER,
+        }
+        self.audit.record(
+            session,
+            actor=actor,
+            action="ORGANIZATION_CREATED",
+            entity_type="ORGANIZATION",
+            entity_id=organization_id,
+            correlation_id=correlation_id,
+            metadata={"kind": kind, "firstUser": email},
+        )
+        self.idempotency.remember(
+            session,
+            key=idempotency_key,
+            operation="CREATE_ORGANIZATION",
+            request_hash=request_hash,
+            response_status=201,
+            response_body=response,
+        )
+        return response
+
+    def grant_verifier_role(
+        self,
+        session: Session,
+        *,
+        actor: ApplicationActor,
+        user_email: str,
+        correlation_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Queue the registry grant that lets a verifier's wallet attest.
+
+        The address is read from the user record, where it arrives only after the verifier
+        has signed a server-issued nonce. Taking it from the request instead would let an
+        administrator grant the role to an address nobody has proven control of.
+        """
+        self._administrator(actor)
+        email = user_email.strip().lower()
+        request_hash = hash_fields("grant_verifier_role_request", (("user_email", email),))
+        replay = self.idempotency.replay_or_validate(
+            session,
+            key=idempotency_key,
+            operation="GRANT_VERIFIER_ROLE",
+            request_hash=request_hash,
+        )
+        if replay is not None:
+            return replay
+        user = session.scalar(select(UserRecord).where(UserRecord.email == email))
+        if user is None:
+            raise LookupError("User not found")
+        if user.role != Role.VERIFIER:
+            raise DomainConflictError("Only a verifier's wallet may be granted VERIFIER_ROLE")
+        if not user.wallet_address:
+            raise DomainConflictError(
+                "This verifier has not proven a wallet yet, and an unproven address must "
+                "not be granted a role"
+            )
+
+        operation_id = uuid4()
+        session.add(
+            BlockchainOperationRecord(
+                id=operation_id,
+                entity_id=user.wallet_address,
+                operation_type="GRANT_VERIFIER_ROLE",
+                status=BlockchainStatus.CREATED,
+                expected_event="RoleGranted",
+                chain_id=self.chain_id,
+                confirmations=0,
+                correlation_id=correlation_id,
+            )
+        )
+        session.add(
+            OutboxRecord(
+                topic="blockchain.grant_verifier_role",
+                payload={"operationId": str(operation_id), "address": user.wallet_address},
+                correlation_id=correlation_id,
+            )
+        )
+        response = {
+            "email": email,
+            "wallet": user.wallet_address,
+            "operationId": str(operation_id),
+            "status": BlockchainStatus.CREATED,
+        }
+        self.audit.record(
+            session,
+            actor=actor,
+            action="VERIFIER_ROLE_REQUESTED",
+            entity_type="USER",
+            entity_id=email,
+            correlation_id=correlation_id,
+            metadata={"wallet": user.wallet_address, "operationId": str(operation_id)},
+        )
+        self.idempotency.remember(
+            session,
+            key=idempotency_key,
+            operation="GRANT_VERIFIER_ROLE",
+            request_hash=request_hash,
+            response_status=202,
             response_body=response,
         )
         return response

@@ -38,6 +38,12 @@ class ReceiptObservation:
     recipient: str | None = None
 
 
+#: keccak256("VERIFIER"), as ImpactRegistry computes it. Held here so the adapter can
+#: assert the registry it is pointed at names the same role, rather than granting whatever
+#: that contract happens to call VERIFIER_ROLE.
+VERIFIER_ROLE = Web3.keccak(text="VERIFIER")
+
+
 class BlockchainService(Protocol):
     def create_program(self, entity_id: str, commitment: str) -> str: ...
     def record_funding(self, entity_id: str, program_id: str, commitment: str) -> str: ...
@@ -53,6 +59,7 @@ class BlockchainService(Protocol):
     def record_outcome(self, entity_id: str, program_id: str, commitment: str) -> str: ...
     def create_claim(self, entity_id: str, program_id: str, commitment: str) -> str: ...
     def link_provenance(self, source_id: str, relationship: str, target_id: str) -> str: ...
+    def grant_verifier_role(self, address: str) -> str: ...
     def get_transaction(self, transaction_hash: str) -> ReceiptObservation | None: ...
     def entity_exists(self, entity_id: str) -> bool: ...
     def block_time(self, block_number: int) -> str | None: ...
@@ -125,6 +132,11 @@ class MockBlockchainService:
 
     def record_outcome(self, entity_id: str, program_id: str, commitment: str) -> str:
         return self._submit("OutcomeRecorded", entity_id)
+
+    def grant_verifier_role(self, address: str) -> str:
+        return self._submit(
+            "RoleGranted", address, role=Web3.to_hex(VERIFIER_ROLE), account=address
+        )
 
     def create_claim(self, entity_id: str, program_id: str, commitment: str) -> str:
         return self._submit(
@@ -413,6 +425,7 @@ class EvmBlockchainService:
 
     def grant_verifier_role(self, address: str) -> str:
         role = self.contract.functions.VERIFIER_ROLE().call()
+        assert role == VERIFIER_ROLE, "the registry names a different VERIFIER role"
         return self._transact(
             self.contract.functions.grantRole(role, Web3.to_checksum_address(address))
         )

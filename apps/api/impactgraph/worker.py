@@ -12,6 +12,7 @@ from web3 import Web3
 
 from .blockchain import (
     INDEPENDENT_VERIFIER_ATTESTATION,
+    VERIFIER_ROLE,
     BlockchainOperation,
     BlockchainService,
     ReceiptObservation,
@@ -160,6 +161,8 @@ class BlockchainOutboxWorker:
                 transaction_hash = self.blockchain.create_claim(
                     payload["claimId"], payload["programId"], payload["commitment"]
                 )
+            elif topic == "blockchain.grant_verifier_role":
+                transaction_hash = self.blockchain.grant_verifier_role(payload["address"])
             else:
                 raise ValueError(f"Unsupported outbox topic: {topic}")
         except Exception as exc:  # noqa: BLE001 -- persist every external adapter failure
@@ -367,6 +370,27 @@ class BlockchainOutboxWorker:
                         "BLOCKCHAIN_TX_CONFIRMED",
                         {"transactionHash": observation.transaction_hash},
                     )
+                elif record.operation_type == "GRANT_VERIFIER_ROLE":
+                    onchain_error = self._onchain_role_mismatch(
+                        observation.events, record.entity_id
+                    )
+                    if onchain_error:
+                        record.status, record.error = BlockchainStatus.FAILED, onchain_error
+                        self._audit(
+                            session, record, "BLOCKCHAIN_TX_FAILED", {"error": onchain_error}
+                        )
+                        return (
+                            record.status,
+                            record.entity_id,
+                            record.operation_type,
+                            record.confirmations,
+                        )
+                    self._audit(
+                        session,
+                        record,
+                        "BLOCKCHAIN_TX_CONFIRMED",
+                        {"transactionHash": observation.transaction_hash},
+                    )
                 elif record.operation_type == "CREATE_CLAIM_ENTITY":
                     claim = session.scalar(
                         select(ClaimRecord).where(ClaimRecord.external_id == record.entity_id)
@@ -515,6 +539,25 @@ class BlockchainOutboxWorker:
             return "The onchain evidence registration names a different program"
         if args.get("contentHash") != Web3.to_hex(digest_bytes(evidence.content_hash)):
             return "The onchain evidence registration commits to different bytes"
+        return None
+
+    @staticmethod
+    def _onchain_role_mismatch(
+        events: Sequence[dict[str, Any]], address: str
+    ) -> str | None:
+        """A RoleGranted in the receipt is not proof that this address got VERIFIER_ROLE.
+
+        Both the role and the account are checked: a receipt could carry a grant of a
+        different role, or of this role to somebody else.
+        """
+        event = next((item for item in events if item.get("event") == "RoleGranted"), None)
+        if event is None:
+            return "No RoleGranted event was found in the receipt"
+        args = event.get("args") or {}
+        if str(args.get("account", "")).lower() != address.lower():
+            return "The onchain grant names a different account"
+        if args.get("role") != Web3.to_hex(VERIFIER_ROLE):
+            return "The onchain grant is for a different role"
         return None
 
     @staticmethod

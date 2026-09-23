@@ -4,7 +4,7 @@ import asyncio
 import os
 from datetime import UTC, datetime
 from functools import lru_cache
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import (
@@ -32,6 +32,7 @@ from .auth import (
     AuthenticationError,
     authenticate,
     challenge_message,
+    hash_password,
     issue_wallet_challenge,
     resolve_session,
     revoke_session,
@@ -96,6 +97,7 @@ from .services import (
     DomainConflictError,
     EvidenceApplicationService,
     IdempotencyConflictError,
+    OnboardingApplicationService,
     TenantApplicationService,
     VerificationApplicationService,
 )
@@ -287,6 +289,19 @@ class InvoiceExtraction(BaseModel):
     selfReportedConfidence: dict[str, Annotated[float, Field(ge=0, le=1)]]
 
 
+class OrganizationCreateRequest(BaseModel):
+    """The first user's role is not here: it follows from the organisation's kind."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=3, max_length=160, pattern=r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
+    name: str = Field(min_length=1, max_length=200)
+    kind: Literal["OPERATOR", "VERIFIER"]
+    userEmail: str = Field(min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    userName: str = Field(min_length=1, max_length=200)
+    userPassword: str = Field(min_length=12, max_length=200)
+
+
 class ProgramCreateRequest(BaseModel):
     """The owning organisation is deliberately absent: it comes from the session."""
 
@@ -296,6 +311,12 @@ class ProgramCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=240)
     region: str = Field(min_length=1, max_length=240)
     verificationThreshold: int = Field(default=1, ge=1, le=10)
+
+
+class VerifierRoleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    userEmail: str = Field(min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class ProjectCreateRequest(BaseModel):
@@ -970,6 +991,72 @@ def _tenant_write(operation):
         raise HTTPException(409, str(exc)) from exc
     except (ValueError, DomainConflictError) as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/organizations", status_code=201)
+def create_organization(
+    request: Request,
+    body: OrganizationCreateRequest,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    """Onboard an organisation and its first person. Administrators only.
+
+    There is no public signup: who may act as an operator or a verifier is not something
+    to leave open. A verifier still cannot attest until its wallet has been proven and
+    granted VERIFIER_ROLE, which the response says.
+    """
+    actor = actor_for(require_user(user, {Role.ADMIN}))
+    key = require_idempotency(idempotency_key)
+    if session_factory is None:
+        raise HTTPException(503, "Onboarding requires PERSISTENCE_MODE=postgres")
+    service = OnboardingApplicationService(settings.chain_id)
+    return _tenant_write(
+        lambda session: service.create_organization(
+            session,
+            actor=actor,
+            organization_id=body.id,
+            name=body.name,
+            kind=body.kind,
+            user_email=body.userEmail,
+            user_name=body.userName,
+            password_hash=hash_password(body.userPassword),
+            correlation_id=request.state.correlation_id,
+            idempotency_key=key,
+        )
+    )
+
+
+@app.post("/organizations/verifier-role", status_code=202)
+def grant_verifier_role(
+    request: Request,
+    body: VerifierRoleRequest,
+    background_tasks: BackgroundTasks,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    """Grant a verifier's proven wallet VERIFIER_ROLE on the registry.
+
+    `createAttestation` checks the role of the address that signed it, and a verifier signs
+    with their own wallet, so without this a newly onboarded verifier can sign nothing.
+    """
+    actor = actor_for(require_user(user, {Role.ADMIN}))
+    key = require_idempotency(idempotency_key)
+    if session_factory is None:
+        raise HTTPException(503, "Granting a role requires PERSISTENCE_MODE=postgres")
+    service = OnboardingApplicationService(settings.chain_id)
+    response = _tenant_write(
+        lambda session: service.grant_verifier_role(
+            session,
+            actor=actor,
+            user_email=body.userEmail,
+            correlation_id=request.state.correlation_id,
+            idempotency_key=key,
+        )
+    )
+    if response.get("operationId"):
+        background_tasks.add_task(process_backend_operation, UUID(response["operationId"]))
+    return response
 
 
 @app.get("/operator/programs")

@@ -343,3 +343,97 @@ def test_a_failed_program_submission_does_not_reach_for_an_evidence_record():
             select(ProgramRecord).where(ProgramRecord.slug == "program-new-wells")
         )
         assert program is not None and program.chain_status == "FAILED"
+
+
+def pending_role_grant(db_factory: sessionmaker[Session], wallet: str) -> str:
+    from impactgraph.persistence import OrganizationRecord, UserRecord
+    from impactgraph.services import OnboardingApplicationService
+
+    with db_factory.begin() as db:
+        organization = OrganizationRecord(
+            external_id="org-audit", name="Audit Co", kind="VERIFIER"
+        )
+        db.add(organization)
+        db.flush()
+        db.add(
+            UserRecord(
+                email="check@audit.example",
+                display_name="Auditor",
+                password_hash="x",
+                organization_id=organization.id,
+                role=Role.VERIFIER,
+                wallet_address=wallet,
+            )
+        )
+    service = OnboardingApplicationService(chain_id=31337)
+    with db_factory.begin() as db:
+        response = service.grant_verifier_role(
+            db,
+            actor=ApplicationActor("org-impactgraph", Role.ADMIN),
+            user_email="check@audit.example",
+            correlation_id="corr-grant",
+            idempotency_key="grant-key",
+        )
+    return response["operationId"]
+
+
+def test_a_verifier_wallet_grant_is_confirmed_from_the_receipt():
+    db_factory = memory_factory()
+    wallet = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+    operation_id = pending_role_grant(db_factory, wallet)
+    result = BlockchainOutboxWorker(
+        session_factory=db_factory,
+        blockchain=MockBlockchainService(),
+        confirmations_required=1,
+    ).run_once()
+    assert result.confirmed == 1
+    with db_factory() as db:
+        operation = db.get(BlockchainOperationRecord, UUID(operation_id))
+        assert operation is not None and operation.status == "CONFIRMED"
+
+
+def test_a_grant_that_names_somebody_else_does_not_confirm_this_one():
+    """Rejected by the generic expected-event check before the role guard is reached: the
+    event is indexed by the account it names, so a grant to another address is simply not
+    the event this operation was waiting for."""
+
+    class GrantsSomeoneElse(MockBlockchainService):
+        def grant_verifier_role(self, address: str) -> str:
+            return super().grant_verifier_role("0x000000000000000000000000000000000000dEaD")
+
+    db_factory = memory_factory()
+    operation_id = pending_role_grant(db_factory, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")
+    result = BlockchainOutboxWorker(
+        session_factory=db_factory,
+        blockchain=GrantsSomeoneElse(),
+        confirmations_required=1,
+    ).run_once()
+    assert result.failed == 1
+    with db_factory() as db:
+        operation = db.get(BlockchainOperationRecord, UUID(operation_id))
+        assert operation is not None and "RoleGranted" in (operation.error or "")
+
+
+def test_a_receipt_carrying_the_wrong_role_or_account_is_refused():
+    """What the guard itself rejects, once an event with the right entity has arrived: a
+    grant of some other role, or of this role to an address that is not the one asked for.
+    """
+    from web3 import Web3
+
+    from impactgraph.blockchain import VERIFIER_ROLE
+
+    wallet = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+    guard = BlockchainOutboxWorker._onchain_role_mismatch
+
+    correct = ({"event": "RoleGranted", "args": {"account": wallet, "role": Web3.to_hex(VERIFIER_ROLE)}},)
+    assert guard(correct, wallet) is None
+    # Case is not identity: an address is the same address however it is rendered.
+    assert guard(correct, wallet.lower()) is None
+
+    operator_role = ({"event": "RoleGranted", "args": {"account": wallet, "role": Web3.to_hex(Web3.keccak(text="OPERATOR"))}},)
+    assert "different role" in (guard(operator_role, wallet) or "")
+
+    other = ({"event": "RoleGranted", "args": {"account": "0x000000000000000000000000000000000000dEaD", "role": Web3.to_hex(VERIFIER_ROLE)}},)
+    assert "different account" in (guard(other, wallet) or "")
+
+    assert "No RoleGranted" in (guard((), wallet) or "")
