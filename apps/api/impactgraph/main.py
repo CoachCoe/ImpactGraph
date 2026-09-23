@@ -162,6 +162,18 @@ async def correlation_id(request: Request, call_next):
         return response
 
 
+def _require_database(subject: str) -> None:
+    """Refuse a route that needs durable storage when the deployment has none.
+
+    503 throughout. The request is not in conflict with any state -- this deployment
+    simply cannot answer it -- and a caller retrying against a configured instance is the
+    right response. Twenty-one of these said 503 and sixteen said 409 for the identical
+    condition, which left no way for a client to handle it once.
+    """
+    if session_factory is None:
+        raise HTTPException(503, f"{subject} requires PERSISTENCE_MODE=postgres")
+
+
 def _refuse_demo_store_route() -> None:
     """These routes fabricate chain state and exist only for the in-memory demo.
 
@@ -261,10 +273,7 @@ def require_user(user: AuthenticatedUser | None, allowed: set[Role]) -> Authenti
     caller had to authenticate to obtain, so the separation-of-duties rules built on it
     are enforceable rather than advisory.
     """
-    if session_factory is None:
-        raise HTTPException(
-            409, "Authentication requires PERSISTENCE_MODE=postgres"
-        )
+    _require_database("Authentication")
     if user is None:
         raise _unauthenticated()
     if user.role not in allowed:
@@ -523,8 +532,7 @@ def _session_payload(user: AuthenticatedUser) -> dict[str, Any]:
 
 @app.post("/auth/login")
 def login(body: LoginRequest, response: Response):
-    if session_factory is None:
-        raise HTTPException(409, "Authentication requires PERSISTENCE_MODE=postgres")
+    _require_database("Authentication")
     with session_factory.begin() as session:
         try:
             token, user = authenticate(session, body.email, body.password)
@@ -620,8 +628,7 @@ def record_reversal(
     donor would otherwise read a verified badge over a payment that did not happen.
     """
     actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
-    if session_factory is None:
-        raise HTTPException(503, "Recording a reversal requires PERSISTENCE_MODE=postgres")
+    _require_database("Recording a reversal")
     service = SettlementService()
     return _tenant_write(
         lambda session: service.mark_reversed(
@@ -671,8 +678,7 @@ def run_risk_scan(request: Request, user: CurrentUser = None):
     another customer's records.
     """
     actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
-    if session_factory is None:
-        raise HTTPException(503, "Risk detection requires PERSISTENCE_MODE=postgres")
+    _require_database("Risk detection")
     try:
         return _tenant_write(
             lambda session: {
@@ -691,8 +697,7 @@ def run_risk_scan(request: Request, user: CurrentUser = None):
 @app.get("/risk/findings")
 def list_risk_findings(user: CurrentUser = None):
     actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
-    if session_factory is None:
-        raise HTTPException(503, "Risk detection requires PERSISTENCE_MODE=postgres")
+    _require_database("Risk detection")
     with session_factory() as session:
         return {"findings": [_finding_view(f) for f in risk_open_findings(session, actor.id)]}
 
@@ -705,8 +710,7 @@ def risk_precision_view(user: CurrentUser = None):
     figure would be invented.
     """
     actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
-    if session_factory is None:
-        raise HTTPException(503, "Risk detection requires PERSISTENCE_MODE=postgres")
+    _require_database("Risk detection")
     with session_factory() as session:
         return {"byKind": risk_precision(session, actor.id)}
 
@@ -725,8 +729,7 @@ def dispose_risk_finding(
     made it.
     """
     actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
-    if session_factory is None:
-        raise HTTPException(503, "Risk detection requires PERSISTENCE_MODE=postgres")
+    _require_database("Risk detection")
     return _tenant_write(
         lambda session: _finding_view(
             record_risk_disposition(
@@ -749,8 +752,7 @@ def program_financials(program_id: str):
     Public: "where did the money go" is one of the questions the product exists to answer,
     and an answer only its operator can see is not transparency.
     """
-    if session_factory is None:
-        raise HTTPException(409, "Financial records require PERSISTENCE_MODE=postgres")
+    _require_database("Financial records")
     with session_factory() as session:
         return financial_summary(session, program_id)
 
@@ -759,8 +761,7 @@ def program_financials(program_id: str):
 def funding_attribution_view(funding_id: str):
     # Public, like the rest of the money trail: following a contribution to what it
     # reached is the question this product exists to answer.
-    if session_factory is None:
-        raise HTTPException(409, "Attribution requires PERSISTENCE_MODE=postgres")
+    _require_database("Attribution")
     with session_factory() as session:
         try:
             return funding_attribution(session, funding_id)
@@ -777,8 +778,7 @@ def funding_attribution_view(funding_id: str):
 
 @app.get("/financial/transactions/{transaction_id}")
 def financial_transaction(transaction_id: str):
-    if session_factory is None:
-        raise HTTPException(409, "Financial records require PERSISTENCE_MODE=postgres")
+    _require_database("Financial records")
     with session_factory() as session:
         record = session.scalar(
             select(FinancialTransactionRecord).where(
@@ -805,8 +805,7 @@ def import_financial_statement(
     actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
     _require_program_management(program_id, user)
     require_idempotency(idempotency_key)
-    if session_factory is None:
-        raise HTTPException(409, "Financial records require PERSISTENCE_MODE=postgres")
+    _require_database("Financial records")
     service = FinancialIngestionService(financial_provider)
     with session_factory.begin() as session:
         result = service.import_statement(session, program_ref=program_id)
@@ -934,8 +933,7 @@ notification_transport = ConsoleNotificationTransport()
 @app.post("/claims/{claim_id}/follow", status_code=202)
 def follow_claim(claim_id: str, body: FollowRequest):
     """Ask to be told when this claim changes. No account, by design."""
-    if session_factory is None:
-        raise HTTPException(409, "Following a claim requires PERSISTENCE_MODE=postgres")
+    _require_database("Following a claim")
     with session_factory.begin() as session:
         claim = session.scalar(
             select(ClaimRecord).where(ClaimRecord.external_id == claim_id)
@@ -966,8 +964,7 @@ def follow_claim(claim_id: str, body: FollowRequest):
 
 @app.post("/notifications/confirm")
 def confirm_following(token: str):
-    if session_factory is None:
-        raise HTTPException(409, "Notifications require PERSISTENCE_MODE=postgres")
+    _require_database("Notifications")
     with session_factory.begin() as session:
         subscription = resolve_token(session, token)
         if subscription is None:
@@ -981,8 +978,7 @@ def confirm_following(token: str):
 @app.post("/notifications/unsubscribe")
 def unsubscribe_from_claim(token: str):
     """One click, no account, and honoured immediately."""
-    if session_factory is None:
-        raise HTTPException(409, "Notifications require PERSISTENCE_MODE=postgres")
+    _require_database("Notifications")
     with session_factory.begin() as session:
         subscription = resolve_token(session, token)
         if subscription is None:
@@ -1002,8 +998,7 @@ def _csv_response(body: str, filename: str) -> Response:
 @app.get("/export/programs/{program_id}/money-trail.csv")
 def export_money_trail(program_id: str):
     """Public, like the money trail it serialises."""
-    if session_factory is None:
-        raise HTTPException(409, "Export requires PERSISTENCE_MODE=postgres")
+    _require_database("Export")
     with session_factory() as session:
         body = money_trail_csv(session, program_id)
     return _csv_response(body, f"{program_id}-money-trail.csv")
@@ -1011,8 +1006,7 @@ def export_money_trail(program_id: str):
 
 @app.get("/export/programs/{program_id}/outcomes.csv")
 def export_outcomes(program_id: str):
-    if session_factory is None:
-        raise HTTPException(409, "Export requires PERSISTENCE_MODE=postgres")
+    _require_database("Export")
     with session_factory() as session:
         body = outcomes_csv(session, program_id)
     return _csv_response(body, f"{program_id}-outcomes.csv")
@@ -1020,8 +1014,7 @@ def export_outcomes(program_id: str):
 
 @app.get("/export/claims/{claim_id}/provenance.csv")
 def export_provenance(claim_id: str):
-    if session_factory is None:
-        raise HTTPException(409, "Export requires PERSISTENCE_MODE=postgres")
+    _require_database("Export")
     with session_factory() as session:
         if not claim_exists(session, claim_id):
             raise HTTPException(404, "Claim not found")
@@ -1038,8 +1031,7 @@ def export_evidence(claim_id: str, user: CurrentUser = None):
     that refuses what every other route permits. The per-row check is the same function
     the evidence endpoint uses, so the two cannot drift apart.
     """
-    if session_factory is None:
-        raise HTTPException(409, "Export requires PERSISTENCE_MODE=postgres")
+    _require_database("Export")
     with session_factory() as session:
         if not claim_exists(session, claim_id):
             raise HTTPException(404, "Claim not found")
@@ -1130,8 +1122,7 @@ def claims(status: str | None = None, program: str | None = None, user: CurrentU
     enumerating them would publish an organisation's unfinished statements the moment they
     were written, which is a different thing from making the finished ones inspectable.
     """
-    if session_factory is None:
-        raise HTTPException(503, "Listing claims requires PERSISTENCE_MODE=postgres")
+    _require_database("Listing claims")
     own_drafts = (
         user.organization_external_id
         if user and user.role in {Role.OPERATOR, Role.ADMIN}
@@ -1162,8 +1153,7 @@ public_api.register(
 def publish_claim(request: Request, claim_id: str, user: CurrentUser = None):
     """Publish a claim as a public proof. There is no route that unpublishes it."""
     actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
-    if session_factory is None:
-        raise HTTPException(503, "Publishing requires PERSISTENCE_MODE=postgres")
+    _require_database("Publishing")
     service = ClaimPublicationService()
     return _tenant_write(
         lambda session: service.publish(
@@ -1182,8 +1172,7 @@ def claim_proof(claim_id: str):
     404 for a claim nobody published, so that publication is a decision an organisation
     made rather than a default it was subjected to.
     """
-    if session_factory is None:
-        raise HTTPException(503, "This requires PERSISTENCE_MODE=postgres")
+    _require_database("This")
     return database_read("proof", claim_id)
 
 
@@ -1214,8 +1203,7 @@ def claim_badge(claim_id: str):
     `must-revalidate` rather than a long one, and the rendered date so a stale copy shows
     its own age instead of hiding it.
     """
-    if session_factory is None:
-        raise HTTPException(503, "This requires PERSISTENCE_MODE=postgres")
+    _require_database("This")
     proof = database_read("proof", claim_id)
     status = proof["claim"]["status"]
     label, colour = BADGE_APPEARANCE.get(status, ("Status unknown", "#5b6664"))
@@ -1295,8 +1283,7 @@ def create_organization(
     """
     actor = actor_for(require_user(user, {Role.ADMIN}))
     key = require_idempotency(idempotency_key)
-    if session_factory is None:
-        raise HTTPException(503, "Onboarding requires PERSISTENCE_MODE=postgres")
+    _require_database("Onboarding")
     service = OnboardingApplicationService(settings.chain_id)
     return _tenant_write(
         lambda session: service.create_organization(
@@ -1329,8 +1316,7 @@ def grant_verifier_role(
     """
     actor = actor_for(require_user(user, {Role.ADMIN}))
     key = require_idempotency(idempotency_key)
-    if session_factory is None:
-        raise HTTPException(503, "Granting a role requires PERSISTENCE_MODE=postgres")
+    _require_database("Granting a role")
     service = OnboardingApplicationService(settings.chain_id)
     response = _tenant_write(
         lambda session: service.grant_verifier_role(
@@ -1370,8 +1356,7 @@ def request_funder_name_consent(request: Request, funding_id: str, user: Current
     person it names.
     """
     actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
-    if session_factory is None:
-        raise HTTPException(503, "This requires PERSISTENCE_MODE=postgres")
+    _require_database("This")
     service = FunderNameService()
     return _tenant_write(
         lambda session: service.issue_consent_link(
@@ -1391,8 +1376,7 @@ def choose_funder_name_publication(request: Request, body: FunderNameChoice):
     confirmation link is. Withdrawable, because a person changing their mind about being
     named is exactly what this exists to respect.
     """
-    if session_factory is None:
-        raise HTTPException(503, "This requires PERSISTENCE_MODE=postgres")
+    _require_database("This")
     service = FunderNameService()
     return _tenant_write(
         lambda session: service.set_publication(
@@ -1413,8 +1397,7 @@ def operator_programs(user: CurrentUser = None):
     replace that would be a worse answer than the constant was.
     """
     authenticated = require_user(user, {Role.OPERATOR, Role.ADMIN})
-    if session_factory is None:
-        raise HTTPException(503, "Listing programs requires PERSISTENCE_MODE=postgres")
+    _require_database("Listing programs")
     with session_factory() as session:
         query = select(ProgramRecord).order_by(ProgramRecord.name)
         if authenticated.role != Role.ADMIN:
@@ -1463,8 +1446,7 @@ def create_program(
     """
     actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
     key = require_idempotency(idempotency_key)
-    if session_factory is None:
-        raise HTTPException(503, "Creating a program requires PERSISTENCE_MODE=postgres")
+    _require_database("Creating a program")
     service = TenantApplicationService(settings.chain_id)
     response = _tenant_write(
         lambda session: service.create_program(
@@ -1494,8 +1476,7 @@ def create_project(
     """A project is not a registry entity, so this is a database write and nothing else."""
     actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
     key = require_idempotency(idempotency_key)
-    if session_factory is None:
-        raise HTTPException(503, "Creating a project requires PERSISTENCE_MODE=postgres")
+    _require_database("Creating a project")
     service = TenantApplicationService(settings.chain_id)
     return _tenant_write(
         lambda session: service.create_project(
@@ -1526,8 +1507,7 @@ def retry_program_entity(
     """
     actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
     key = require_idempotency(idempotency_key)
-    if session_factory is None:
-        raise HTTPException(503, "Retrying a registry entity requires PERSISTENCE_MODE=postgres")
+    _require_database("Retrying a registry entity")
     service = TenantApplicationService(settings.chain_id)
     response = _tenant_write(
         lambda session: service.retry_registry_entity(
@@ -1553,8 +1533,7 @@ def create_claim(
 ):
     actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
     key = require_idempotency(idempotency_key)
-    if session_factory is None:
-        raise HTTPException(503, "Creating a claim requires PERSISTENCE_MODE=postgres")
+    _require_database("Creating a claim")
     service = TenantApplicationService(settings.chain_id)
     response = _tenant_write(
         lambda session: service.create_claim(
@@ -1787,8 +1766,7 @@ def data_subject_record(subject_reference: str, user: CurrentUser = None):
     object in the system by guessing a reference.
     """
     actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
-    if session_factory is None:
-        raise HTTPException(503, "This requires PERSISTENCE_MODE=postgres")
+    _require_database("This")
     service = DataProtectionApplicationService(evidence_storage)
     with session_factory() as session:
         return service.subject_record(
@@ -1806,8 +1784,7 @@ def declare_data_protection(
     """Record what makes holding this evidence lawful, and who is answerable for it."""
     actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
     _require_evidence_management(evidence_id, user)
-    if session_factory is None:
-        raise HTTPException(503, "Recording this requires PERSISTENCE_MODE=postgres")
+    _require_database("Recording this")
     service = DataProtectionApplicationService(evidence_storage)
     return _tenant_write(
         lambda session: service.declare(
@@ -1840,8 +1817,7 @@ def erase_evidence(
     """
     actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
     _require_evidence_management(evidence_id, user)
-    if session_factory is None:
-        raise HTTPException(503, "Erasure requires PERSISTENCE_MODE=postgres")
+    _require_database("Erasure")
     service = DataProtectionApplicationService(evidence_storage)
     return _tenant_write(
         lambda session: service.erase(
@@ -2315,8 +2291,7 @@ def create_verifier_intent(
             },
         )
     key = require_idempotency(idempotency_key)
-    if session_factory is None:
-        raise HTTPException(409, "Durable verifier intents require PERSISTENCE_MODE=postgres")
+    _require_database("Durable verifier intents")
     if not settings.registry_address:
         raise HTTPException(503, "IMPACT_REGISTRY_ADDRESS is required")
     _assert_wallet_may_verify(verifier.wallet_address)
@@ -2348,8 +2323,7 @@ def reject_verification_request(
 ):
     verifier = require_user(user, {Role.VERIFIER})
     key = require_idempotency(idempotency_key)
-    if session_factory is None:
-        raise HTTPException(409, "Durable verification decisions require PERSISTENCE_MODE=postgres")
+    _require_database("Durable verification decisions")
     service = VerificationApplicationService(settings.chain_id, settings.registry_address)
     try:
         with session_factory.begin() as session:
@@ -2378,8 +2352,7 @@ def record_wallet_submission(
     user: CurrentUser = None,
 ):
     verifier = require_user(user, {Role.VERIFIER})
-    if session_factory is None:
-        raise HTTPException(409, "Durable wallet submissions require PERSISTENCE_MODE=postgres")
+    _require_database("Durable wallet submissions")
     service = VerificationApplicationService(settings.chain_id, settings.registry_address)
     try:
         with session_factory.begin() as session:
@@ -2402,8 +2375,7 @@ def record_wallet_submission(
 
 @app.get("/blockchain/operations/{operation_id}")
 def blockchain_operation(operation_id: UUID):
-    if session_factory is None:
-        raise HTTPException(409, "Durable operations require PERSISTENCE_MODE=postgres")
+    _require_database("Durable operations")
     with session_factory() as session:
         operation = session.get(BlockchainOperationRecord, operation_id)
         if operation is None:

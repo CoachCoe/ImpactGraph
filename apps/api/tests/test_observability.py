@@ -143,3 +143,31 @@ def test_failed_login_log_carries_no_account_identifier(json_logs):
 def test_uvicorn_records_render_in_the_same_json_shape(json_logs):
     logging.getLogger("uvicorn.error").warning("uvicorn speaks the same shape")
     assert any(item.get("event") == "uvicorn speaks the same shape" for item in json_logs())
+
+
+def test_a_route_that_needs_a_database_refuses_with_503_when_there_is_none():
+    """Thirty-eight routes guarded this condition, twenty-one answering 503 and sixteen
+    answering 409, so no client could handle "this deployment has no database" once. The
+    suite runs with PostgreSQL configured, so the guard itself never fires here and the
+    inconsistency was invisible."""
+    from fastapi import HTTPException
+
+    from impactgraph import main
+
+    original = main.session_factory
+    main.session_factory = None
+    try:
+        with pytest.raises(HTTPException) as refused:
+            main._require_database("Publishing")
+    finally:
+        main.session_factory = original
+
+    assert refused.value.status_code == 503
+    assert refused.value.detail == "Publishing requires PERSISTENCE_MODE=postgres"
+
+
+def test_the_guard_passes_when_a_database_is_configured():
+    from impactgraph import main
+
+    assert main.session_factory is not None
+    assert main._require_database("Publishing") is None
