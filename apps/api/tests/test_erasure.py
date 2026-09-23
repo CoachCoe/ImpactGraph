@@ -87,3 +87,165 @@ def test_the_commitment_still_describes_the_document_and_not_its_ciphertext(stor
     would make integrity unverifiable by anyone holding the original document."""
     uri = storage.store("ev-household-6", DOCUMENT)
     assert sha256_bytes(storage.retrieve(uri)) == sha256_bytes(DOCUMENT)
+
+
+# --- The lawful basis a registration is gated on, through the API ---
+
+from fastapi.testclient import TestClient
+
+from impactgraph.auth import DEMO_PASSWORD
+from impactgraph.main import app, session_factory
+
+OPERATOR = "operator@globalwater.example"
+BASIS = {
+    "lawfulBasis": "LEGITIMATE_INTEREST",
+    "controllerOrgRef": "org-global-water",
+    "subjectReference": "subject-household-14",
+    "purpose": "Showing a funder what their money delivered.",
+}
+
+
+def operator_client() -> TestClient:
+    client = TestClient(app)
+    assert client.post(
+        "/auth/login", json={"email": OPERATOR, "password": DEMO_PASSWORD}
+    ).status_code == 200
+    return client
+
+
+def upload(client: TestClient, evidence_id: str, *, personal: bool) -> None:
+    response = client.post(
+        "/evidence",
+        headers={"Idempotency-Key": f"upload-{evidence_id}"},
+        data={
+            "evidence_id": evidence_id,
+            "project_id": "project-water-12",
+            "evidence_type": "INVOICE",
+            "visibility": "RESTRICTED",
+            "personal_data": str(personal).lower(),
+        },
+        files={"file": ("INV-8291.txt", b"Invoice INV-8291", "text/plain")},
+    )
+    assert response.status_code == 201, response.text
+
+
+def review(client: TestClient, evidence_id: str) -> None:
+    analyzed = client.post(f"/evidence/{evidence_id}/analyze").json()
+    assert client.post(
+        f"/evidence/{evidence_id}/review",
+        json={"extraction": analyzed["extraction"], "confirmed": analyzed["reviewRequired"]},
+    ).status_code == 200
+
+
+def test_personal_data_cannot_be_committed_without_a_lawful_basis():
+    """After registration the hash cannot be withdrawn, so there is no later point at which
+    "we had no basis for holding this" can be acted on cheaply."""
+    client = operator_client()
+    upload(client, "ev-personal-nobasis", personal=True)
+    review(client, "ev-personal-nobasis")
+
+    refused = client.post(
+        "/evidence/ev-personal-nobasis/register", headers={"Idempotency-Key": "reg-nobasis"}
+    )
+    assert refused.status_code == 409
+    assert "lawful basis" in refused.json()["detail"]
+
+    declared = client.post("/evidence/ev-personal-nobasis/data-protection", json=BASIS)
+    assert declared.status_code == 201, declared.text
+    assert client.post(
+        "/evidence/ev-personal-nobasis/register", headers={"Idempotency-Key": "reg-withbasis"}
+    ).status_code == 202
+
+
+def test_evidence_with_no_personal_data_in_it_is_not_asked_for_one():
+    """An invoice from a supplier is not about a person, and demanding a basis for it would
+    make the declaration meaningless everywhere it does matter."""
+    client = operator_client()
+    upload(client, "ev-impersonal", personal=False)
+    review(client, "ev-impersonal")
+    assert client.post(
+        "/evidence/ev-impersonal/register", headers={"Idempotency-Key": "reg-impersonal"}
+    ).status_code == 202
+
+
+def test_special_category_data_cannot_rest_on_legitimate_interest():
+    """Article 9 permits no Article 6 basis on its own. Explicit consent is the only
+    condition this system accepts; anything else is not an engineering decision."""
+    client = operator_client()
+    upload(client, "ev-health", personal=True)
+    refused = client.post(
+        "/evidence/ev-health/data-protection", json={**BASIS, "specialCategory": True}
+    )
+    assert refused.status_code == 409
+    assert "Article 9" in refused.json()["detail"]
+
+    accepted = client.post(
+        "/evidence/ev-health/data-protection",
+        json={**BASIS, "specialCategory": True, "lawfulBasis": "CONSENT"},
+    )
+    assert accepted.status_code == 201, accepted.text
+
+
+def test_erasing_evidence_makes_it_unrecoverable_and_restates_what_rested_on_it():
+    """A claim keeps whatever badge it had unless something re-evaluates it, so erasing the
+    evidence beneath one without restating it leaves a donor reading a verdict whose
+    support no longer exists."""
+    from sqlalchemy import select
+
+    from impactgraph.persistence import DataProtectionRecord, EvidenceRecord
+
+    client = operator_client()
+    erased = client.post(
+        "/evidence/ev-inv-8291/data-protection", json=BASIS
+    )
+    assert erased.status_code == 201, erased.text
+
+    response = client.post(
+        "/evidence/ev-inv-8291/erase", json={"reason": "The subject objected."}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["keyDestroyed"] is True
+    # The commitment is not withdrawn, and the response says so rather than implying it.
+    assert "remains" in body["commitment"]
+
+    assert session_factory is not None
+    with session_factory() as session:
+        record = session.scalar(
+            select(DataProtectionRecord).where(
+                DataProtectionRecord.evidence_ref == "ev-inv-8291"
+            )
+        )
+        assert record.erased_at is not None and record.withdrawn_at is not None
+        evidence = session.scalar(
+            select(EvidenceRecord).where(EvidenceRecord.external_id == "ev-inv-8291")
+        )
+        assert evidence.integrity_status == "UNRECOVERABLE"
+
+    # And the bytes really are gone, not merely marked.
+    integrity = client.post("/evidence/ev-inv-8291/verify-integrity")
+    assert integrity.status_code == 410, integrity.text
+    assert integrity.json()["detail"]["code"] == "EVIDENCE_ERASED"
+
+
+def test_an_erasure_record_does_not_quote_what_was_erased():
+    """An audit entry naming the subject or the contents is not an erasure."""
+    from sqlalchemy import select
+
+    from impactgraph.persistence import AuditLogRecord
+
+    client = operator_client()
+    client.post("/evidence/ev-inv-8291/data-protection", json=BASIS)
+    client.post("/evidence/ev-inv-8291/erase", json={"reason": "Retention schedule reached."})
+
+    assert session_factory is not None
+    with session_factory() as session:
+        entry = session.scalar(
+            select(AuditLogRecord)
+            .where(AuditLogRecord.action == "EVIDENCE_ERASED")
+            .order_by(AuditLogRecord.created_at.desc())
+        )
+        assert entry is not None
+        recorded = str(entry.metadata_json)
+        assert "subject-household-14" not in recorded
+        assert "INV-8291" not in recorded

@@ -64,6 +64,11 @@ class EvidenceRecord(EntityMixin, Base):
     __tablename__ = "evidence"
     external_id: Mapped[str] = mapped_column(String(160), unique=True)
     project_ref: Mapped[str] = mapped_column(String(160))
+    #: Declared by the operator uploading it, because nothing else can know. Registration
+    #: is refused until such an object has a data protection record naming a basis.
+    personal_data: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
     evidence_type: Mapped[str] = mapped_column(String(40))
     storage_uri: Mapped[str] = mapped_column(Text)
     content_hash: Mapped[str] = mapped_column(String(71), unique=True)
@@ -183,6 +188,47 @@ class AuditLogRecord(EntityMixin, Base):
     entity_id: Mapped[str] = mapped_column(String(160), index=True)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     correlation_id: Mapped[str] = mapped_column(String(80), index=True)
+
+
+class DataProtectionRecord(EntityMixin, Base):
+    """What makes holding one evidence object lawful, and who is answerable for it.
+
+    Deliberately not a consent record. Dynamic Aid operates its own programmes and
+    delivers the aid, so consent obtained from someone receiving that aid is not freely
+    given and is therefore not valid consent -- and the basis for ordinary programme
+    imagery is more likely to be legitimate interest with an unconditional objection
+    route. Special-category data is the exception: legitimate interest is not available
+    for it under Article 9, which is why `special_category` constrains the basis.
+
+    The controller is stored per object rather than assumed, because it is not constant.
+    Dynamic Aid is the controller for programmes it runs, a joint controller for ones it
+    co-builds with a partner, and would become a processor for organisations it handed
+    the platform to.
+    """
+
+    __tablename__ = "data_protection_records"
+    evidence_ref: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    #: Article 6 basis. Named rather than assumed so the answer can differ per object and
+    #: can be changed without a migration when counsel settles it.
+    lawful_basis: Mapped[str] = mapped_column(String(40))
+    #: Article 9 data -- health, vulnerability. Legitimate interest cannot carry it.
+    special_category: Mapped[bool] = mapped_column(Boolean, default=False)
+    controller_org_ref: Mapped[str] = mapped_column(String(160), index=True)
+    #: Set where a programme is co-built, which is joint controllership rather than one
+    #: organisation acting for another.
+    joint_controller_org_ref: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    #: Who the data is about, by a reference this system can resolve rather than a name.
+    subject_reference: Mapped[str] = mapped_column(String(160), index=True)
+    purpose: Mapped[str] = mapped_column(Text)
+    captured_by: Mapped[str] = mapped_column(String(160))
+    #: Retention schedule. Past this the object is erased whether or not anyone asked.
+    retain_until: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    #: Consent withdrawn, or legitimate interest objected to. One field: what the person
+    #: did differs by basis, what this system must then do does not.
+    withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: When the key was destroyed. Separate from withdrawn_at because a withdrawal that
+    #: was recorded and never acted on is the failure this column exists to expose.
+    erased_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class OrganizationRecord(EntityMixin, Base):

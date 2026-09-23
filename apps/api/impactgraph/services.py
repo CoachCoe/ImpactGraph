@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -16,6 +17,7 @@ from .persistence import (
     AuditLogRecord,
     BlockchainOperationRecord,
     ClaimRecord,
+    DataProtectionRecord,
     DomainEntityRecord,
     EvidenceRecord,
     IdempotencyRecord,
@@ -24,6 +26,7 @@ from .persistence import (
     ProgramRecord,
     UserRecord,
 )
+from .verification import restate_claims_for
 
 
 class AuthorizationError(PermissionError):
@@ -140,6 +143,7 @@ class EvidenceApplicationService:
         content_hash: str,
         mime_type: str,
         visibility: str,
+        personal_data: bool = False,
         correlation_id: str,
         idempotency_key: str,
     ) -> dict[str, Any]:
@@ -170,6 +174,7 @@ class EvidenceApplicationService:
             content_hash=content_hash,
             mime_type=mime_type,
             visibility=visibility,
+            personal_data=personal_data,
             workflow_status=EvidenceWorkflowStatus.UPLOADED,
             analysis_status="NOT_STARTED",
             integrity_status="NOT_CHECKED",
@@ -248,6 +253,25 @@ class EvidenceApplicationService:
         # program was on chain by the time anything referenced it; now one can exist in
         # PostgreSQL while its receipt is still pending, and the operator should be told
         # that here rather than have the worker fail the registration later.
+        # Personal data must be lawful to hold before its commitment becomes permanent.
+        # After registration the hash cannot be withdrawn, so there is no later point at
+        # which "we had no basis for this" can be acted on cheaply.
+        if evidence.personal_data:
+            protection = session.scalar(
+                select(DataProtectionRecord).where(
+                    DataProtectionRecord.evidence_ref == evidence_id
+                )
+            )
+            if protection is None:
+                raise DomainConflictError(
+                    "This evidence is declared to contain personal data and has no data "
+                    "protection record; one naming a lawful basis and a controller is "
+                    "required before its commitment is made permanent"
+                )
+            if protection.withdrawn_at is not None:
+                raise DomainConflictError(
+                    "The basis for holding this evidence has been withdrawn or objected to"
+                )
         program = session.scalar(select(ProgramRecord).where(ProgramRecord.slug == program_id))
         if program is None:
             raise DomainConflictError(f"Program {program_id!r} does not exist")
@@ -1087,3 +1111,173 @@ class OnboardingApplicationService:
             response_body=response,
         )
         return response
+
+
+#: Article 6. Named rather than assumed: an organisation that delivers the aid it
+#: photographs cannot obtain freely given consent from the person receiving it, so
+#: ordinary programme imagery is more likely to rest on legitimate interest with an
+#: unconditional objection route.
+LAWFUL_BASES = (
+    "CONSENT",
+    "CONTRACT",
+    "LEGAL_OBLIGATION",
+    "VITAL_INTERESTS",
+    "PUBLIC_TASK",
+    "LEGITIMATE_INTEREST",
+)
+
+#: Article 9 permits none of the Article 6 bases on their own. Explicit consent is the
+#: only one of these this system will accept for special-category data; anything else
+#: needs a substantial-public-interest condition that is not an engineering decision.
+SPECIAL_CATEGORY_BASES = ("CONSENT",)
+
+
+class DataProtectionApplicationService:
+    """The record that makes holding an evidence object lawful, and erasure when it stops.
+
+    Erasure is not deletion. The commitment is on a ledger that cannot forget, so what is
+    destroyed is the key: the object becomes unrecoverable and the registry keeps saying,
+    truthfully, that something was once committed. ADR-011.
+    """
+
+    def __init__(self, storage: Any) -> None:
+        self.storage = storage
+        self.audit = AuditService()
+
+    @staticmethod
+    def _operator(actor: ApplicationActor) -> None:
+        if actor.role not in {Role.OPERATOR, Role.ADMIN}:
+            raise AuthorizationError("Only an operator or administrator may record this")
+
+    def declare(
+        self,
+        session: Session,
+        *,
+        actor: ApplicationActor,
+        evidence_id: str,
+        lawful_basis: str,
+        special_category: bool,
+        controller_org_ref: str,
+        joint_controller_org_ref: str | None,
+        subject_reference: str,
+        purpose: str,
+        retain_until: str | None,
+        correlation_id: str,
+    ) -> dict[str, Any]:
+        self._operator(actor)
+        if lawful_basis not in LAWFUL_BASES:
+            raise DomainConflictError(f"lawful_basis must be one of {', '.join(LAWFUL_BASES)}")
+        if special_category and lawful_basis not in SPECIAL_CATEGORY_BASES:
+            raise DomainConflictError(
+                "Special-category data cannot rest on "
+                f"{lawful_basis}; Article 9 permits no Article 6 basis on its own, and the "
+                "only condition this system accepts is explicit consent"
+            )
+        evidence = session.scalar(
+            select(EvidenceRecord).where(EvidenceRecord.external_id == evidence_id)
+        )
+        if evidence is None:
+            raise LookupError("Evidence not found")
+        existing = session.scalar(
+            select(DataProtectionRecord).where(
+                DataProtectionRecord.evidence_ref == evidence_id
+            )
+        )
+        if existing is not None:
+            raise DomainConflictError("This evidence already has a data protection record")
+
+        session.add(
+            DataProtectionRecord(
+                evidence_ref=evidence_id,
+                lawful_basis=lawful_basis,
+                special_category=special_category,
+                controller_org_ref=controller_org_ref,
+                joint_controller_org_ref=joint_controller_org_ref,
+                subject_reference=subject_reference,
+                purpose=purpose,
+                captured_by=actor.id,
+                retain_until=retain_until,
+            )
+        )
+        evidence.personal_data = True
+        self.audit.record(
+            session,
+            actor=actor,
+            action="DATA_PROTECTION_DECLARED",
+            entity_type="EVIDENCE",
+            entity_id=evidence_id,
+            correlation_id=correlation_id,
+            metadata={
+                "lawfulBasis": lawful_basis,
+                "specialCategory": special_category,
+                "controller": controller_org_ref,
+            },
+        )
+        return {
+            "evidenceId": evidence_id,
+            "lawfulBasis": lawful_basis,
+            "specialCategory": special_category,
+            "controller": controller_org_ref,
+            "jointController": joint_controller_org_ref,
+            "retainUntil": retain_until,
+        }
+
+    def erase(
+        self,
+        session: Session,
+        *,
+        actor: ApplicationActor,
+        evidence_id: str,
+        reason: str,
+        correlation_id: str,
+    ) -> dict[str, Any]:
+        """Destroy the key, and re-decide whatever rested on the object.
+
+        A claim keeps whatever badge it had unless something re-evaluates it, so erasing
+        the evidence beneath a VERIFIED claim without restating it would leave a donor
+        reading a verdict whose support no longer exists.
+        """
+        self._operator(actor)
+        record = session.scalar(
+            select(DataProtectionRecord).where(
+                DataProtectionRecord.evidence_ref == evidence_id
+            )
+        )
+        if record is None:
+            raise LookupError("This evidence has no data protection record to act on")
+        evidence = session.scalar(
+            select(EvidenceRecord).where(EvidenceRecord.external_id == evidence_id)
+        )
+        if evidence is None:
+            raise LookupError("Evidence not found")
+
+        now = datetime.now(UTC)
+        destroyed = self.storage.destroy_key(evidence.storage_uri)
+        record.withdrawn_at = record.withdrawn_at or now
+        record.erased_at = now
+        evidence.integrity_status = "UNRECOVERABLE"
+        restated = restate_claims_for(session, evidence_id, correlation_id)
+        self.audit.record(
+            session,
+            actor=actor,
+            action="EVIDENCE_ERASED",
+            entity_type="EVIDENCE",
+            entity_id=evidence_id,
+            correlation_id=correlation_id,
+            # Never the subject or the contents: an erasure record that quotes what was
+            # erased is not an erasure.
+            metadata={
+                "reason": reason,
+                "keyDestroyed": destroyed,
+                "claimsRestated": restated,
+            },
+        )
+        return {
+            "evidenceId": evidence_id,
+            "erasedAt": now.isoformat(),
+            "keyDestroyed": destroyed,
+            "claimsRestated": restated,
+            # The commitment is not withdrawn, and saying so is the honest part.
+            "commitment": "The onchain commitment remains; it records that these bytes were "
+            "once committed, which is still true.",
+        }
