@@ -57,7 +57,7 @@ from .export import (
     outcomes_csv,
     provenance_csv,
 )
-from .extraction import TinkerEvidenceAnalysisProvider, review_required_fields
+from .extraction import SCHEMA_FIELDS, TinkerEvidenceAnalysisProvider, review_required_fields
 from .financial import (
     EvidenceReconciliationService,
     FinancialIngestionService,
@@ -287,6 +287,11 @@ class InvoiceExtraction(BaseModel):
 
 class EvidenceReviewRequest(BaseModel):
     extraction: InvoiceExtraction
+    #: The fields the operator confirmed against the document in front of them. Reviewing
+    #: is the act this records, so the endpoint refuses a review that does not cover every
+    #: field the analysis flagged -- otherwise the confirmation is a checkbox in a browser
+    #: and the API registers whatever a model proposed.
+    confirmed: list[str] = Field(default_factory=list)
 
 
 class WalletSubmissionRequest(BaseModel):
@@ -1085,6 +1090,26 @@ def analyze_evidence(evidence_id: str, user: CurrentUser = None):
     return item
 
 
+def _require_confirmation(analyzed: dict[str, Any] | None, confirmed: list[str]) -> list[str]:
+    """The fields a person confirmed, refusing the review when any flagged one is missing.
+
+    Checked against the extraction as the model produced it, not the one being submitted:
+    an operator who edits amountMinor to something they did not read off the document must
+    still say so, and a client could otherwise clear a flag by changing the value.
+    """
+    outstanding = sorted(set(review_required_fields(analyzed or {})) - set(confirmed))
+    if outstanding:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "CONFIRMATION_REQUIRED",
+                "message": "These fields must be confirmed by a person before registration",
+                "fields": outstanding,
+            },
+        )
+    return sorted(set(confirmed) & set(SCHEMA_FIELDS))
+
+
 @app.post("/evidence/{evidence_id}/review")
 def review_evidence(
     evidence_id: str,
@@ -1100,6 +1125,7 @@ def review_evidence(
                 raise HTTPException(404, "Evidence not found")
             if item.workflow_status != "ANALYZED":
                 raise HTTPException(409, "Only ANALYZED evidence can be reviewed")
+            confirmed = _require_confirmation(item.extraction, body.confirmed)
             reviewed_extraction = body.extraction.model_dump(mode="json")
             item.extraction = reviewed_extraction
             item.reconciliation = evidence_reconciliation.reconcile(
@@ -1110,6 +1136,7 @@ def review_evidence(
             item.workflow_status = "REVIEWED"
             metadata = dict(item.metadata_json or {})
             metadata["reviewedBy"] = "Global Water Initiative"
+            metadata["confirmedFields"] = confirmed
             item.metadata_json = metadata
             session.flush()
             return evidence_record_response(item)
@@ -1118,6 +1145,7 @@ def review_evidence(
         raise HTTPException(404, "Evidence not found")
     if item["workflowStatus"] != "ANALYZED":
         raise HTTPException(409, "Only ANALYZED evidence can be reviewed")
+    item["confirmedFields"] = _require_confirmation(item.get("extraction"), body.confirmed)
     item["extraction"] = body.extraction.model_dump(mode="json")
     item["workflowStatus"] = "REVIEWED"
     item["reviewedBy"] = "Global Water Initiative"

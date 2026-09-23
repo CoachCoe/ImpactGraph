@@ -7,13 +7,16 @@ testing here are about what is done with an extraction rather than how it was ob
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from impactgraph.extraction import (
     _INSTRUCTION,
-    _SCHEMA_FIELDS,
+    _MAX_TOKENS,
     RECONCILIATION_KEYS,
     REVIEW_THRESHOLD,
+    SCHEMA_FIELDS,
     _conform,
     _first_json_object,
     review_required_fields,
@@ -158,8 +161,8 @@ def test_the_prompt_and_the_boundary_describe_the_same_document():
     from impactgraph.main import InvoiceExtraction
 
     accepted = set(InvoiceExtraction.model_fields) - {"selfReportedConfidence"}
-    assert accepted == set(_SCHEMA_FIELDS)
-    assert all(field in _INSTRUCTION for field in _SCHEMA_FIELDS)
+    assert accepted == set(SCHEMA_FIELDS)
+    assert all(field in _INSTRUCTION for field in SCHEMA_FIELDS)
 
 
 def test_a_key_the_model_invented_is_dropped_rather_than_refused_at_review():
@@ -170,7 +173,7 @@ def test_a_key_the_model_invented_is_dropped_rather_than_refused_at_review():
 def test_a_key_the_model_omitted_becomes_a_field_to_confirm():
     conformed = _conform({"invoiceNumber": "MBS-4417"})
     assert conformed["vendor"] is None
-    assert set(review_required_fields(conformed)) == set(_SCHEMA_FIELDS)
+    assert set(review_required_fields(conformed)) == set(SCHEMA_FIELDS)
 
 
 def test_a_confidence_outside_zero_to_one_is_not_believed():
@@ -178,3 +181,136 @@ def test_a_confidence_outside_zero_to_one_is_not_believed():
     conformed = _conform({**COMPLETE, "selfReportedConfidence": {"vendor": 1.4, "date": 0.95}})
     assert conformed["selfReportedConfidence"] == {"date": 0.95}
     assert "vendor" in review_required_fields(conformed)
+
+
+def test_a_brace_anywhere_else_in_the_reply_does_not_lose_the_answer():
+    """The answer used to be located as the span from the first brace to the last, so a
+    brace in the reasoning, or a remark after the object, made a good reply unparseable."""
+    assert _first_json_object('I see {a total}. {"invoiceNumber": "X"}') == {"invoiceNumber": "X"}
+    assert _first_json_object('<|content_final|>{"invoiceNumber": "X"} ({sic})') == {
+        "invoiceNumber": "X"
+    }
+
+
+def test_the_nested_confidence_object_survives_being_found():
+    reply = '<|content_final|>{"invoiceNumber":"X","selfReportedConfidence":{"vendor":0.9}}'
+    assert _first_json_object(reply)["selfReportedConfidence"] == {"vendor": 0.9}
+
+
+def test_a_total_the_model_formatted_is_not_guessed_at():
+    """The prompt asks for minor units. "4,200.00" is the model declining to obey it, and
+    reading that as 420000 is a guess about the decimal point on the field a payment is
+    reconciled against. None sends it to the operator, which is the honest answer."""
+    for formatted in ("4,200.00", "USD 4200.00", 4200.5):
+        conformed = _conform({"amountMinor": formatted})
+        assert conformed["amountMinor"] is None
+        assert "amountMinor" in review_required_fields(conformed)
+
+
+def test_an_integer_the_model_quoted_is_still_an_integer():
+    assert _conform({"amountMinor": "420000", "quantity": 3.0}) | {} == _conform(
+        {"amountMinor": 420000, "quantity": 3}
+    )
+
+
+def test_refusing_a_format_needs_nothing_from_the_optional_extra(monkeypatch):
+    """tinker is an optional extra, so CI runs without it. Importing the renderer before
+    deciding whether the format is readable turned this refusal into an ImportError there,
+    and the test that pins it passed only on a machine that happened to have the extra."""
+    import sys
+
+    from impactgraph.extraction import TinkerEvidenceAnalysisProvider
+
+    for module in ("tml_renderers", "tml_renderers.chat", "PIL", "PIL.Image"):
+        monkeypatch.setitem(sys.modules, module, None)
+    provider = TinkerEvidenceAnalysisProvider(model="thinkingmachines/Inkling-Small")
+    with (
+        pytest.raises(ValueError, match="cannot be read yet"),
+        provider._document(b"%PDF-1.7 ...", "application/pdf"),
+    ):
+        pass
+
+
+@pytest.fixture
+def offline_provider(monkeypatch):
+    """A provider whose sampling client returns a scripted reply.
+
+    The renderer and the service are stubbed rather than reached: what is under test is
+    what `analyze` does with a reply, which is the part CI can hold to account.
+    """
+    import sys
+    from types import SimpleNamespace
+
+    from impactgraph.extraction import TinkerEvidenceAnalysisProvider
+
+    passthrough = SimpleNamespace(
+        Author=lambda **kw: kw,
+        AuthorKind=SimpleNamespace(User="user"),
+        Message=lambda **kw: kw,
+        Text=lambda text: text,
+        ImageFormat=SimpleNamespace(Png="png", Jpeg="jpeg"),
+        ImagePointer=lambda **kw: kw,
+    )
+    # The parent packages are stubbed too, or importing a submodule executes the real
+    # __init__ -- which is the torch load this suite is meant to run without. `import a.b`
+    # then reads b off the parent, so each child is hung on it as an attribute as well.
+    types = SimpleNamespace(SamplingParams=lambda **kw: kw)
+    renderers = SimpleNamespace(token_spans_to_tinker_model_input=list)
+    for name, module in {
+        "tinker": SimpleNamespace(types=types),
+        "tinker.types": types,
+        "tml_renderers": SimpleNamespace(chat=passthrough, tinker=renderers),
+        "tml_renderers.chat": passthrough,
+        "tml_renderers.tinker": renderers,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    def build(tokens: list[int], reply: str) -> TinkerEvidenceAnalysisProvider:
+        provider = TinkerEvidenceAnalysisProvider(model="thinkingmachines/Inkling-Small")
+        response = SimpleNamespace(sequences=[SimpleNamespace(tokens=tokens)])
+        provider._client = SimpleNamespace(
+            sample=lambda **kw: SimpleNamespace(result=lambda: response)
+        )
+        provider._renderer = SimpleNamespace(
+            render_for_completion=lambda messages: ([], None), stop=list
+        )
+        provider._tokenizer = SimpleNamespace(decode=lambda tokens: reply)
+        return provider
+
+    return build
+
+
+REPLY = (
+    "<|content_thinking|>The total reads 4,200.00, so amountMinor is 420000."
+    '<|content_final|>{"documentType":"invoice","invoiceNumber":"INV-8291","vendor":'
+    '"Aqua Systems Ltd.","amountMinor":420000,"currency":"USD","date":"2026-08-17",'
+    '"equipment":"AquaPure X200","quantity":2,"projectReference":"Water Project #12",'
+    '"selfReportedConfidence":{"vendor":0.98}}'
+)
+
+
+def test_nothing_the_model_read_is_kept_where_it_would_outlive_the_request(offline_provider):
+    """`raw_response` is written into evidence metadata and served over the API. The reply
+    restates the document, so keeping it there was a second copy of a restricted document
+    governed by none of the rules that govern the first."""
+    result = offline_provider([1, 2, 3], REPLY).analyze(b"Invoice INV-8291", "text/plain")
+
+    assert result.extraction["invoiceNumber"] == "INV-8291"
+    assert "INV-8291" not in json.dumps(result.raw_response)
+    assert "Aqua Systems" not in json.dumps(result.raw_response)
+    assert result.raw_response["replyTokens"] == 3
+
+
+def test_a_reply_cut_off_at_the_cap_says_so_rather_than_blaming_the_json(offline_provider):
+    """Both arrive as an unparseable reply, and an operator retrying a document that will
+    never fit needs to be told which one happened."""
+    truncated = offline_provider([0] * _MAX_TOKENS, REPLY[:120])
+    with pytest.raises(ValueError, match="cut off"):
+        truncated.analyze(b"Invoice INV-8291", "text/plain")
+
+
+def test_the_document_is_confirmed_field_by_field_after_a_real_read(offline_provider):
+    result = offline_provider([1], REPLY).analyze(b"Invoice INV-8291", "text/plain")
+    flagged = review_required_fields(result.extraction)
+    assert set(RECONCILIATION_KEYS) <= set(flagged)
+    assert "vendor" not in flagged

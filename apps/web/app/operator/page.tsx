@@ -77,7 +77,7 @@ function Operator() {
     setError(null);
     try {
       setState("registering");
-      await api<EvidenceResponse>(`/evidence/${evidenceId}/review`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ extraction: draft }) });
+      await api<EvidenceResponse>(`/evidence/${evidenceId}/review`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ extraction: draft, confirmed: Object.keys(confirmed).filter((field) => confirmed[field]) }) });
       const submitted = await api<RegistrationResponse>(`/evidence/${evidenceId}/register`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } });
       setOperation(submitted); setState("submitted");
       for (let attempt = 0; attempt < 120; attempt += 1) {

@@ -72,7 +72,11 @@ describe("operator review", () => {
     await waitFor(() => {
       const review = api.mock.calls.find(([path]) => String(path).endsWith("/review"));
       expect(review).toBeDefined();
-      expect(JSON.parse(review![1].body).extraction.invoiceNumber).toBe("INV-8291");
+      const sent = JSON.parse(review![1].body);
+      expect(sent.extraction.invoiceNumber).toBe("INV-8291");
+      // The API refuses a review that does not cover every flagged field, so what the
+      // operator ticked has to travel with the extraction rather than staying on screen.
+      expect(sent.confirmed.sort()).toEqual(["amountMinor", "currency", "invoiceNumber"]);
     });
   });
 
