@@ -128,6 +128,10 @@ h1,h2,h3,p{margin-top:0}
 .header{height:72px;display:flex;align-items:center;padding:0 max(24px,calc((100vw - 1240px)/2));border-bottom:1px solid var(--dkline);background:var(--ink);color:var(--paper);position:sticky;top:0;z-index:20}
 .brand{flex:0 0 auto;display:flex;align-items:center;gap:10px;font-family:var(--font-display);font-weight:700;letter-spacing:var(--track-display);font-size:19px}
 .brandMark{display:grid;place-items:center;width:32px;height:32px;border-radius:10px;background:var(--brand);color:var(--ink);font-family:var(--font-display);font-weight:700}
+/* The wrapper exists for the mobile panel; above 800px it dissolves so nav and
+   .headerRight remain direct flex items of .header. */
+.headerMenu{display:contents}
+.burger{display:none}
 .header nav{display:flex;gap:28px;margin-left:auto;margin-right:32px}
 .header nav a{font-family:var(--font-mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--dkmut)}
 .header nav a:hover{color:var(--paper)}
@@ -391,11 +395,27 @@ footer{margin-top:24px;padding:36px var(--gutter) 56px;background:var(--ink-deep
 @media(max-width:1024px){.contentGrid,.reviewGrid,.operatorGrid{grid-template-columns:1fr}}
 @media(max-width:800px){
   .header{padding:0 16px;gap:12px}
-  .header nav{display:none}
-  .headerRight{gap:10px}
-  .brand span:last-child{display:none}
-  .network{margin-left:auto}
-  .headerRight .account span{display:none}
+  /* The navigation used to be hidden here with nothing in its place, which put
+     /about out of reach on a phone entirely and left operators and verifiers --
+     the people most likely to be on one -- unable to move between their screens.
+     It is now disclosed by .burger rather than dropped. Issue #22. */
+  .burger{display:grid;place-content:center;gap:5px;width:40px;height:40px;margin-left:auto;padding:0;border:0;background:transparent;cursor:pointer}
+  .burger span{display:block;width:22px;height:2px;border-radius:2px;background:var(--paper)}
+  /* The bars become a cross the instant the panel opens. The brand site eases this
+     over .4s; the motion budget does not stretch to a menu icon. */
+  .burger[aria-expanded=true] span:nth-child(1){transform:translateY(7px) rotate(45deg)}
+  .burger[aria-expanded=true] span:nth-child(2){opacity:0}
+  .burger[aria-expanded=true] span:nth-child(3){transform:translateY(-7px) rotate(-45deg)}
+  .headerMenu{display:none;position:absolute;top:100%;left:0;right:0;flex-direction:column;padding:8px 16px 22px;background:var(--ink);border-bottom:1px solid var(--dkline);max-height:calc(100dvh - 72px);overflow-y:auto}
+  .headerMenu[data-open=true]{display:flex}
+  .header .headerMenu nav{display:flex;flex-direction:column;gap:0;margin:0}
+  /* Destinations are the reason the panel opened, so they are set as destinations
+     rather than as the 11px labels the desktop bar can afford to be. */
+  .header .headerMenu nav a{font-family:var(--font-display);font-weight:700;font-size:20px;line-height:1.2;letter-spacing:var(--track-display);text-transform:none;color:var(--paper);padding:13px 0;border-bottom:1px solid var(--dkline)}
+  .header .headerMenu nav a:hover{color:var(--brand)}
+  .headerMenu .headerRight{flex-direction:column;align-items:flex-start;gap:14px;margin-top:20px}
+  .headerMenu .network{margin:0}
+  .headerMenu .account{gap:14px}
   .hero{padding:64px 20px 56px}
   .metrics,.compact{grid-template-columns:repeat(2,minmax(0,1fr));margin-left:16px;margin-right:16px}
   .metrics article:nth-child(2){border-right:0}
@@ -408,6 +428,11 @@ footer{margin-top:24px;padding:36px var(--gutter) 56px;background:var(--ink-deep
   .score{order:-1}
   .operatorGrid{grid-template-columns:1fr}
   .ledgerHead{flex-direction:column;gap:6px}
+  /* nowrap keeps a verdict on one line where there is room for one. There is not room
+     at 360px: "Evidenced — with one thing to look at" is wider than the viewport, and
+     an unbreakable chip pushed the whole money trail sideways. The chip wraps here
+     rather than the page scrolling. */
+  .status{white-space:normal}
   .formGrid{grid-template-columns:1fr}
   .aboutSplit{grid-template-columns:1fr}
   .authLayout{padding:40px 16px}
