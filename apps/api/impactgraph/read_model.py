@@ -542,6 +542,7 @@ class TransparencyReadRepository:
                 "statement": record.statement,
                 "status": record.status,
                 "verifiedAt": as_utc_iso(record.verified_at),
+                "publishedAt": as_utc_iso(record.published_at),
             }
             for record in self.session.scalars(query)
         ]

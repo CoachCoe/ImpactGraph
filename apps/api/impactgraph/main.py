@@ -24,6 +24,7 @@ from prometheus_client import CONTENT_TYPE_LATEST
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select, text
 
+from . import public_api
 from .attribution import MixedCurrencyError, funding_attribution
 from .auth import (
     SESSION_COOKIE,
@@ -997,6 +998,15 @@ def claim(claim_id: str):
     if claim_id != store.claim["id"]:
         raise HTTPException(404, "Claim not found")
     return store.claim
+
+
+# The read-only API third parties query. Mounted here because this module owns the
+# wiring; the contract lives in public_api.
+public_api.register(
+    app,
+    read=database_read,
+    claims_list=lambda program: database_read("claims", None, program, None) or [],
+)
 
 
 @app.post("/claims/{claim_id}/publish", status_code=201)

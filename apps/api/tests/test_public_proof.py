@@ -76,7 +76,7 @@ def test_an_operator_cannot_decide_that_a_donor_is_named():
         == REDACTED_FUNDER
     )
 
-    routes = {route.path for route in app.routes}
+    routes = {getattr(route, "path", "") for route in app.routes}
     assert not any(
         path.startswith("/funding/") and path.endswith("/publish-name") for path in routes
     ), "an endpoint exists that lets somebody else publish a funder's name"
@@ -164,7 +164,11 @@ def test_publishing_is_opt_in_and_then_permanent():
     assert again.json()["publishedAt"] == published.json()["publishedAt"]
 
     # And there is no route that takes it back.
-    routes = {(route.path, method) for route in app.routes for method in getattr(route, "methods", [])}
+    routes = {
+        (getattr(route, "path", ""), method)
+        for route in app.routes
+        for method in getattr(route, "methods", [])
+    }
     assert not any(
         "publish" in path and method in {"DELETE", "PUT"} for path, method in routes
     ), "a route exists that could withdraw a published proof"
@@ -299,3 +303,77 @@ def test_the_badge_is_an_image_a_browser_will_render(anonymous):
     assert badge.headers["content-type"].startswith("image/svg+xml")
     assert badge.text.startswith("<svg")
     assert 'role="img"' in badge.text and "aria-label" in badge.text
+
+
+# --- The read-only API a funder or researcher queries ---
+
+
+@pytest.fixture(autouse=True)
+def _forget_rate_limits():
+    """Each test gets its own quota; otherwise the limiter carries between them and the
+    failure looks like whichever test happened to run sixty-first."""
+    from impactgraph.public_api import limiter
+
+    limiter.forget()
+    yield
+    limiter.forget()
+
+
+def test_the_public_api_lists_only_claims_somebody_published(anonymous):
+    listed = anonymous.get("/v1/claims")
+    assert listed.status_code == 200
+    assert listed.json()["claims"] == []
+
+    operator_client().post(f"/claims/{CLAIM}/publish")
+    published = anonymous.get("/v1/claims").json()["claims"]
+    assert [item["id"] for item in published] == [CLAIM]
+
+
+def test_an_unpublished_claim_is_indistinguishable_from_one_that_does_not_exist(anonymous):
+    """Whether an organisation has an unpublished claim is not a public fact, so the
+    answer for a private one and an imaginary one has to be the same."""
+    assert anonymous.get(f"/v1/claims/{CLAIM}").status_code == 404
+    assert anonymous.get("/v1/claims/claim-does-not-exist").status_code == 404
+
+
+def test_the_public_api_carries_its_version(anonymous):
+    """Anything anyone automates against is an interface whether it was meant to be one."""
+    from impactgraph.public_api import PUBLIC_API_VERSION
+
+    operator_client().post(f"/claims/{CLAIM}/publish")
+    assert anonymous.get("/v1/claims").json()["version"] == PUBLIC_API_VERSION
+    assert anonymous.get(f"/v1/claims/{CLAIM}").json()["version"] == PUBLIC_API_VERSION
+
+
+def test_a_caller_is_told_what_is_left_before_they_run_out(anonymous):
+    from impactgraph.public_api import RATE_LIMIT_REQUESTS
+
+    first = anonymous.get("/v1/claims")
+    assert first.headers["X-RateLimit-Limit"] == str(RATE_LIMIT_REQUESTS)
+    assert int(first.headers["X-RateLimit-Remaining"]) == RATE_LIMIT_REQUESTS - 1
+
+
+def test_hammering_the_public_api_is_refused_with_a_reason_and_a_retry(anonymous):
+    from impactgraph.public_api import RATE_LIMIT_REQUESTS
+
+    for _ in range(RATE_LIMIT_REQUESTS):
+        assert anonymous.get("/v1/claims").status_code == 200
+    refused = anonymous.get("/v1/claims")
+    assert refused.status_code == 429
+    assert refused.json()["detail"]["code"] == "RATE_LIMITED"
+    assert refused.headers["Retry-After"]
+
+
+def test_the_limit_is_per_caller_and_not_shared_by_everyone_behind_a_proxy(anonymous):
+    """Counting every request through a proxy as one client means the first caller
+    exhausts the quota for all of them."""
+    from impactgraph.public_api import RATE_LIMIT_REQUESTS
+
+    for _ in range(RATE_LIMIT_REQUESTS):
+        anonymous.get("/v1/claims", headers={"X-Forwarded-For": "203.0.113.5"})
+    assert anonymous.get(
+        "/v1/claims", headers={"X-Forwarded-For": "203.0.113.5"}
+    ).status_code == 429
+    assert anonymous.get(
+        "/v1/claims", headers={"X-Forwarded-For": "198.51.100.7"}
+    ).status_code == 200
