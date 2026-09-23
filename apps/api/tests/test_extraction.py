@@ -366,3 +366,17 @@ def test_the_readiness_flag_is_never_set_before_what_it_stands_for():
 
     body = inspect.getsource(TinkerEvidenceAnalysisProvider._build)
     assert body.index("self._tokenizer") < body.index("self._client = client")
+
+
+def test_reading_evidence_back_says_what_still_needs_confirming(sign_in):
+    """The analysis response carried this and the read did not, so a client that reloaded
+    the page lost the list and would be refused at /review with no way to know why."""
+    from fastapi.testclient import TestClient
+
+    from impactgraph.main import app
+
+    client = TestClient(app)
+    sign_in(client, "operator@globalwater.example")
+    read = client.get("/evidence/ev-inv-8291")
+    assert read.status_code == 200
+    assert set(RECONCILIATION_KEYS) <= set(read.json()["reviewRequired"])

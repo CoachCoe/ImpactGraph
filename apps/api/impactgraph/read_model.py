@@ -16,6 +16,7 @@ from .evidence import (
     FileEvidenceStorage,
     ReconciliationService,
 )
+from .extraction import review_required_fields
 from .financial import (
     EvidenceReconciliationService,
     FinancialIngestionService,
@@ -540,6 +541,12 @@ class TransparencyReadRepository:
             "integrityStatus": record.integrity_status,
             "blockchainStatus": record.blockchain_status,
             "extraction": record.extraction,
+            # The same list the analysis response carries. Without it a client that
+            # reloaded the page could no longer tell which fields /review will demand,
+            # and would be refused with no way to know what to confirm.
+            "reviewRequired": (
+                review_required_fields(record.extraction) if record.extraction else []
+            ),
             "reconciliation": record.reconciliation,
             **record.metadata_json,
         }
