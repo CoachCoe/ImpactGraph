@@ -135,6 +135,26 @@ function Record({ node }: { node: ProvenanceNode }) {
       <small>{node.type.replace(/_/g, " ")}</small>
       <strong>{node.title}</strong>
       <span>{detail}</span>
+      {node.type === "OUTCOME" ? <Method node={node} /> : null}
     </div>
+  );
+}
+
+/**
+ * How the figure above was arrived at.
+ *
+ * Beside the number rather than behind a link, and an outcome with nothing recorded says
+ * so. Omitting the line where a method is missing would let the least supported figure on
+ * the page look exactly like the best supported one.
+ */
+function Method({ node }: { node: ProvenanceNode }) {
+  const confidence =
+    typeof node.confidencePercent === "number" ? ` · ${node.confidencePercent}% confidence` : "";
+  return (
+    <small className="method">
+      {node.method
+        ? `Method · ${node.method}${node.source ? ` · ${node.source}` : ""}${confidence}`
+        : "No method recorded for this figure"}
+    </small>
   );
 }

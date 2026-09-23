@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from .blockchain import digest_bytes, entity_id_bytes
 from .domain import BlockchainStatus, EvidenceWorkflowStatus, Role
 from .hashing import hash_fields
+from .notifications import enqueue_claim_status_change
 from .persistence import (
     AttestationRecord,
     AuditLogRecord,
@@ -437,6 +438,9 @@ class VerificationApplicationService:
         if claim.status != "VERIFICATION_PENDING":
             raise DomainConflictError("Claim is not awaiting independent verification")
         claim.status = "REJECTED"
+        enqueue_claim_status_change(
+            session, claim_id=claim_id, status=claim.status, correlation_id=correlation_id
+        )
         self.audit.record(
             session,
             actor=actor,

@@ -50,6 +50,14 @@ immutable, and integrity verification re-reads the stored object and rehashes it
 artifacts would carry separate hashes; no derivation step exists yet. Corrections are
 modelled as a new evidence record plus a SUPERSEDES edge, but no code path writes one.
 
+## Telling people things
+
+A status change writes its intent into the same outbox, in the transaction that decided it,
+and a separate dispatcher sends it. Each worker claims only its own topics. Following a
+claim needs no account: the subscription holds an address and the hash of a token, and
+nothing is sent until that address confirms. Delivery is recorded, deduplicated per
+subscriber per event, and retried until it succeeds or is given up on and said to be.
+
 ## Security assumptions
 
 The POC has upload limits and type validation, ORM queries, opaque onchain IDs, and

@@ -50,7 +50,7 @@ export default async function FinancialPage() {
         </div>
       </section>
 
-      <section className="metrics" aria-label="Financial summary">
+      <section className="metrics financialMetrics" aria-label="Financial summary">
         <article>
           <span>Received</span>
           <strong>{formatMoney(summary.received, { maximumFractionDigits: 0 })}</strong>
@@ -120,13 +120,13 @@ export default async function FinancialPage() {
           <section className="panel">
             <span className="eyebrow">FUNDING</span>
             {summary.funding.map((item) => (
-              <div className="scoreRow" key={item.id}>
+              <Link className="scoreRow" href={`/funding/${item.id}`} key={item.id}>
                 <span>
                   {item.funder}
-                  <small>{item.receivedOn}</small>
+                  <small>{item.receivedOn} · follow this contribution →</small>
                 </span>
                 <b>{formatMoney(item.amount, { maximumFractionDigits: 0 })}</b>
-              </div>
+              </Link>
             ))}
           </section>
 
@@ -176,6 +176,24 @@ export default async function FinancialPage() {
             <Link className="button full" href="/claims/claim-water-12-200">
               Follow it to the claim <span aria-hidden>→</span>
             </Link>
+          </section>
+
+          <section className="panel">
+            <span className="eyebrow">TAKE IT WITH YOU</span>
+            <h2>Check it somewhere else</h2>
+            <p className="subtle">
+              Everything above can be read in your own tools. Rows carry the hashes needed
+              to check them against the registry, so nothing here has to be taken on our
+              word.
+            </p>
+            {/* Plain links rather than fetches: the browser saves the file, and the
+                endpoints are public, so no session is involved. */}
+            <a className="secondary full" href={`/api/export/programs/${PROGRAM_ID}/money-trail.csv`}>
+              Money trail (CSV)
+            </a>
+            <a className="secondary full" href={`/api/export/programs/${PROGRAM_ID}/outcomes.csv`}>
+              Outcomes and their methods (CSV)
+            </a>
           </section>
         </aside>
       </div>

@@ -35,3 +35,10 @@ docs/master-codex-build-prompt.md
 
 # Local deployment rehearsal output.
 prod-release.log
+
+# Local dev-server config for the agent preview pane.
+.claude/
+
+# Coverage artefacts from a local pytest --cov run.
+.coverage
+htmlcov/

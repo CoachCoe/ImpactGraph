@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from datetime import UTC, datetime
+from functools import lru_cache
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
@@ -17,9 +20,11 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import CONTENT_TYPE_LATEST
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select, text
 
+from .attribution import MixedCurrencyError, funding_attribution
 from .auth import (
     SESSION_COOKIE,
     SESSION_LIFETIME,
@@ -44,6 +49,13 @@ from .evidence import (
     ReconciliationService,
     verify_integrity,
 )
+from .export import (
+    claim_exists,
+    evidence_csv,
+    money_trail_csv,
+    outcomes_csv,
+    provenance_csv,
+)
 from .financial import (
     EvidenceReconciliationService,
     FinancialIngestionService,
@@ -52,12 +64,22 @@ from .financial import (
     transaction_response,
 )
 from .hashing import sha256_bytes
+from .metrics import REGISTRY, OutboxCollector, integrity_checks, render
+from .notifications import (
+    ConsoleNotificationTransport,
+    Message,
+    resolve_token,
+    subscribe,
+)
+from .observability import configure_logging, correlation_context, logger
 from .persistence import (
     AttestationRecord,
     BlockchainOperationRecord,
+    ClaimRecord,
     DomainEntityRecord,
     EvidenceRecord,
     FinancialTransactionRecord,
+    OutboxRecord,
     ProgramRecord,
     UserRecord,
 )
@@ -95,6 +117,9 @@ analysis_provider = MockEvidenceAnalysisProvider()
 reconciliation_service = ReconciliationService()
 evidence_reconciliation = EvidenceReconciliationService(reconciliation_service)
 financial_provider = MockFinancialDataProvider()
+configure_logging()
+log = logger("impactgraph.api")
+
 app = FastAPI(title="ImpactGraph Transparency API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
@@ -109,9 +134,10 @@ app.add_middleware(
 async def correlation_id(request: Request, call_next):
     value = request.headers.get("x-correlation-id", str(uuid4()))
     request.state.correlation_id = value
-    response = await call_next(request)
-    response.headers["x-correlation-id"] = value
-    return response
+    with correlation_context(value):
+        response = await call_next(request)
+        response.headers["x-correlation-id"] = value
+        return response
 
 
 def _refuse_demo_store_route() -> None:
@@ -386,10 +412,14 @@ def login(body: LoginRequest, response: Response):
             token, user = authenticate(session, body.email, body.password)
         except AuthenticationError as exc:
             # One message for both unknown account and wrong password: distinguishing
-            # them would let an unauthenticated caller enumerate valid accounts.
+            # them would let an unauthenticated caller enumerate valid accounts. The
+            # operational log carries no identifier for the same reason -- it would
+            # reconstruct the enumeration the response refuses to give.
+            log.info("auth.login_failed")
             raise HTTPException(
                 401, detail={"code": "INVALID_CREDENTIALS", "message": str(exc)}
             ) from exc
+        log.info("auth.login_succeeded", user_id=str(user.user_id), role=user.role)
         payload = _session_payload(user)
     response.set_cookie(
         SESSION_COOKIE,
@@ -466,6 +496,26 @@ def program_financials(program_id: str):
         return financial_summary(session, program_id)
 
 
+@app.get("/financial/funding/{funding_id}/attribution")
+def funding_attribution_view(funding_id: str):
+    # Public, like the rest of the money trail: following a contribution to what it
+    # reached is the question this product exists to answer.
+    if session_factory is None:
+        raise HTTPException(409, "Attribution requires PERSISTENCE_MODE=postgres")
+    with session_factory() as session:
+        try:
+            return funding_attribution(session, funding_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except MixedCurrencyError as exc:
+            # Refusing beats presenting a total that silently added two currencies.
+            # Conversion with a traceable rate belongs to the financial adapter.
+            raise HTTPException(
+                409,
+                detail={"code": "MIXED_CURRENCY", "message": str(exc)},
+            ) from exc
+
+
 @app.get("/financial/transactions/{transaction_id}")
 def financial_transaction(transaction_id: str):
     if session_factory is None:
@@ -513,9 +563,277 @@ def import_financial_statement(
         return {"provider": financial_provider.name, **result.as_dict()}
 
 
-@app.get("/health")
-def health():
+#: Readiness probes must not outlast the interval an orchestrator polls them on.
+READINESS_TIMEOUT_SECONDS = 3
+
+
+def _probe_database() -> None:
+    if session_factory is None:
+        raise RuntimeError("no database is configured")
+    with session_factory() as session:
+        if session.bind is not None and session.bind.dialect.name == "postgresql":
+            # Bounds the query server side, so a database that accepts the connection and
+            # then stops answering releases the thread instead of holding it forever.
+            session.execute(
+                text(f"SET LOCAL statement_timeout = {READINESS_TIMEOUT_SECONDS * 1000}")
+            )
+        session.execute(text("SELECT 1"))
+
+
+@lru_cache(maxsize=1)
+def _readiness_web3():
+    from web3 import Web3
+
+    return Web3(
+        Web3.HTTPProvider(
+            settings.rpc_url, request_kwargs={"timeout": READINESS_TIMEOUT_SECONDS}
+        )
+    )
+
+
+def _probe_chain() -> None:
+    if not settings.registry_address:
+        raise RuntimeError("no registry address is configured")
+    # The request timeout does not bound name resolution, so a stalled DNS lookup can
+    # still hold a worker. One reused provider keeps that bounded to one socket rather
+    # than one per probe.
+    reported = _readiness_web3().eth.chain_id
+    if reported != settings.chain_id:
+        # Reachable is not the same as correct. A wallet or a worker pointed at the wrong
+        # chain is the failure this catches, and it looks healthy by every other measure.
+        raise RuntimeError(f"chain reports {reported}, expected {settings.chain_id}")
+
+
+def _probe_evidence_storage() -> None:
+    root = settings.evidence_storage_path
+    # Accessibility only. A write probe would prove more and would also mutate the store
+    # this application promises never to alter outside an upload.
+    if not root.is_dir() or not os.access(root, os.R_OK | os.W_OK):
+        raise RuntimeError("evidence storage is not readable and writable")
+
+
+READINESS_PROBES = {
+    "database": _probe_database,
+    "chain": _probe_chain,
+    "evidenceStorage": _probe_evidence_storage,
+}
+
+#: Components whose probe has not come back yet. Python cannot interrupt a blocked call,
+#: so a probe that overruns leaves its thread working; without this a dependency that
+#: stopped answering would strand one more thread on every poll, for ever.
+_probes_in_flight: set[str] = set()
+
+
+async def _run_probe(name: str, probe) -> None:
+    if name in _probes_in_flight:
+        raise TimeoutError(f"the previous {name} probe has not returned")
+
+    def release_when_done() -> None:
+        try:
+            probe()
+        finally:
+            _probes_in_flight.discard(name)
+
+    _probes_in_flight.add(name)
+    await asyncio.wait_for(
+        asyncio.to_thread(release_when_done), timeout=READINESS_TIMEOUT_SECONDS
+    )
+
+
+def _outbox_backlog() -> tuple[int, float]:
+    """Rows waiting, and how long the oldest has waited. Empty is zero for both."""
+    if session_factory is None:
+        return 0, 0.0
+    with session_factory() as session:
+        pending, oldest = session.execute(
+            select(func.count(OutboxRecord.id), func.min(OutboxRecord.created_at)).where(
+                OutboxRecord.processed_at.is_(None)
+            )
+        ).one()
+    if not pending or oldest is None:
+        return 0, 0.0
+    if oldest.tzinfo is None:
+        oldest = oldest.replace(tzinfo=UTC)
+    return pending, max(0.0, (datetime.now(UTC) - oldest).total_seconds())
+
+
+REGISTRY.register(OutboxCollector(_outbox_backlog))
+
+
+@app.get("/metrics")
+def metrics():
+    return Response(content=render(), media_type=CONTENT_TYPE_LATEST)
+
+
+class FollowRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
+notification_transport = ConsoleNotificationTransport()
+
+
+@app.post("/claims/{claim_id}/follow", status_code=202)
+def follow_claim(claim_id: str, body: FollowRequest):
+    """Ask to be told when this claim changes. No account, by design."""
+    if session_factory is None:
+        raise HTTPException(409, "Following a claim requires PERSISTENCE_MODE=postgres")
+    with session_factory.begin() as session:
+        claim = session.scalar(
+            select(ClaimRecord).where(ClaimRecord.external_id == claim_id)
+        )
+        if claim is None:
+            raise HTTPException(404, "Claim not found")
+        token = subscribe(session, email=body.email, claim_id=claim_id)
+
+    if token is not None:
+        # Nothing further is ever sent to an address that has not answered this, so the
+        # endpoint cannot be used to mail someone who did not ask.
+        notification_transport.send(
+            Message(
+                to=body.email.strip().lower(),
+                subject="Confirm that you want updates on this claim",
+                body=(
+                    f"Someone asked for updates when claim {claim_id} changes. If that "
+                    "was you, follow the link. If it was not, ignore this and nothing "
+                    "further will be sent."
+                ),
+                manage_url_path=f"/notifications/confirm?token={token}",
+            )
+        )
+    # One answer whether or not this address already follows the claim. Two would let a
+    # caller ask who is watching what.
+    return {"status": "check_your_email"}
+
+
+@app.post("/notifications/confirm")
+def confirm_following(token: str):
+    if session_factory is None:
+        raise HTTPException(409, "Notifications require PERSISTENCE_MODE=postgres")
+    with session_factory.begin() as session:
+        subscription = resolve_token(session, token)
+        if subscription is None:
+            raise HTTPException(404, "This link is not valid")
+        if subscription.confirmed_at is None:
+            subscription.confirmed_at = datetime.now(UTC)
+        subscription.unsubscribed_at = None
+        return {"status": "following", "claimId": subscription.claim_id}
+
+
+@app.post("/notifications/unsubscribe")
+def unsubscribe_from_claim(token: str):
+    """One click, no account, and honoured immediately."""
+    if session_factory is None:
+        raise HTTPException(409, "Notifications require PERSISTENCE_MODE=postgres")
+    with session_factory.begin() as session:
+        subscription = resolve_token(session, token)
+        if subscription is None:
+            raise HTTPException(404, "This link is not valid")
+        subscription.unsubscribed_at = datetime.now(UTC)
+        return {"status": "unsubscribed", "claimId": subscription.claim_id}
+
+
+def _csv_response(body: str, filename: str) -> Response:
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/export/programs/{program_id}/money-trail.csv")
+def export_money_trail(program_id: str):
+    """Public, like the money trail it serialises."""
+    if session_factory is None:
+        raise HTTPException(409, "Export requires PERSISTENCE_MODE=postgres")
+    with session_factory() as session:
+        body = money_trail_csv(session, program_id)
+    return _csv_response(body, f"{program_id}-money-trail.csv")
+
+
+@app.get("/export/programs/{program_id}/outcomes.csv")
+def export_outcomes(program_id: str):
+    if session_factory is None:
+        raise HTTPException(409, "Export requires PERSISTENCE_MODE=postgres")
+    with session_factory() as session:
+        body = outcomes_csv(session, program_id)
+    return _csv_response(body, f"{program_id}-outcomes.csv")
+
+
+@app.get("/export/claims/{claim_id}/provenance.csv")
+def export_provenance(claim_id: str):
+    if session_factory is None:
+        raise HTTPException(409, "Export requires PERSISTENCE_MODE=postgres")
+    with session_factory() as session:
+        if not claim_exists(session, claim_id):
+            raise HTTPException(404, "Claim not found")
+        body = provenance_csv(session, claim_id)
+    return _csv_response(body, f"{claim_id}-provenance.csv")
+
+
+@app.get("/export/claims/{claim_id}/evidence.csv")
+def export_evidence(claim_id: str, user: CurrentUser = None):
+    """Exactly the rows this reader could already open, one at a time.
+
+    Decided here against the session rather than inside the serialiser, so an export
+    cannot become the one route that answers what every other route refuses -- nor the one
+    that refuses what every other route permits. The per-row check is the same function
+    the evidence endpoint uses, so the two cannot drift apart.
+    """
+    if session_factory is None:
+        raise HTTPException(409, "Export requires PERSISTENCE_MODE=postgres")
+    with session_factory() as session:
+        if not claim_exists(session, claim_id):
+            raise HTTPException(404, "Claim not found")
+        body = evidence_csv(session, claim_id, readable=lambda item: _may_read(item, user))
+    return _csv_response(body, f"{claim_id}-evidence.csv")
+
+
+def _may_read(evidence_id: str, user: AuthenticatedUser | None) -> bool:
+    try:
+        _require_evidence_visibility(evidence_id, user)
+    except HTTPException:
+        return False
+    return True
+
+
+@app.get("/health/live")
+def health_live():
+    """Liveness: this process is serving. Deliberately touches nothing else.
+
+    The container HEALTHCHECK polls this. A dependency-aware probe there would let a
+    transient database or RPC fault mark the process for replacement, which fixes nothing
+    and loses whatever it was doing.
+    """
     return {"status": "ok", "mode": settings.demo_mode, "chainId": settings.chain_id}
+
+
+@app.get("/health", include_in_schema=False)
+def health_alias():
+    """Containers and scripts deployed before the split still poll this."""
+    return health_live()
+
+
+@app.get("/health/ready")
+async def health_ready(response: Response):
+    """Readiness: the dependencies this API cannot serve without are answering.
+
+    Async, and every probe is bounded: a health check that blocks is a health check that
+    becomes the outage it exists to report. At most one probe per component is ever
+    outstanding, so a dependency that stops answering costs one stranded thread rather
+    than one on every poll.
+    """
+    components: dict[str, Any] = {}
+    for name, probe in READINESS_PROBES.items():
+        try:
+            await _run_probe(name, probe)
+            components[name] = {"status": "ok"}
+        except Exception as exc:  # noqa: BLE001 -- a probe reports, it does not raise
+            # The class, never the text: an RPC or database URL may embed credentials.
+            components[name] = {"status": "unavailable", "error": exc.__class__.__name__}
+    ready = all(item["status"] == "ok" for item in components.values())
+    if not ready:
+        response.status_code = 503
+    return {"status": "ready" if ready else "unavailable", "components": components}
 
 
 @app.get("/programs")
@@ -1074,7 +1392,7 @@ def _registered_evidence_hash(record: EvidenceRecord) -> str:
 
 
 @app.post("/evidence/{evidence_id}/verify-integrity")
-def integrity(evidence_id: str, user: CurrentUser = None):
+def integrity(request: Request, evidence_id: str, user: CurrentUser = None):
     # Deliberately public: verifying that evidence still matches its published commitment
     # is the product's central claim, and a donor must be able to check it without an
     # account. Visibility is enforced instead -- non-public evidence requires a session.
@@ -1099,10 +1417,11 @@ def integrity(evidence_id: str, user: CurrentUser = None):
             registered_hash = _registered_evidence_hash(record)
             matched, current = verify_integrity(content, registered_hash)
             record.integrity_status = "MATCH" if matched else "MISMATCH"
+            integrity_checks.labels(result=record.integrity_status).inc()
             # The mismatch is detected on the evidence, but it is the claim that carries
             # the trust signal a donor reads. Restate it in the same transaction, or the
             # claim keeps its verified badge above a failing requirement list.
-            restate_claims_for(session, evidence_id)
+            restate_claims_for(session, evidence_id, request.state.correlation_id)
             return _integrity_response(
                 evidence_id,
                 registered_hash,
@@ -1135,13 +1454,14 @@ def integrity(evidence_id: str, user: CurrentUser = None):
 
 
 @app.post("/demo/evidence/{evidence_id}/tamper")
-def tamper(evidence_id: str, user: CurrentUser = None):
+def tamper(request: Request, evidence_id: str, user: CurrentUser = None):
     require_user(user, {Role.ADMIN})
     if settings.demo_mode == "sepolia":
         raise HTTPException(409, "Refusing to alter evidence in a public demo run")
     storage_uri = _evidence_storage_uri(evidence_id)
     evidence_storage.overwrite(storage_uri, TAMPERED_INVOICE_BYTES)
-    return integrity(evidence_id, user=user)
+    # The same correlation identifier covers the tamper and the check that detects it.
+    return integrity(request, evidence_id, user=user)
 
 
 def _evidence_storage_uri(evidence_id: str) -> str:

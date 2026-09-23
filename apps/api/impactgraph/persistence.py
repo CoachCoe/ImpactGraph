@@ -9,11 +9,13 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -38,6 +40,9 @@ class ProgramRecord(EntityMixin, Base):
     operator_org_ref: Mapped[str] = mapped_column(String(160), default="")
     region: Mapped[str] = mapped_column(String(240))
     status: Mapped[str] = mapped_column(String(40))
+    # How many distinct independent verifiers this program's claims require. One is what
+    # every program did implicitly before the column existed.
+    verification_threshold: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
 
 class DomainEntityRecord(EntityMixin, Base):
@@ -130,6 +135,18 @@ class OutboxRecord(EntityMixin, Base):
     correlation_id: Mapped[str] = mapped_column(String(80), index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The worker polls `processed_at IS NULL ORDER BY created_at` on every tick, and the
+    # metrics scrape asks the same question. Partial rather than a plain index on
+    # processed_at: only unsubmitted rows are ever looked for, so the index stays the size
+    # of the backlog rather than the size of everything the system has ever sent.
+    __table_args__ = (
+        Index(
+            "ix_outbox_pending",
+            "created_at",
+            postgresql_where=text("processed_at IS NULL"),
+            sqlite_where=text("processed_at IS NULL"),
+        ),
+    )
 
 
 class ProcessedChainEventRecord(EntityMixin, Base):
@@ -223,6 +240,50 @@ class WalletChallengeRecord(EntityMixin, Base):
     )
 
 
+class NotificationSubscriptionRecord(EntityMixin, Base):
+    """Someone who asked to be told when a claim stops being true.
+
+    Deliberately not a user. Following a claim must not require an account, so this holds
+    an email address and a token whose hash is all that is stored -- the same shape as a
+    session, for the same reason: the link in the message is the credential.
+    """
+
+    __tablename__ = "notification_subscriptions"
+    __table_args__ = (
+        UniqueConstraint("email", "claim_id", name="uq_subscription_email_claim"),
+    )
+    email: Mapped[str] = mapped_column(String(320), index=True)
+    claim_id: Mapped[str] = mapped_column(String(160), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # Nothing is sent to an address that has not answered the first message. Otherwise
+    # this endpoint is a way to mail anyone, repeatedly, from someone else's domain.
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    unsubscribed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class NotificationDeliveryRecord(EntityMixin, Base):
+    """What was sent, to whom, about which change.
+
+    Recorded because "we told you on this date" is the sort of assertion this system
+    makes about everything else, and because the uniqueness constraint is what stops a
+    retry sending the same news twice.
+    """
+
+    __tablename__ = "notification_deliveries"
+    __table_args__ = (
+        UniqueConstraint("subscription_id", "event_key", name="uq_delivery_once"),
+    )
+    subscription_id: Mapped[UUID] = mapped_column(
+        ForeignKey("notification_subscriptions.id"), index=True
+    )
+    event_key: Mapped[str] = mapped_column(String(200), index=True)
+    event_type: Mapped[str] = mapped_column(String(48))
+    claim_id: Mapped[str] = mapped_column(String(160), index=True)
+    transport: Mapped[str] = mapped_column(String(48))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(String(200))
+
+
 class MoneyMixin:
     """Integer minor units and an ISO currency. Never a float, never a single column."""
 
@@ -304,3 +365,11 @@ class OutcomeRecord(EntityMixin, Base):
     value: Mapped[int] = mapped_column(Integer)
     unit: Mapped[str] = mapped_column(String(80))
     region: Mapped[str] = mapped_column(String(240), default="")
+    # How the figure was arrived at, where it came from, and how sure anyone is. Without
+    # these an outcome is the one number on the page a reader simply has to believe, which
+    # is what the rest of this system exists to avoid.
+    method: Mapped[str] = mapped_column(String(400), default="")
+    source: Mapped[str] = mapped_column(String(240), default="")
+    # Percent, or NULL where the method does not produce one. Nought and unknown are
+    # different answers and a column that cannot hold the difference invents one.
+    confidence_percent: Mapped[int | None] = mapped_column(Integer, nullable=True)

@@ -20,6 +20,7 @@ from impactgraph.domain import Claim, ClaimStatus, Result
 from impactgraph.main import app, session_factory
 from impactgraph.persistence import ClaimRecord
 from impactgraph.verification import (
+    ConfirmedVerification,
     VerificationContext,
     VerificationPolicyService,
     claims_supported_by,
@@ -37,11 +38,12 @@ def context(**overrides) -> VerificationContext:
         "evidence_integrity": True,
         "reconciliation_passes": True,
         "operator_attestation_confirmed": True,
-        "verifier_attestation_confirmed": True,
-        "attestation_bundle_hash": "sha256:" + "a" * 64,
+        "verifications": (
+            ConfirmedVerification("org-impactverify", "sha256:" + "a" * 64),
+        ),
+        "required_verifications": 1,
         "current_bundle_hash": "sha256:" + "a" * 64,
         "operator_id": "org-global-water",
-        "verifier_id": "org-impactverify",
     }
     return VerificationContext(**{**base, **overrides})
 
@@ -72,7 +74,7 @@ def test_a_verified_claim_that_fails_a_requirement_is_challenged_not_verified():
 def test_re_evaluation_still_cannot_invent_a_verification():
     """The fix must not work in the other direction: a pending claim stays pending."""
     decision = VerificationPolicyService().evaluate(
-        claim(ClaimStatus.VERIFICATION_PENDING), context(verifier_attestation_confirmed=False)
+        claim(ClaimStatus.VERIFICATION_PENDING), context(verifications=())
     )
     assert decision.status == ClaimStatus.VERIFICATION_PENDING
 

@@ -40,7 +40,15 @@ export type Claim = {
   attestations: Attestation[];
 };
 
-export type ProvenanceNode = { id: string; type: string; title: string; detail: string };
+export type ProvenanceNode = {
+  id: string;
+  type: string;
+  title: string;
+  detail: string;
+  method?: string;
+  source?: string;
+  confidencePercent?: number | null;
+};
 export type ProvenanceEdge = {
   source: string;
   relationship: string;
@@ -127,4 +135,52 @@ export type FinancialSummary = {
     remaining: Money;
   }[];
   transactions: FinancialTransaction[];
+};
+
+export type AttributedClaim = { id: string; statement: string; status: string };
+export type AttributedOutcome = {
+  id: string;
+  metric: string;
+  value: number;
+  unit: string;
+  region: string;
+  claims: AttributedClaim[];
+};
+export type AttributedDelivery = {
+  id: string;
+  item: string;
+  quantity: number;
+  deliveredOn: string;
+  outcomes: AttributedOutcome[];
+};
+export type AttributedTransaction = {
+  id: string;
+  payee: string;
+  amount: Money;
+  occurredOn: string;
+  matchStatus: string;
+  deliveries: AttributedDelivery[];
+};
+export type AttributedAllocation = {
+  id: string;
+  purpose: string;
+  projectId: string;
+  amount: Money;
+  spent: Money;
+  unspent: Money;
+  overspent: Money;
+  transactions: AttributedTransaction[];
+};
+export type FundingAttribution = {
+  fundingId: string;
+  funder: string;
+  programId: string;
+  receivedOn: string;
+  received: Money;
+  committed: Money;
+  spent: Money;
+  uncommitted: Money;
+  overcommitted: Money;
+  allocations: AttributedAllocation[];
+  method: { basis: string; explanation: string };
 };

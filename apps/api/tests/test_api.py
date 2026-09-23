@@ -536,7 +536,12 @@ def test_provenance_is_scoped_to_its_claim_and_reports_real_integrity(sign_in):
     assert after["edges"] == baseline["edges"], "another claim's edges must not leak in"
     node_ids = {node["id"] for node in after["nodes"]}
     assert not node_ids & {"ev-unrelated", "funding-unrelated", "outcome-unrelated"}
-    assert client().get("/claims/claim-unrelated").json()["evidenceIds"] == ["ev-unrelated"]
+    # Its own evidence, not the showcase's. The identifier itself is redacted for anything
+    # that is not PUBLIC, and an id with no evidence record behind it fails closed.
+    unrelated = client().get("/claims/claim-unrelated").json()["evidenceIds"]
+    showcase = client().get(f"/claims/{CLAIM_ID}").json()["evidenceIds"]
+    assert len(unrelated) == 1
+    assert not set(unrelated) & set(showcase)
 
     # The seed no longer asserts a passed integrity check, so earn it: the graph must
     # report what the check actually found, before and after it has been run.

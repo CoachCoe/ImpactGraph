@@ -83,6 +83,18 @@ The mock extractor only recognises documents containing `INV-8291`; anything els
 rejected with a 422. Backend signing is restricted to the configured unlocked local Anvil
 sender; the application does not silently use this path for Sepolia.
 
+A program records how many distinct independent verifiers its claims require, defaulting
+to one, which is what every program did before the column existed. An attestation counts
+only when it is confirmed onchain, covers the current evidence bundle, and comes from an
+organisation that is neither the operator nor one already counted. An attestation against
+a superseded bundle is history rather than an objection: it is reported and not counted.
+
+`/financial/funding/{id}/attribution` follows one contribution forward to the claims it
+reached. Each allocation names the single funding record it draws on, so the trail is that
+funder's own rather than a share of a pool; where a funding record stands for many
+contributors they cannot be separated, and the page says so. Money that was never
+committed or never spent is reported beside what was deployed.
+
 The donor dashboard, Claim Inspector and Evidence Inspector read the API. The claim page
 renders the policy requirements, the explainable score and the bundle hash the backend
 computed, and shows VERIFIED once the backend gets there. The evidence page runs the
@@ -236,6 +248,30 @@ The seeded statement deliberately contains a payment with no invoice and one tha
 contradicts the invoice it cites, so `UNMATCHED` and `CONFLICT` are states the demo can
 actually reach. `/financial` shows the whole trail without an account.
 
+## Operating it
+
+Application and uvicorn records render as one JSON stream, and a correlation identifier
+follows a unit of work from the request that started it to the outbox worker that finishes
+it. `/health/live` is dependency-free and is what the container probes; `/health/ready`
+checks PostgreSQL, the RPC and the evidence store, answers 503 with a per-component
+verdict, and is what the compose dependency gates and the smoke tests use.
+
+`/metrics` exposes the API's counters, and the worker runs its own exporter on port 9100
+because it is a separate process. The two numbers worth watching are the outbox depth and
+the age of its oldest unsubmitted row: a stalled outbox is the one failure this system
+would otherwise hide, since every read model keeps answering exactly as before.
+
+```bash
+make worker                     # drains the chain outbox
+cd apps/api && .venv/bin/python -m impactgraph.cli notifications
+```
+
+Anyone can follow a claim with an email address and no account. Nothing is sent until that
+address confirms, and when a claim's status changes -- verified, challenged, rejected --
+the people following it are told. Delivery is recorded and deduplicated. The transport is
+a console implementation: the pipeline is real, the last hop prints instead of sending,
+and it says so rather than pretending.
+
 ## Tests
 
 ```bash
@@ -290,7 +326,6 @@ What is not:
   claim API serves it exactly as it would a real one. It satisfies the
   `OPERATOR_ATTESTATION` requirement without any chain activity. Only the *verifier*
   attestation path is real end to end.
-- **No observability.** `structlog` is a declared dependency with no call sites.
 - **Sepolia only, and unaudited.** The registry is deployed to Sepolia and the golden
   path has completed there; see [docs/sepolia-deployment.md](docs/sepolia-deployment.md).
   Nothing here has been audited and none of it belongs on mainnet.
@@ -304,7 +339,9 @@ What is not:
 - **CI coverage is narrower than the trust boundary.** CI runs Foundry, backend unit/API,
   frontend unit/type, and production build gates, but not PostgreSQL migrations, Anvil-backed
   integration, or Playwright. Run `make test-local-e2e` and `make test-browser-e2e` locally
-  before changing anything on the chain path.
+  before changing anything on the chain path. Receipt observation is the exception: the
+  check that an event came from the configured registry, and not from any contract that
+  emits the same signature, is covered against stub RPC objects and needs no chain.
 
 ## Contributing
 

@@ -1,3 +1,6 @@
+import io
+import json
+import logging
 from uuid import UUID
 
 import pytest
@@ -6,6 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from impactgraph.blockchain import MockBlockchainService
 from impactgraph.domain import Role
+from impactgraph.observability import configure_logging
 from impactgraph.persistence import (
     AuditLogRecord,
     Base,
@@ -205,3 +209,47 @@ def test_the_worker_also_refuses_an_event_it_cannot_bind_to_a_program():
         operation = db.get(BlockchainOperationRecord, UUID(operation_id))
         assert operation is not None and operation.status == "FAILED"
         assert "no program to bind" in (operation.error or "")
+
+
+def test_onchain_mismatch_is_logged_with_the_persisted_status():
+    """The receipt confirms, but it commits bytes nobody reviewed.
+
+    `confirm_operation` returns CONFIRMED for a receipt carrying the expected event; only
+    the onchain comparison inside the transaction lowers it. This path used to return
+    before reaching the log, so the one observation an operator most needs to see -- the
+    registry committing something other than what was reviewed -- produced no line at
+    all, and the line it would have produced carried the pre-comparison status.
+    """
+    db_factory = factory()
+    pending_registration(db_factory)
+    worker = BlockchainOutboxWorker(
+        session_factory=db_factory,
+        blockchain=WrongCommitmentBlockchain(),
+        confirmations_required=1,
+    )
+
+    root = logging.getLogger()
+    previous = root.handlers[:]
+    buffer = io.StringIO()
+    configure_logging(stream=buffer)
+    try:
+        result = worker.run_once()
+    finally:
+        root.handlers = previous
+
+    assert result.confirmed == 0
+    assert result.failed == 1
+    with db_factory() as db:
+        evidence = db.scalar(
+            select(EvidenceRecord).where(EvidenceRecord.external_id == "ev-worker")
+        )
+        assert evidence is not None
+        assert evidence.blockchain_status == "FAILED"
+
+    observed = [
+        json.loads(line)
+        for line in buffer.getvalue().strip().splitlines()
+        if '"chain.operation_observed"' in line
+    ]
+    assert observed, "the observation should be logged even when it fails the onchain check"
+    assert observed[-1]["status"] == "FAILED"

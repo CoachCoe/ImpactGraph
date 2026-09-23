@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+from prometheus_client import start_http_server
 from sqlalchemy import select
 from web3 import Web3
 
@@ -28,6 +29,9 @@ from .demo import INVOICE_BYTES, store
 from .domain import BlockchainStatus
 from .evidence import FileEvidenceStorage
 from .hashing import claim_hash, hash_fields, sha256_bytes
+from .metrics import REGISTRY
+from .notifications import ConsoleNotificationTransport, NotificationDispatcher
+from .observability import configure_logging, logger
 from .persistence import (
     BlockchainOperationRecord,
     EvidenceRecord,
@@ -43,6 +47,8 @@ from .read_model import (
     seed_read_model,
 )
 from .worker import BlockchainOutboxWorker
+
+log = logger("impactgraph.worker")
 
 
 def seed() -> None:
@@ -517,6 +523,7 @@ def bootstrap_chain() -> None:
 
 
 def worker_once() -> None:
+    configure_logging()
     settings = Settings.from_env()
     if not settings.registry_address:
         raise RuntimeError("IMPACT_REGISTRY_ADDRESS is required for the EVM worker")
@@ -546,9 +553,24 @@ def worker_loop(interval_seconds: float) -> None:
     durable path: a deployment needs a process that keeps draining it after a restart or a
     failed submission.
     """
+    configure_logging()
     settings = Settings.from_env()
     if not settings.registry_address:
         raise RuntimeError("IMPACT_REGISTRY_ADDRESS is required for the EVM worker")
+    # Its own server on its own port: the worker is a separate process, so counters it
+    # increments are invisible to the API's /metrics and Prometheus scrapes the two
+    # independently. Telemetry must never stop the thing it observes, so a port already
+    # in use costs the exporter and not the outbox.
+    try:
+        start_http_server(settings.worker_metrics_port, registry=REGISTRY)
+        log.info("worker.metrics_listening", port=settings.worker_metrics_port)
+    except OSError as exc:
+        log.error(
+            "worker.metrics_unavailable",
+            port=settings.worker_metrics_port,
+            error_type=exc.__class__.__name__,
+        )
+
     worker = BlockchainOutboxWorker(
         session_factory=create_session_factory(settings.database_url),
         blockchain=EvmBlockchainService.from_foundry_artifact(
@@ -559,23 +581,44 @@ def worker_loop(interval_seconds: float) -> None:
         ),
         confirmations_required=settings.confirmations_required,
     )
-    print(f"outbox worker started (interval {interval_seconds}s)", flush=True)
+    log.info("worker.started", interval_seconds=interval_seconds)
     while True:
         try:
             result = worker.run_once()
             if result.submitted or result.confirmed or result.failed:
-                print(
-                    json.dumps(
-                        {
-                            "submitted": result.submitted,
-                            "confirmed": result.confirmed,
-                            "failed": result.failed,
-                        }
-                    ),
-                    flush=True,
+                log.info(
+                    "worker.batch",
+                    submitted=result.submitted,
+                    confirmed=result.confirmed,
+                    failed=result.failed,
                 )
         except Exception as exc:  # noqa: BLE001 -- a worker must outlive a transient RPC fault
-            print(json.dumps({"error": str(exc)}), flush=True)
+            # The class, never the text: a web3 fault can carry the RPC URL, and that URL
+            # may embed credentials.
+            log.error("worker.batch_failed", error_type=exc.__class__.__name__)
+        time.sleep(interval_seconds)
+
+
+def notification_loop(interval_seconds: float) -> None:
+    """Drain notification intent from the outbox.
+
+    Separate from the chain worker: the two claim different topics from the same table,
+    and a slow or failing transport must not hold up a registration.
+    """
+    configure_logging()
+    settings = Settings.from_env()
+    dispatcher = NotificationDispatcher(
+        session_factory=create_session_factory(settings.database_url),
+        transport=ConsoleNotificationTransport(),
+    )
+    log.info("notifications.started", interval_seconds=interval_seconds)
+    while True:
+        try:
+            sent = dispatcher.run_once()
+            if sent:
+                log.info("notifications.batch", sent=sent)
+        except Exception as exc:  # noqa: BLE001 -- a sender must outlive a transient fault
+            log.error("notifications.batch_failed", error_type=exc.__class__.__name__)
         time.sleep(interval_seconds)
 
 
@@ -605,6 +648,8 @@ def main() -> None:
     sub.add_parser("worker-once")
     loop = sub.add_parser("worker")
     loop.add_argument("--interval", type=float, default=2.0)
+    notify = sub.add_parser("notifications")
+    notify.add_argument("--interval", type=float, default=5.0)
     deploy = sub.add_parser("deploy-registry")
     deploy.add_argument("--expect-address", default=None)
     sub.add_parser("bootstrap-chain")
@@ -624,6 +669,8 @@ def main() -> None:
         worker_once()
     elif args.command == "worker":
         worker_loop(args.interval)
+    elif args.command == "notifications":
+        notification_loop(args.interval)
     elif args.command == "deploy-registry":
         deploy_registry(args.expect_address)
     elif args.command == "bootstrap-chain":
