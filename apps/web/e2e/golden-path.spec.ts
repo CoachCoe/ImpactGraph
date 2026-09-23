@@ -20,6 +20,25 @@ async function signIn(page: Page, email: string): Promise<void> {
   await expect(page).not.toHaveURL(/\/login/, { timeout: 15_000 });
 }
 
+/**
+ * Reach a header destination the way a reader at this viewport has to.
+ *
+ * Above 800px the bar is on the page; below it the same links sit behind a button.
+ * One helper covers both so the journeys read the same in either project, and so the
+ * mobile path is exercised rather than stepped around.
+ */
+async function navigateByHeader(page: Page, name: RegExp): Promise<void> {
+  const menu = page.getByRole("button", { name: "Menu" });
+  if (await menu.isVisible()) {
+    await menu.click();
+    await expect(menu).toHaveAttribute("aria-expanded", "true");
+  }
+  await page
+    .getByRole("navigation", { name: "Primary navigation" })
+    .getByRole("link", { name })
+    .click();
+}
+
 async function expectNoHorizontalScroll(page: Page): Promise<void> {
   const fits = await page
     .locator("body")
@@ -31,15 +50,10 @@ test("a donor can follow the money to what it reached, without an account", asyn
   page,
 }) => {
   await page.goto("/");
-  // Not the header navigation: it is hidden below 800px with nothing in its place, so a
-  // donor on a phone reaches the money trail through the page itself. See issue #22.
   await expect(page.getByText(/Recorded funding/i).first()).toBeVisible();
   await expectNoHorizontalScroll(page);
 
-  await page
-    .getByRole("link", { name: /See where the money went/i })
-    .first()
-    .click();
+  await navigateByHeader(page, /^Money trail$/);
   await expect(page).toHaveURL(/\/financial/);
 
   await page.getByRole("link", { name: /Jane Smith/ }).first().click();
@@ -91,5 +105,59 @@ test("operator evidence reaches confirmed state through the durable worker", asy
   await expect(page.getByText("Evidence registration confirmed")).toBeVisible({
     timeout: 60_000,
   });
+  await expectNoHorizontalScroll(page);
+});
+
+test("every header destination is reachable at this viewport", async ({ page }) => {
+  // The regression this guards: below 800px the navigation was hidden and nothing
+  // replaced it, so /about -- the page explaining how any of this can be checked --
+  // could not be reached on a phone at all. Issue #22.
+  await page.goto("/");
+
+  await navigateByHeader(page, /^How it works$/);
+  await expect(page).toHaveURL(/\/about/);
+  await expect(page.getByRole("heading", { name: /Prove it/i })).toBeVisible();
+  await expectNoHorizontalScroll(page);
+
+  await navigateByHeader(page, /^Money trail$/);
+  await expect(page).toHaveURL(/\/financial/);
+
+  await navigateByHeader(page, /^Donor$/);
+  await expect(page).toHaveURL(/\/$|\/\?/);
+});
+
+test("the menu button announces its state, and Escape closes it", async ({ page }) => {
+  await page.goto("/");
+  const menu = page.getByRole("button", { name: "Menu" });
+  test.skip(!(await menu.isVisible()), "the bar is on the page at this viewport");
+
+  await expect(menu).toHaveAttribute("aria-expanded", "false");
+  const links = page.getByRole("navigation", { name: "Primary navigation" });
+  await expect(links).toBeHidden();
+
+  await menu.click();
+  await expect(menu).toHaveAttribute("aria-expanded", "true");
+  await expect(links).toBeVisible();
+  await expect(links.getByRole("link", { name: /^How it works$/ })).toBeVisible();
+  await expectNoHorizontalScroll(page);
+
+  await page.keyboard.press("Escape");
+  await expect(menu).toHaveAttribute("aria-expanded", "false");
+  await expect(links).toBeHidden();
+  // Escape that leaves focus nowhere strands a keyboard reader mid-page.
+  await expect(menu).toBeFocused();
+});
+
+test("an operator can move between their screens on a phone", async ({ page }) => {
+  // The journey most likely to happen on a phone, and the one the hidden navigation
+  // broke hardest: an operator in the field had no way off whichever page they landed on.
+  await signIn(page, OPERATOR);
+  await page.goto("/");
+
+  await navigateByHeader(page, /^Operator$/);
+  await expect(page).toHaveURL(/\/operator/);
+
+  await navigateByHeader(page, /^Money trail$/);
+  await expect(page).toHaveURL(/\/financial/);
   await expectNoHorizontalScroll(page);
 });
