@@ -1576,10 +1576,11 @@ class SettlementService:
                 "claimsRestated": [],
             }
 
+        # The settlement is what frees the allocation: `spent_against` excludes REVERSED,
+        # so the budget recovers. match_status is the reconciliation verdict and is set
+        # for the reader, not for the sum.
         transaction.settlement = "REVERSED"
         transaction.reversed_at = datetime.now(UTC)
-        # The money is not spent any more, so it stops counting against the allocation --
-        # otherwise a reversal permanently consumes budget that was never spent.
         transaction.match_status = "UNMATCHED"
         session.flush()
 

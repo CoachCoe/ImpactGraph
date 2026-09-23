@@ -175,9 +175,16 @@ class FinancialLedger:
 
     @staticmethod
     def spent_against(session: Session, allocation_ref: str, currency: str) -> Money:
+        """What this allocation has actually paid out.
+
+        Reversed money is not spent. Counting it would leave a budget permanently
+        consumed by a payment the bank took back, and the operator with no way to use it
+        short of raising the allocation to cover money that never left.
+        """
         rows = session.scalars(
             select(FinancialTransactionRecord).where(
-                FinancialTransactionRecord.allocation_ref == allocation_ref
+                FinancialTransactionRecord.allocation_ref == allocation_ref,
+                FinancialTransactionRecord.settlement != "REVERSED",
             )
         )
         total = Money.zero(currency)

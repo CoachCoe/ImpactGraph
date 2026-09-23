@@ -72,3 +72,76 @@ def test_the_score_is_reported_so_a_person_can_decide():
 @pytest.mark.parametrize("memo", ["8291", "ref:8291", "INV 8291 part payment"])
 def test_the_common_real_world_shapes_are_recognised(memo: str):
     assert match_memo(memo, "INV-8291").confidence >= MEMO_MATCH_THRESHOLD
+
+
+def test_a_guessed_match_cannot_carry_a_claim_to_verified():
+    """The score existed so a weak match would not be treated as a fact, and it was then
+    routed into the one set verification policy accepts -- so a claim could verify on four
+    digits appearing somewhere in a memo, with nobody ever seeing it."""
+    from impactgraph.domain import ReconciliationStatus
+    from impactgraph.verification import VerificationContext
+
+    service = ReconciliationService()
+    guessed = service.reconcile_invoice(
+        {
+            "invoiceNumber": "INV-8291",
+            "vendor": "Aqua Systems Ltd.",
+            "amountMinor": 420000,
+            "currency": "USD",
+            "equipment": "AquaPure X200",
+            "quantity": 2,
+        },
+        {
+            "id": "ftx-9182",
+            "payee": "Aqua Systems Ltd.",
+            "amountMinor": 420000,
+            "currency": "USD",
+            "memo": "CARD PAYMENT TO AQUA SYSTEM 8291",
+        },
+        {
+            "id": "delivery-1",
+            "financialTransactionId": "ftx-9182",
+            "item": "AquaPure X200",
+            "quantity": 2,
+            "projectId": "project-water-12",
+        },
+        completion_report_present=True,
+        photos_have_gps=[True],
+    )
+    assert guessed["status"] == ReconciliationStatus.NEEDS_CONFIRMATION
+    # And that status is not one the policy treats as a passing reconciliation.
+    assert ReconciliationStatus.NEEDS_CONFIRMATION not in {"MATCHED", "PARTIAL_MATCH"}
+    assert "VerificationContext" in str(VerificationContext)
+
+
+def test_an_exact_reference_still_reconciles_without_anybody_confirming_it():
+    """The point is to stop a guess counting, not to make every payment need a person."""
+    from impactgraph.domain import ReconciliationStatus
+
+    exact = ReconciliationService().reconcile_invoice(
+        {
+            "invoiceNumber": "INV-8291",
+            "vendor": "Aqua Systems Ltd.",
+            "amountMinor": 420000,
+            "currency": "USD",
+            "equipment": "AquaPure X200",
+            "quantity": 2,
+        },
+        {
+            "id": "ftx-9182",
+            "payee": "Aqua Systems Ltd.",
+            "amountMinor": 420000,
+            "currency": "USD",
+            "memo": "Payment for INV-8291",
+        },
+        {
+            "id": "delivery-1",
+            "financialTransactionId": "ftx-9182",
+            "item": "AquaPure X200",
+            "quantity": 2,
+            "projectId": "project-water-12",
+        },
+        completion_report_present=True,
+        photos_have_gps=[True],
+    )
+    assert exact["status"] == ReconciliationStatus.MATCHED

@@ -70,6 +70,10 @@ class Result(StrEnum):
 class ReconciliationStatus(StrEnum):
     MATCHED = "MATCHED"
     PARTIAL_MATCH = "PARTIAL_MATCH"
+    #: Matched to a payment by resemblance rather than by the reference itself. A person
+    #: has to confirm it before anything rests on it: verification policy does not accept
+    #: this, which is the whole difference between it and PARTIAL_MATCH.
+    NEEDS_CONFIRMATION = "NEEDS_CONFIRMATION"
     UNMATCHED = "UNMATCHED"
     CONFLICT = "CONFLICT"
 

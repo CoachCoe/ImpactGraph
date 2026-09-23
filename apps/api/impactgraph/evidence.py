@@ -308,11 +308,22 @@ class ReconciliationService:
             )
         failures = sum(item["result"] == Result.FAIL for item in checks)
         warnings = sum(item["result"] == Result.WARNING for item in checks)
-        status = (
-            ReconciliationStatus.CONFLICT
-            if failures
-            else (ReconciliationStatus.PARTIAL_MATCH if warnings else ReconciliationStatus.MATCHED)
+        # A payment matched by resemblance is not a matched payment. It was routed into
+        # PARTIAL_MATCH, which verification policy accepts, so a claim could verify on
+        # four digits appearing somewhere in a memo with nobody ever seeing it. The score
+        # existed precisely so that would not happen.
+        guessed = any(
+            item["check"] == "TRANSACTION_REFERENCE" and item["result"] == Result.WARNING
+            for item in checks
         )
+        if failures:
+            status = ReconciliationStatus.CONFLICT
+        elif guessed:
+            status = ReconciliationStatus.NEEDS_CONFIRMATION
+        elif warnings:
+            status = ReconciliationStatus.PARTIAL_MATCH
+        else:
+            status = ReconciliationStatus.MATCHED
         return {
             "status": status,
             "checks": checks,

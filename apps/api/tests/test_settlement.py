@@ -58,19 +58,40 @@ def test_a_reversed_payment_re_evaluates_what_rested_on_it(operator):
         assert transaction.reversed_at is not None
 
 
-def test_a_reversal_stops_the_money_counting_against_its_allocation(operator):
-    """Otherwise a payment that was taken back permanently consumes budget nobody spent."""
+def test_a_reversal_gives_the_budget_back(operator):
+    """Otherwise a payment the bank took back permanently consumes an allocation, and the
+    operator can only use it by raising the ceiling to cover money that never left.
+
+    The earlier version of this asserted match_status, which is the reconciliation verdict
+    and is not what the sum reads -- it tested the field that had been written rather than
+    the behaviour that was claimed.
+    """
+    from impactgraph.financial import FinancialLedger
+    from impactgraph.persistence import AllocationRecord
+
+    assert session_factory is not None
+    with session_factory() as session:
+        allocation = session.scalar(
+            select(AllocationRecord).where(AllocationRecord.project_ref == "project-water-12")
+        )
+        before = FinancialLedger.remaining(session, allocation)
+
     operator.post(
         f"/financial/transactions/{TRANSACTION}/reversal", json={"reason": "Returned."}
     )
-    assert session_factory is not None
+
     with session_factory() as session:
+        allocation = session.scalar(
+            select(AllocationRecord).where(AllocationRecord.project_ref == "project-water-12")
+        )
+        after = FinancialLedger.remaining(session, allocation)
         transaction = session.scalar(
             select(FinancialTransactionRecord).where(
                 FinancialTransactionRecord.external_id == TRANSACTION
             )
         )
-        assert transaction.match_status == "UNMATCHED"
+    assert after.amount_minor > before.amount_minor, "the reversed money is still spent"
+    assert after.amount_minor - before.amount_minor == transaction.amount_minor
 
 
 def test_reversing_twice_is_not_an_error_and_does_not_restate_again(operator):
