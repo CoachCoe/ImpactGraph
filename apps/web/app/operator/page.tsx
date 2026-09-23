@@ -6,7 +6,10 @@ import { Status } from "@/components/Status";
 import { api } from "@/lib/api";
 
 type WorkflowState = "idle" | "uploading" | "analyzing" | "review" | "registering" | "submitted" | "confirmed" | "failed";
-type Extraction = { invoiceNumber: string; vendor: string; amountMinor: number; currency: string; date: string; equipment: string; quantity: number; projectReference: string; confidence: number };
+// documentType is required by the review endpoint, and is passed straight back from
+// the analysis response. Omitting it here made a hand-built extraction typecheck and
+// then fail validation at the only point it is ever sent.
+type Extraction = { documentType: string; invoiceNumber: string; vendor: string; amountMinor: number; currency: string; date: string; equipment: string; quantity: number; projectReference: string; confidence: number };
 type Finding = { result: "PASS" | "WARNING" | "FAIL"; message: string };
 type EvidenceResponse = { id: string; workflowStatus: string; contentHash: string; extraction?: Extraction; reconciliation?: { status: string; checks: Finding[] } };
 type RegistrationResponse = { operationId: string; status?: string; transactionHash?: string };

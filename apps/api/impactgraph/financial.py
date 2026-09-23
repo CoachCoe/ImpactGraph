@@ -94,10 +94,6 @@ class MockFinancialDataProvider:
         ]
 
 
-class AllocationExceeded(Exception):
-    """Reported spend would exceed what was allocated."""
-
-
 @dataclass(frozen=True)
 class ImportResult:
     imported: list[str]
@@ -297,16 +293,6 @@ def transaction_response(row: FinancialTransactionRecord) -> dict[str, Any]:
         "matchStatus": row.match_status,
     }
 
-
-def delivery_response(row: DeliveryRecord) -> dict[str, Any]:
-    return {
-        "id": row.external_id,
-        "projectId": row.project_ref,
-        "financialTransactionId": row.financial_transaction_ref,
-        "item": row.item,
-        "quantity": row.quantity,
-        "deliveredOn": row.delivered_on,
-    }
 
 
 class EvidenceReconciliationService:

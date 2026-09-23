@@ -121,3 +121,71 @@ programs would need a recorded conversion rate, which `Money` deliberately refus
 invent.
 
 Date: 2026-09-18
+
+## ADR-008 — Liveness and readiness answer different questions
+
+Decision: `/health/live` touches nothing and is what the container image probes.
+`/health/ready` probes PostgreSQL, the RPC and the evidence store, and is what the compose
+dependency gates, the smoke tests and any load balancer use.
+
+Why: a dependency-aware probe on the container healthcheck lets a transient database or
+RPC fault mark a working process for replacement, which fixes nothing and loses whatever
+it was doing. A dependency-free probe on the compose gates lets the worker and the web
+application start against an API that cannot reach its database.
+
+Consequence that is easy to miss: five `depends_on: service_healthy` gates consume the
+image healthcheck. Moving that to liveness without overriding the api service's healthcheck
+in both compose files silently downgrades them from "can serve" to "process booted".
+
+Alternatives considered: one endpoint for both, rejected because the two consumers want
+opposite answers; and no probes at all, which is where this started.
+
+Tradeoff: two endpoints and a compose override to keep in step with the image.
+
+Date: 2026-09-22
+
+## ADR-009 — One outbox, claimed by topic
+
+Decision: chain intent and notification intent share `outbox`, and each worker selects
+only the topics it can send.
+
+Why: intent has to be written in the transaction that decided the thing, or a rollback
+leaves a message about something that did not happen. That pattern already existed for the
+chain, and a second table would have duplicated the durability, the locking and the
+retry semantics to no benefit.
+
+The failure this prevents: the chain worker originally claimed every unprocessed row
+regardless of topic, treated an unknown one as a failed evidence registration, and looked
+up an entity that does not exist. Any non-chain topic in that table would have been eaten
+and marked failed.
+
+Alternatives considered: a table per sender, rejected as duplicated machinery; and sending
+inline at the point of decision, rejected because it cannot be rolled back.
+
+Tradeoff: every future sender must scope its claim query, and the partial index on
+unprocessed rows is shared by all of them.
+
+Date: 2026-09-22
+
+## ADR-010 — How many verifiers a claim needs is policy, not contract
+
+Decision: `ImpactRegistry` records attestations and says nothing about how many are
+enough. The N-of-M threshold lives on the program row and is evaluated off-chain by
+`VerificationPolicyService`, which is versioned.
+
+Why: ADR-001 chose a non-upgradeable registry. Encoding a threshold there would make every
+change to what verification requires a contract migration, and the rule is exactly the sort
+of thing that will change as the product learns. The chain's job is to make the
+attestations undeniable; deciding what a set of them means is the application's.
+
+Consequence: two requirements that were independent are now nested. Since only attestations
+covering the current bundle are counted, every way of failing `BUNDLE_CURRENT` also starves
+`INDEPENDENT_VERIFICATION`.
+
+Alternatives considered: threshold enforcement in `createAttestation`, rejected as above;
+and per-claim rather than per-program thresholds, deferred until something asks for it.
+
+Tradeoff: a reader must trust the application for the count, having trusted the chain for
+the signatures. The trust model already says which is which.
+
+Date: 2026-09-22

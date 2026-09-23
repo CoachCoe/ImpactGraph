@@ -80,19 +80,6 @@ class Visibility(StrEnum):
     INTERNAL = "INTERNAL"
 
 
-class Relationship(StrEnum):
-    FUNDS = "FUNDS"
-    ALLOCATES_TO = "ALLOCATES_TO"
-    PAYS = "PAYS"
-    SUPPORTS = "SUPPORTS"
-    EVIDENCES = "EVIDENCES"
-    DELIVERS = "DELIVERS"
-    ATTESTS = "ATTESTS"
-    VERIFIES = "VERIFIES"
-    PRODUCES = "PRODUCES"
-    SUPERSEDES = "SUPERSEDES"
-
-
 @dataclass(frozen=True)
 class Money:
     """An amount of money.
