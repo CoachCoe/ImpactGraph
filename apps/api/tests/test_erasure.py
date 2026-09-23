@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 
 import pytest
+from cryptography.exceptions import InvalidTag
 
 from impactgraph.evidence import EvidenceUnrecoverable, FileEvidenceStorage
 from impactgraph.hashing import sha256_bytes
@@ -421,7 +422,7 @@ def test_rotating_the_key_keeps_the_document_readable(tmp_path):
     rotated = FileEvidenceStorage(tmp_path / "objects", new_key)
     assert rotated.retrieve(uri) == DOCUMENT
     # And the old key no longer opens it, which is the point of rotating.
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidTag):
         FileEvidenceStorage(tmp_path / "objects", old_key).retrieve(uri)
 
 

@@ -10,6 +10,7 @@ import os
 from datetime import UTC, datetime
 
 import pytest
+from cryptography.exceptions import InvalidTag
 from sqlalchemy import select
 
 from impactgraph.credentials import (
@@ -55,7 +56,7 @@ def test_a_sealed_token_cannot_be_moved_to_another_organisation():
     one connection would answer for somebody else's."""
     sealed = seal(KEY, TOKEN, associated="org-global-water:truelayer")
     assert unseal(KEY, sealed, associated="org-global-water:truelayer") == TOKEN
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidTag):
         unseal(KEY, sealed, associated="org-other-water:truelayer")
 
 
@@ -125,7 +126,7 @@ def test_a_rotated_key_cannot_read_what_the_old_one_sealed(session):
     with session.begin():
         store(session, key=KEY, organization_ref="org-a", provider="truelayer",
               refresh_token=TOKEN, scopes="accounts", expires_at=None)
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidTag):
         refresh_token_for(
             session, key=os.urandom(32), organization_ref="org-a", provider="truelayer"
         )
@@ -157,5 +158,5 @@ def test_rotation_re_seals_a_credential_under_the_new_key(session):
     assert refresh_token_for(
         session, key=new_key, organization_ref="org-a", provider="truelayer"
     ) == TOKEN
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidTag):
         refresh_token_for(session, key=KEY, organization_ref="org-a", provider="truelayer")
