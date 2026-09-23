@@ -253,13 +253,7 @@ class ReconciliationService:
                 "Currency matches",
                 "Currency conflicts",
             ),
-            self._check(
-                "TRANSACTION_REFERENCE",
-                bool(financial_transaction.get("memo"))
-                and str(extraction.get("invoiceNumber", "")) in str(financial_transaction["memo"]),
-                f"Payment {financial_transaction['id']} references this document",
-                f"Payment {financial_transaction['id']} does not reference this document",
-            ),
+            self._memo_check(extraction, financial_transaction),
         ]
 
         if delivery is None:
@@ -327,6 +321,51 @@ class ReconciliationService:
             # recovered by reading prose is not a link -- and a reversal has to find every
             # piece of evidence resting on the payment that did not happen.
             "transactionRef": financial_transaction["id"],
+        }
+
+    @staticmethod
+    def _memo_check(
+        extraction: dict[str, Any], financial_transaction: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Whether the payment names this document, and how sure that is.
+
+        A substring test was the whole of this, which finds nothing on a real bank memo:
+        they arrive truncated and stripped of punctuation, so "INV-8291" turns up as
+        "8291" inside something like "CARD PAYMENT TO AQUA SYSTEM 8291".
+
+        A weak resemblance is a WARNING rather than a PASS. Reconciliation is what makes a
+        CONFLICT verdict meaningful, so a match nobody checked is worse here than no match
+        at all -- the score is reported and an operator decides, the same answer extraction
+        reached for the same reason.
+        """
+        from .financial import MEMO_MATCH_THRESHOLD, match_memo
+
+        payment = financial_transaction["id"]
+        match = match_memo(
+            str(financial_transaction.get("memo") or ""),
+            str(extraction.get("invoiceNumber") or ""),
+        )
+        if match.confidence >= 1.0:
+            return {
+                "check": "TRANSACTION_REFERENCE",
+                "result": Result.PASS,
+                "message": f"Payment {payment} references this document",
+            }
+        if match.confidence >= MEMO_MATCH_THRESHOLD:
+            return {
+                "check": "TRANSACTION_REFERENCE",
+                "result": Result.WARNING,
+                "message": (
+                    f"Payment {payment} probably references this document: {match.reason}. "
+                    "Confirm it before relying on the match."
+                ),
+                "confidence": match.confidence,
+            }
+        return {
+            "check": "TRANSACTION_REFERENCE",
+            "result": Result.FAIL,
+            "message": f"Payment {payment} does not reference this document",
+            "confidence": match.confidence,
         }
 
     @staticmethod
