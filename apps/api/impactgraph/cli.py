@@ -52,6 +52,7 @@ from .read_model import (
     seed_read_model,
 )
 from .retention import RetentionResult, RetentionWorker
+from .risk import scan as scan_for_risk
 from .worker import BlockchainOutboxWorker
 
 log = logger("impactgraph.worker")
@@ -749,6 +750,23 @@ def financial_sync_loop(interval_seconds: float) -> None:
         time.sleep(interval_seconds)
 
 
+def risk_scan(organization_ref: str) -> int:
+    """Look for duplicates and concentrations across one organisation's records.
+
+    Out of band and without the ceiling the HTTP route applies: near-duplicate image
+    comparison grows faster than the portfolio does, and a large tenant's scan is
+    something to schedule rather than something to wait for in a browser.
+    """
+    configure_logging()
+    settings = Settings.from_env()
+    factory = create_session_factory(settings.database_url)
+    with factory.begin() as session:
+        posted = scan_for_risk(session, organization_ref)
+        count = len(posted)
+    log.info("risk.scan", organization=organization_ref, findings=count)
+    return count
+
+
 def notification_loop(interval_seconds: float) -> None:
     """Drain notification intent from the outbox.
 
@@ -814,6 +832,8 @@ def main() -> None:
     deploy.add_argument("--expect-address", default=None)
     sub.add_parser("bootstrap-chain")
     sub.add_parser("chain-args")
+    risk = sub.add_parser("risk-scan")
+    risk.add_argument("--organization", required=True)
     record = sub.add_parser("record-evidence-registration")
     record.add_argument("--transaction-hash", required=True)
     run = sub.add_parser("new-demo-run")
@@ -845,6 +865,8 @@ def main() -> None:
         bootstrap_chain()
     elif args.command == "chain-args":
         chain_args()
+    elif args.command == "risk-scan":
+        risk_scan(args.organization)
     elif args.command == "record-evidence-registration":
         record_evidence_registration(args.transaction_hash)
     elif args.command == "new-demo-run":

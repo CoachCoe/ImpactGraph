@@ -7,7 +7,7 @@ author of an accusation rather than the thing that raised it.
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from impactgraph.detection import perceptual_hash
 from impactgraph.evidence import MOCK_INVOICE_EXTRACTION
@@ -15,6 +15,7 @@ from impactgraph.main import InvoiceExtraction
 from impactgraph.persistence import (
     AuditLogRecord,
     ClaimRecord,
+    DomainEntityRecord,
     EvidenceRecord,
     FinancialTransactionRecord,
     ProgramRecord,
@@ -22,6 +23,7 @@ from impactgraph.persistence import (
 )
 from impactgraph.risk import (
     DispositionRefused,
+    ScanTooLarge,
     gather_invoices,
     open_findings,
     precision,
@@ -45,6 +47,24 @@ def _program(session, slug: str, org: str) -> None:
             operator_org_ref=org,
             region="Region",
             status="ACTIVE",
+        )
+    )
+
+
+def _project(session, *, program: str, project: str) -> None:
+    """The ownership edge detection actually walks.
+
+    A claim is not required and deliberately not created here: evidence is uploaded long
+    before anybody files a claim against it, and that is exactly when a duplicate is worth
+    catching.
+    """
+    program_record = session.scalar(select(ProgramRecord).where(ProgramRecord.slug == program))
+    session.add(
+        DomainEntityRecord(
+            external_id=project,
+            entity_type="PROJECT",
+            program_id=program_record.id,
+            data={},
         )
     )
 
@@ -104,7 +124,7 @@ def test_the_detector_reads_the_fields_the_extraction_actually_defines():
 def test_an_extraction_the_system_produces_yields_usable_invoice_facts(session):
     with session.begin():
         _program(session, "prog-a", "org-water")
-        _claim(session, program="prog-a", project="proj-a")
+        _project(session, program="prog-a", project="proj-a")
         _invoice_evidence(session, ref="ev1", project="proj-a", number="INV-8291")
 
     with session.begin():
@@ -122,8 +142,8 @@ def test_the_same_invoice_in_two_programmes_of_one_organisation_is_found(session
     with session.begin():
         _program(session, "prog-a", "org-water")
         _program(session, "prog-b", "org-water")
-        _claim(session, program="prog-a", project="proj-a")
-        _claim(session, program="prog-b", project="proj-b")
+        _project(session, program="prog-a", project="proj-a")
+        _project(session, program="prog-b", project="proj-b")
         _invoice_evidence(session, ref="ev1", project="proj-a", number="INV-900")
         _invoice_evidence(session, ref="ev2", project="proj-b", number="INV-900")
 
@@ -140,8 +160,8 @@ def test_detection_does_not_reach_across_organisations(session):
     with session.begin():
         _program(session, "prog-a", "org-water")
         _program(session, "prog-b", "org-shelter")
-        _claim(session, program="prog-a", project="proj-a")
-        _claim(session, program="prog-b", project="proj-b")
+        _project(session, program="prog-a", project="proj-a")
+        _project(session, program="prog-b", project="proj-b")
         _invoice_evidence(session, ref="ev1", project="proj-a", number="INV-900")
         _invoice_evidence(session, ref="ev2", project="proj-b", number="INV-900")
 
@@ -161,8 +181,8 @@ def test_a_finding_never_changes_a_claim(session):
     with session.begin():
         _program(session, "prog-a", "org-water")
         _program(session, "prog-b", "org-water")
-        _claim(session, program="prog-a", project="proj-a")
-        _claim(session, program="prog-b", project="proj-b")
+        _project(session, program="prog-a", project="proj-a")
+        _project(session, program="prog-b", project="proj-b")
         _invoice_evidence(session, ref="ev1", project="proj-a", number="INV-900")
         _invoice_evidence(session, ref="ev2", project="proj-b", number="INV-900")
 
@@ -181,8 +201,8 @@ def test_rescanning_does_not_grow_the_queue(session):
     with session.begin():
         _program(session, "prog-a", "org-water")
         _program(session, "prog-b", "org-water")
-        _claim(session, program="prog-a", project="proj-a")
-        _claim(session, program="prog-b", project="proj-b")
+        _project(session, program="prog-a", project="proj-a")
+        _project(session, program="prog-b", project="proj-b")
         _invoice_evidence(session, ref="ev1", project="proj-a", number="INV-900")
         _invoice_evidence(session, ref="ev2", project="proj-b", number="INV-900")
 
@@ -201,8 +221,8 @@ def test_a_dismissed_finding_does_not_come_back_open(session):
     with session.begin():
         _program(session, "prog-a", "org-water")
         _program(session, "prog-b", "org-water")
-        _claim(session, program="prog-a", project="proj-a")
-        _claim(session, program="prog-b", project="proj-b")
+        _project(session, program="prog-a", project="proj-a")
+        _project(session, program="prog-b", project="proj-b")
         _invoice_evidence(session, ref="ev1", project="proj-a", number="INV-900")
         _invoice_evidence(session, ref="ev2", project="proj-b", number="INV-900")
     with session.begin():
@@ -232,8 +252,8 @@ def test_a_finding_cannot_be_closed_without_a_reason(session):
     with session.begin():
         _program(session, "prog-a", "org-water")
         _program(session, "prog-b", "org-water")
-        _claim(session, program="prog-a", project="proj-a")
-        _claim(session, program="prog-b", project="proj-b")
+        _project(session, program="prog-a", project="proj-a")
+        _project(session, program="prog-b", project="proj-b")
         _invoice_evidence(session, ref="ev1", project="proj-a", number="INV-900")
         _invoice_evidence(session, ref="ev2", project="proj-b", number="INV-900")
     with session.begin():
@@ -260,8 +280,8 @@ def test_investigating_does_not_need_a_reason_yet(session):
     with session.begin():
         _program(session, "prog-a", "org-water")
         _program(session, "prog-b", "org-water")
-        _claim(session, program="prog-a", project="proj-a")
-        _claim(session, program="prog-b", project="proj-b")
+        _project(session, program="prog-a", project="proj-a")
+        _project(session, program="prog-b", project="proj-b")
         _invoice_evidence(session, ref="ev1", project="proj-a", number="INV-900")
         _invoice_evidence(session, ref="ev2", project="proj-b", number="INV-900")
     with session.begin():
@@ -282,8 +302,8 @@ def test_another_organisation_cannot_dispose_of_a_finding(session):
     with session.begin():
         _program(session, "prog-a", "org-water")
         _program(session, "prog-b", "org-water")
-        _claim(session, program="prog-a", project="proj-a")
-        _claim(session, program="prog-b", project="proj-b")
+        _project(session, program="prog-a", project="proj-a")
+        _project(session, program="prog-b", project="proj-b")
         _invoice_evidence(session, ref="ev1", project="proj-a", number="INV-900")
         _invoice_evidence(session, ref="ev2", project="proj-b", number="INV-900")
     with session.begin():
@@ -304,8 +324,8 @@ def test_closing_a_finding_is_written_to_the_audit_log(session):
     with session.begin():
         _program(session, "prog-a", "org-water")
         _program(session, "prog-b", "org-water")
-        _claim(session, program="prog-a", project="proj-a")
-        _claim(session, program="prog-b", project="proj-b")
+        _project(session, program="prog-a", project="proj-a")
+        _project(session, program="prog-b", project="proj-b")
         _invoice_evidence(session, ref="ev1", project="proj-a", number="INV-900")
         _invoice_evidence(session, ref="ev2", project="proj-b", number="INV-900")
     with session.begin():
@@ -388,8 +408,8 @@ def test_a_reused_photograph_across_projects_is_found_through_the_scan(session):
 
     with session.begin():
         _program(session, "prog-a", "org-water")
-        _claim(session, program="prog-a", project="proj-a")
-        _claim(session, program="prog-a", project="proj-b")
+        _project(session, program="prog-a", project="proj-a")
+        _project(session, program="prog-a", project="proj-b")
         for ref, project in (("ph1", "proj-a"), ("ph2", "proj-b")):
             session.add(
                 EvidenceRecord(
@@ -482,3 +502,142 @@ def test_precision_does_not_pool_organisations(session):
     with session.begin():
         assert precision(session, "org-water")["DUPLICATE_INVOICE"]["precision"] == 1.0
         assert precision(session, "org-shelter")["DUPLICATE_INVOICE"]["precision"] == 0.0
+
+
+def test_evidence_is_scanned_before_anybody_files_a_claim_about_it(session):
+    """Detection used to resolve a project's programme through its claims, which made
+    every upload invisible until a claim existed. The second copy of an invoice arriving
+    is the moment the duplicate is worth catching, and that is weeks earlier."""
+    with session.begin():
+        _program(session, "prog-a", "org-water")
+        _project(session, program="prog-a", project="proj-a")
+        _project(session, program="prog-a", project="proj-b")
+        _invoice_evidence(session, ref="ev1", project="proj-a", number="INV-900")
+        _invoice_evidence(session, ref="ev2", project="proj-b", number="INV-900")
+
+    with session.begin():
+        assert session.scalar(select(func.count()).select_from(ClaimRecord)) == 0
+        findings = scan(session, "org-water")
+
+    assert [f.kind for f in findings] == ["DUPLICATE_INVOICE"]
+
+
+def test_a_dismissed_concentration_does_not_return_when_the_next_payment_lands(session):
+    """The finding's identity is the supplier and the programme, not the share. Keying on
+    the share minted a new finding on every settlement, so a dismissal never stuck."""
+    def _pay(ref: str, payee: str, amount: int) -> FinancialTransactionRecord:
+        return FinancialTransactionRecord(
+            external_id=ref, program_ref="prog-a", payer_ref="funder", payee_ref=payee,
+            payee_name=payee.title(), occurred_on="2026-03-01", provider="mock",
+            source_ref=f"src-{ref}", amount_minor=amount, currency="GBP", settlement="SETTLED",
+        )
+
+    with session.begin():
+        _program(session, "prog-a", "org-water")
+        for index in range(5):
+            session.add(_pay(f"tx-{index}", "acme", 1000))
+        session.add(_pay("tx-other", "other", 500))
+
+    with session.begin():
+        first = scan(session, "org-water")
+        assert [f.kind for f in first] == ["VENDOR_CONCENTRATION"]
+        external_id = first[0].external_id
+
+    with session.begin():
+        record_disposition(
+            session, external_id=external_id, organization_ref="org-water",
+            state="DISMISSED", actor_id="reviewer-1",
+            note="Acme is the only drilling contractor in the district.",
+        )
+
+    with session.begin():
+        session.add(_pay("tx-later", "other", 200))
+
+    with session.begin():
+        again = scan(session, "org-water")
+        assert [f.external_id for f in again] == [external_id]
+        # The reading is refreshed even though the decision stands.
+        assert again[0].subjects["totalMinor"] == 5700
+        assert again[0].state == "DISMISSED"
+
+    with session.begin():
+        assert open_findings(session, "org-water") == []
+        assert session.scalar(select(func.count()).select_from(RiskFindingRecord)) == 1
+
+
+def test_a_third_copy_of_a_duplicated_invoice_updates_the_finding(session):
+    with session.begin():
+        _program(session, "prog-a", "org-water")
+        for project in ("proj-a", "proj-b", "proj-c"):
+            _project(session, program="prog-a", project=project)
+        _invoice_evidence(session, ref="ev1", project="proj-a", number="INV-900")
+        _invoice_evidence(session, ref="ev2", project="proj-b", number="INV-900")
+
+    with session.begin():
+        external_id = scan(session, "org-water")[0].external_id
+
+    with session.begin():
+        _invoice_evidence(session, ref="ev3", project="proj-c", number="INV-900")
+
+    with session.begin():
+        findings = scan(session, "org-water")
+        assert [f.external_id for f in findings] == [external_id]
+        assert findings[0].subjects["evidence"] == ["ev1", "ev2", "ev3"]
+        assert session.scalar(select(func.count()).select_from(RiskFindingRecord)) == 1
+
+
+def test_reopening_a_decided_finding_also_requires_a_reason(session):
+    """Reopening moves the precision figure, so it is written down like any other
+    decision rather than silently restoring the old note."""
+    with session.begin():
+        _program(session, "prog-a", "org-water")
+        _project(session, program="prog-a", project="proj-a")
+        _project(session, program="prog-a", project="proj-b")
+        _invoice_evidence(session, ref="ev1", project="proj-a", number="INV-900")
+        _invoice_evidence(session, ref="ev2", project="proj-b", number="INV-900")
+    with session.begin():
+        external_id = scan(session, "org-water")[0].external_id
+    with session.begin():
+        record_disposition(
+            session, external_id=external_id, organization_ref="org-water",
+            state="CONFIRMED", actor_id="reviewer-1", note="Billed twice.",
+        )
+
+    with session.begin(), pytest.raises(DispositionRefused):
+        record_disposition(
+            session, external_id=external_id, organization_ref="org-water",
+            state="OPEN", actor_id="reviewer-2",
+        )
+
+    with session.begin():
+        reopened = record_disposition(
+            session, external_id=external_id, organization_ref="org-water",
+            state="OPEN", actor_id="reviewer-2",
+            note="The vendor produced a second delivery note; worth another look.",
+        )
+        assert reopened.state == "OPEN"
+        assert reopened.closed_at is None
+
+
+def test_an_interactive_scan_refuses_rather_than_timing_out(session):
+    """A scan left to run past a gateway timeout rolls back and scans nothing, which
+    reads as an intermittent fault rather than a limit."""
+    with session.begin():
+        _program(session, "prog-a", "org-water")
+        _project(session, program="prog-a", project="proj-a")
+        for index in range(3):
+            session.add(
+                EvidenceRecord(
+                    external_id=f"img-{index}", project_ref="proj-a", evidence_type="PHOTO",
+                    storage_uri="f", content_hash=f"sha256:{index:0>60}", mime_type="image/png",
+                    visibility="PRIVATE", workflow_status="UPLOADED", analysis_status="DONE",
+                    integrity_status="OK", blockchain_status="NOT_STARTED", metadata_json={},
+                    perceptual_hash=f"{index:016x}",
+                )
+            )
+
+    with session.begin(), pytest.raises(ScanTooLarge):
+        scan(session, "org-water", image_limit=2)
+
+    with session.begin():
+        assert scan(session, "org-water", image_limit=3) is not None

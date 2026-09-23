@@ -29,7 +29,7 @@ from .detection import (
 )
 from .persistence import (
     AuditLogRecord,
-    ClaimRecord,
+    DomainEntityRecord,
     EvidenceRecord,
     FinancialTransactionRecord,
     ProgramRecord,
@@ -47,11 +47,25 @@ class DispositionRefused(ValueError):
     """A finding cannot be closed without a reason."""
 
 
+class ScanTooLarge(RuntimeError):
+    """More images than an interactive scan will compare in a reasonable time."""
+
+
+#: Near-duplicate comparison is quadratic within each hash bucket, so it grows faster than
+#: the portfolio does. Around this many images it stops being something to wait for in a
+#: browser: run `impactgraph risk-scan` out of band instead, which has no ceiling.
+INTERACTIVE_IMAGE_LIMIT = 20_000
+
+
 def _finding_id(organization_ref: str, finding: Finding) -> str:
-    """Derived from what the finding is about, so a rescan updates rather than duplicates."""
+    """Stable for as long as the finding is about the same thing.
+
+    Derived from the finding's key and never from its measurements, so a share that moves
+    with each new payment, or a third copy of an already-duplicated invoice, updates the
+    existing row rather than minting a second one beside a reviewer's decision.
+    """
     material = json.dumps(
-        {"org": organization_ref, "kind": finding.kind, "subjects": finding.subjects},
-        sort_keys=True,
+        {"org": organization_ref, "key": list(finding.key)},
         separators=(",", ":"),
     )
     return f"risk-{hashlib.sha256(material.encode()).hexdigest()[:32]}"
@@ -67,6 +81,27 @@ def _programs_for(session: Session, organization_ref: str) -> list[str]:
     )
 
 
+def _projects_for(session: Session, program_refs: Sequence[str]) -> dict[str, str]:
+    """Project identifier to the programme that owns it.
+
+    Resolved through the project entity's `program_id`, which is the actual ownership
+    edge. Reading it from claims instead would make evidence invisible to detection until
+    somebody filed a claim against its project -- and the moment a duplicate is worth
+    catching is the moment the second copy is uploaded, which is weeks earlier.
+    """
+    if not program_refs:
+        return {}
+    rows = session.execute(
+        select(DomainEntityRecord.external_id, ProgramRecord.slug)
+        .join(ProgramRecord, DomainEntityRecord.program_id == ProgramRecord.id)
+        .where(
+            DomainEntityRecord.entity_type == "PROJECT",
+            ProgramRecord.slug.in_(program_refs),
+        )
+    )
+    return {project_ref: program_ref for project_ref, program_ref in rows}
+
+
 def gather_invoices(session: Session, program_refs: Sequence[str]) -> list[InvoiceFacts]:
     """Invoice facts from extractions, for the programmes named and no others.
 
@@ -74,16 +109,7 @@ def gather_invoices(session: Session, program_refs: Sequence[str]) -> list[Invoi
     model's reading of a scanned page, so a missing vendor or number means this object
     takes no part in duplicate detection rather than matching every other unreadable one.
     """
-    if not program_refs:
-        return []
-    projects = {
-        project_ref: program_ref
-        for project_ref, program_ref in session.execute(
-            select(ClaimRecord.project_ref, ClaimRecord.program_ref).where(
-                ClaimRecord.program_ref.in_(program_refs)
-            )
-        )
-    }
+    projects = _projects_for(session, program_refs)
     if not projects:
         return []
     facts: list[InvoiceFacts] = []
@@ -103,7 +129,9 @@ def gather_invoices(session: Session, program_refs: Sequence[str]) -> list[Invoi
                 invoice_number=str(number),
                 # Already minor units: the review boundary takes an integer, so there is
                 # no decimal here to round and no float to launder into the comparison.
-                total_minor=amount if isinstance(amount, int) and not isinstance(amount, bool) else 0,
+                total_minor=(
+                    amount if isinstance(amount, int) and not isinstance(amount, bool) else 0
+                ),
                 currency=str(extraction.get("currency") or ""),
                 issued_on=str(extraction.get("date") or ""),
             )
@@ -112,13 +140,7 @@ def gather_invoices(session: Session, program_refs: Sequence[str]) -> list[Invoi
 
 
 def gather_images(session: Session, program_refs: Sequence[str]) -> list[ImageFacts]:
-    if not program_refs:
-        return []
-    projects = set(
-        session.scalars(
-            select(ClaimRecord.project_ref).where(ClaimRecord.program_ref.in_(program_refs))
-        )
-    )
+    projects = _projects_for(session, program_refs)
     if not projects:
         return []
     rows = session.scalars(
@@ -161,28 +183,42 @@ def gather_payments(session: Session, program_refs: Sequence[str]) -> list[Payme
     ]
 
 
-def scan(session: Session, organization_ref: str) -> list[RiskFindingRecord]:
+def scan(
+    session: Session, organization_ref: str, *, image_limit: int | None = None
+) -> list[RiskFindingRecord]:
     """Run every detector over one organisation's records and post the results.
 
     Nothing here touches a claim. The queue is the whole output.
     """
     program_refs = _programs_for(session, organization_ref)
+    images = gather_images(session, program_refs)
+    if image_limit is not None and len(images) > image_limit:
+        raise ScanTooLarge(
+            f"{len(images)} images is past the {image_limit} an interactive scan will "
+            f"compare. Run `impactgraph risk-scan` for this organisation instead."
+        )
     findings = [
         *duplicate_invoices(gather_invoices(session, program_refs)),
-        *reused_images(gather_images(session, program_refs)),
+        *reused_images(images),
         *vendor_concentration(gather_payments(session, program_refs)),
     ]
 
-    posted: list[RiskFindingRecord] = []
-    for finding in findings:
-        external_id = _finding_id(organization_ref, finding)
-        existing = session.scalar(
-            select(RiskFindingRecord).where(RiskFindingRecord.external_id == external_id)
+    by_id = {_finding_id(organization_ref, finding): finding for finding in findings}
+    existing = {
+        record.external_id: record
+        for record in session.scalars(
+            select(RiskFindingRecord).where(RiskFindingRecord.external_id.in_(by_id))
         )
-        if existing is not None:
-            # The explanation can improve; a reviewer's decision is theirs and stands.
-            existing.explanation = finding.explanation
-            posted.append(existing)
+    } if by_id else {}
+
+    posted: list[RiskFindingRecord] = []
+    for external_id, finding in by_id.items():
+        record = existing.get(external_id)
+        if record is not None:
+            # The reading is refreshed; the reviewer's decision about it is theirs.
+            record.explanation = finding.explanation
+            record.subjects = finding.subjects
+            posted.append(record)
             continue
         record = RiskFindingRecord(
             external_id=external_id,
@@ -239,6 +275,10 @@ def record_disposition(
         raise LookupError(external_id)
     if state in CLOSED_STATES and not note.strip():
         raise DispositionRefused("closing a finding requires a reason")
+    if finding.state in CLOSED_STATES and state in OPEN_STATES and not note.strip():
+        # Reopening is legitimate -- new evidence arrives -- but it moves the precision
+        # figure, so it is a decision that gets written down like any other.
+        raise DispositionRefused("reopening a decided finding requires a reason")
 
     finding.state = state
     finding.assigned_to = actor_id

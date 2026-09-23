@@ -9,7 +9,7 @@ import io
 import math
 
 import pytest
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 from impactgraph.detection import (
     CONCENTRATION_MINIMUM_PAYMENTS,
@@ -186,15 +186,19 @@ def test_one_evidence_object_does_not_duplicate_itself():
     assert duplicate_invoices([_invoice("ev-1", "prog-a"), _invoice("ev-1", "prog-a")]) == []
 
 
-def test_two_numbers_for_the_same_charge_on_the_same_day_are_worth_a_look():
-    findings = duplicate_invoices(
-        [
-            _invoice("ev-1", "prog-a", number="INV-1"),
-            _invoice("ev-2", "prog-a", number="INV-2"),
-        ]
+def test_the_same_vendor_billing_one_amount_twice_in_a_day_is_not_a_finding():
+    """A supplier delivering identical goods to two projects on one day issues two
+    invoices for the same amount on the same date. In this domain that is routine, and a
+    detector firing on it would fill the queue ADR-016 depends on keeping clean."""
+    assert (
+        duplicate_invoices(
+            [
+                _invoice("ev-1", "prog-a", number="INV-1"),
+                _invoice("ev-2", "prog-a", number="INV-2"),
+            ]
+        )
+        == []
     )
-    assert [f.kind for f in findings] == ["DUPLICATE_INVOICE"]
-    assert sorted(findings[0].subjects["invoiceNumbers"]) == ["INV1", "INV2"]
 
 
 def test_an_invoice_with_nothing_readable_on_it_is_not_matched_to_every_other_one():
@@ -314,3 +318,89 @@ def test_concentration_is_computed_per_programme():
     findings = vendor_concentration(payments)
 
     assert [f.subjects["program"] for f in findings] == ["prog-a"]
+
+
+def test_a_decompression_bomb_does_not_reach_the_caller():
+    """This runs inline on the upload path, so an escaping error takes evidence upload
+    down. A few hundred bytes can declare a 60000x60000 canvas."""
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(payload))
+            + kind
+            + payload
+            + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+        )
+
+    bomb = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 60000, 60000, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(b"\x00" * 100))
+        + chunk(b"IEND", b"")
+    )
+
+    assert perceptual_hash_for("image/png", bomb) is None
+    with pytest.raises(PerceptualHashUnsupported):
+        perceptual_hash(bomb)
+
+
+def test_banding_finds_every_pair_an_exhaustive_comparison_would():
+    """Comparing only images that share an 8-bit band is an optimisation, and an
+    optimisation that silently drops findings is worse than the quadratic loop it
+    replaced. Two hashes within six bits share at least two of the eight bands."""
+    import random
+
+    def exhaustive(images):
+        pairs = set()
+        for index, left in enumerate(images):
+            for right in images[index + 1 :]:
+                if left.project_ref == right.project_ref:
+                    continue
+                distance = hamming(left.perceptual_hash, right.perceptual_hash)
+                if left.content_hash == right.content_hash or distance <= NEAR_DUPLICATE_DISTANCE:
+                    pairs.add(tuple(sorted([left.evidence_ref, right.evidence_ref])))
+        return pairs
+
+    random.seed(11)
+    for _ in range(40):
+        images = []
+        for index in range(50):
+            digest = random.getrandbits(64)
+            images.append(
+                ImageFacts(f"e{index}", f"p{index % 5}", f"sha{index}", f"{digest:016x}")
+            )
+            if random.random() < 0.4:
+                mutated = digest
+                for bit in random.sample(range(64), random.randint(0, 8)):
+                    mutated ^= 1 << bit
+                images.append(
+                    ImageFacts(
+                        f"e{index}n", f"p{(index + 2) % 5}", f"sha{index}n", f"{mutated:016x}"
+                    )
+                )
+        banded = {tuple(f.subjects["evidence"]) for f in reused_images(images)}
+        assert banded == exhaustive(images)
+
+
+def test_a_pair_is_reported_once_even_though_it_shares_several_bands():
+    digest = f"{0xABCD1234ABCD1234:016x}"
+    findings = reused_images(
+        [
+            ImageFacts("ev-1", "proj-a", "sha256:aaa", digest),
+            ImageFacts("ev-2", "proj-b", "sha256:bbb", digest),
+        ]
+    )
+    assert len(findings) == 1
+
+
+def test_what_the_hash_does_not_catch_is_stated_rather_than_implied():
+    """A difference hash is not invariant under mirroring, rotation or a hard crop. The
+    detector is for careless reuse, not for an adversary, and the docstring says so."""
+    original = _photo(12)
+    upright = perceptual_hash(_encoded(original))
+    mirrored = perceptual_hash(_encoded(ImageOps.mirror(original)))
+
+    assert hamming(upright, mirrored) > NEAR_DUPLICATE_DISTANCE
+    assert "mirrored, rotated or cropped hard" in reused_images.__doc__

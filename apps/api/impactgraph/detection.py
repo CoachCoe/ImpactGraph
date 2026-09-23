@@ -36,8 +36,16 @@ CONCENTRATION_SHARE = 0.6
 
 @dataclass(frozen=True)
 class Finding:
+    #: What this finding is *about*, and the whole of its identity: the vendor and number
+    #: of the duplicated invoice, the pair of evidence objects, the payee taking the
+    #: share. Deliberately excludes every measured quantity. A share moves whenever a
+    #: payment arrives, and keying on it would mint a new finding each time -- so a
+    #: dismissal would never stick and the queue would refill with the thing the reviewer
+    #: just decided about.
+    key: tuple[str, ...]
     kind: str
     explanation: str
+    #: The current reading. Refreshed on every scan; never part of the identity.
     subjects: dict = field(default_factory=dict)
 
 
@@ -93,7 +101,16 @@ def perceptual_hash(data: bytes) -> str:
             # orientation, and a camera sets this tag without anybody choosing to.
             upright = ImageOps.exif_transpose(image)
             small = upright.convert("L").resize((9, 8), Image.Resampling.LANCZOS)
-    except (UnidentifiedImageError, OSError, ValueError) as exc:
+    except (
+        UnidentifiedImageError,
+        # A few hundred bytes can declare a 60000x60000 canvas. Pillow refuses to
+        # allocate it, and that refusal has to be handled here: this runs inline on the
+        # upload path, so letting it escape would let one crafted file take evidence
+        # upload down. It does not inherit from OSError, so it needs naming.
+        Image.DecompressionBombError,
+        OSError,
+        ValueError,
+    ) as exc:
         raise PerceptualHashUnsupported("not a decodable image") from exc
 
     # `tobytes` on an 8-bit greyscale image is exactly the 72 pixel values, and
@@ -128,9 +145,15 @@ def _normalise(value: str) -> str:
 def duplicate_invoices(invoices: Sequence[InvoiceFacts]) -> list[Finding]:
     """The same invoice supporting more than one delivery.
 
-    Billing one invoice to two funders is the version of this that costs money, so a
-    match that spans programmes is reported differently from one inside a single
-    programme, which is more often a duplicate upload.
+    Matched on vendor and invoice number after normalising case and punctuation, and on
+    nothing else. An earlier version also reported one vendor issuing two invoices for the
+    same amount on the same day; that is a supplier delivering identical goods to two
+    projects, which in this domain is routine, and ADR-016 only admits a detector whose
+    mistakes are rare and knowable.
+
+    Billing one invoice to two funders is the version that costs money, so a match that
+    spans programmes reads differently from one inside a single programme, which is more
+    often a duplicate upload.
     """
     findings: list[Finding] = []
 
@@ -141,10 +164,10 @@ def duplicate_invoices(invoices: Sequence[InvoiceFacts]) -> list[Finding]:
         by_number[(_normalise(invoice.vendor), _normalise(invoice.invoice_number))].append(invoice)
 
     for (vendor, number), group in sorted(by_number.items()):
-        if len({item.evidence_ref for item in group}) < 2:
+        refs = sorted({item.evidence_ref for item in group})
+        if len(refs) < 2:
             continue
         programs = sorted({item.program_ref for item in group})
-        refs = sorted({item.evidence_ref for item in group})
         if len(programs) > 1:
             explanation = (
                 f"Invoice {number} from {vendor} supports deliveries in "
@@ -158,44 +181,28 @@ def duplicate_invoices(invoices: Sequence[InvoiceFacts]) -> list[Finding]:
             )
         findings.append(
             Finding(
+                # The invoice, not how many copies of it have turned up so far. A third
+                # copy is new information about the same problem, not a second problem.
+                key=("DUPLICATE_INVOICE", vendor, number),
                 kind="DUPLICATE_INVOICE",
                 explanation=explanation,
                 subjects={"evidence": refs, "programs": programs, "invoiceNumber": number},
             )
         )
 
-    by_amount: dict[tuple[str, int, str, str], list[InvoiceFacts]] = defaultdict(list)
-    for invoice in invoices:
-        if not _normalise(invoice.vendor):
-            continue
-        key = (_normalise(invoice.vendor), invoice.total_minor, invoice.currency, invoice.issued_on)
-        by_amount[key].append(invoice)
-
-    for (vendor, amount, currency, issued_on), group in sorted(by_amount.items()):
-        numbers = {_normalise(item.invoice_number) for item in group}
-        if len(numbers) < 2 or len({item.evidence_ref for item in group}) < 2:
-            continue
-        refs = sorted({item.evidence_ref for item in group})
-        findings.append(
-            Finding(
-                kind="DUPLICATE_INVOICE",
-                explanation=(
-                    f"{vendor} issued {len(numbers)} invoices for the same amount "
-                    f"({amount} {currency} minor units) on the same day ({issued_on}), "
-                    f"under different numbers. That is either a split order or the same "
-                    f"charge submitted twice."
-                ),
-                subjects={
-                    "evidence": refs,
-                    "invoiceNumbers": sorted(numbers),
-                    "amountMinor": amount,
-                    "currency": currency,
-                    "issuedOn": issued_on,
-                },
-            )
-        )
-
     return findings
+
+
+#: Eight bands of eight bits. Two hashes within NEAR_DUPLICATE_DISTANCE differ in at most
+#: six bits, which by the pigeonhole principle leaves at least two of the eight bands
+#: identical -- so comparing only pairs that share a band loses nothing and turns a scan
+#: that was quadratic in the whole portfolio into one quadratic in each small bucket.
+_BANDS = 8
+_BAND_BITS = 64 // _BANDS
+
+
+def _bands(digest: int) -> list[int]:
+    return [(digest >> (index * _BAND_BITS)) & ((1 << _BAND_BITS) - 1) for index in range(_BANDS)]
 
 
 def reused_images(images: Sequence[ImageFacts]) -> list[Finding]:
@@ -204,43 +211,69 @@ def reused_images(images: Sequence[ImageFacts]) -> list[Finding]:
     Byte-identical is reported separately from visually similar: the first is a fact, the
     second is a resemblance a person still has to look at. Two pictures from one delivery
     are expected to resemble each other, so only a match across projects is reported.
+
+    This finds a photograph re-filed, re-encoded, resized or re-saved at another quality.
+    It does not find one that has been mirrored, rotated or cropped hard -- a difference
+    hash is not invariant under any of those. That is the intended reach: the common case
+    is an honest mistake or a careless reuse, and a detector that survived deliberate
+    evasion is a different and much larger piece of work.
     """
     findings: list[Finding] = []
     hashable = [image for image in images if image.perceptual_hash]
+    digests = {image.evidence_ref: int(image.perceptual_hash, 16) for image in hashable}
 
-    for index, left in enumerate(hashable):
-        for right in hashable[index + 1 :]:
-            if left.project_ref == right.project_ref:
-                continue
-            refs = sorted([left.evidence_ref, right.evidence_ref])
-            projects = sorted([left.project_ref, right.project_ref])
-            if left.content_hash == right.content_hash:
-                findings.append(
-                    Finding(
-                        kind="REUSED_IMAGE",
-                        explanation=(
-                            f"The same file, byte for byte, is filed against "
-                            f"{projects[0]} and {projects[1]}."
-                        ),
-                        subjects={"evidence": refs, "projects": projects, "distance": 0},
+    buckets: dict[tuple[int, int], list[ImageFacts]] = defaultdict(list)
+    for image in hashable:
+        for index, band in enumerate(_bands(digests[image.evidence_ref])):
+            buckets[(index, band)].append(image)
+
+    seen: set[tuple[str, str]] = set()
+    for bucket in buckets.values():
+        for index, left in enumerate(bucket):
+            for right in bucket[index + 1 :]:
+                if left.project_ref == right.project_ref:
+                    continue
+                pair = tuple(sorted([left.evidence_ref, right.evidence_ref]))
+                if pair in seen:
+                    continue
+                seen.add(pair)
+                refs = list(pair)
+                projects = sorted([left.project_ref, right.project_ref])
+                if left.content_hash == right.content_hash:
+                    findings.append(
+                        Finding(
+                            key=("REUSED_IMAGE", *refs),
+                            kind="REUSED_IMAGE",
+                            explanation=(
+                                f"The same file, byte for byte, is filed against "
+                                f"{projects[0]} and {projects[1]}."
+                            ),
+                            subjects={"evidence": refs, "projects": projects, "distance": 0},
+                        )
                     )
-                )
-                continue
-            distance = hamming(left.perceptual_hash, right.perceptual_hash)
-            if distance <= NEAR_DUPLICATE_DISTANCE:
-                findings.append(
-                    Finding(
-                        kind="REUSED_IMAGE",
-                        explanation=(
-                            f"Two different files filed against {projects[0]} and "
-                            f"{projects[1]} look like the same photograph "
-                            f"({distance} of 64 bits differ). Re-encoding or cropping an "
-                            f"image changes its bytes and not its appearance."
-                        ),
-                        subjects={"evidence": refs, "projects": projects, "distance": distance},
+                    continue
+                distance = (
+                    digests[left.evidence_ref] ^ digests[right.evidence_ref]
+                ).bit_count()
+                if distance <= NEAR_DUPLICATE_DISTANCE:
+                    findings.append(
+                        Finding(
+                            key=("REUSED_IMAGE", *refs),
+                            kind="REUSED_IMAGE",
+                            explanation=(
+                                f"Two different files filed against {projects[0]} and "
+                                f"{projects[1]} look like the same photograph "
+                                f"({distance} of 64 bits differ). Re-encoding or resizing "
+                                f"an image changes its bytes and not its appearance."
+                            ),
+                            subjects={
+                                "evidence": refs,
+                                "projects": projects,
+                                "distance": distance,
+                            },
+                        )
                     )
-                )
-    return findings
+    return sorted(findings, key=lambda finding: finding.key)
 
 
 def vendor_concentration(payments: Sequence[PaymentFacts]) -> list[Finding]:
@@ -276,6 +309,10 @@ def vendor_concentration(payments: Sequence[PaymentFacts]) -> list[Finding]:
             name = payee_payments[0].payee_name
             findings.append(
                 Finding(
+                    # The supplier and the programme. Not the share, which moves every
+                    # time a payment lands -- keying on it would re-raise this finding
+                    # after every settlement and outlast any dismissal.
+                    key=("VENDOR_CONCENTRATION", program_ref, payee_ref, currency),
                     kind="VENDOR_CONCENTRATION",
                     explanation=(
                         f"{name} received {share:.0%} of {program_ref}'s spend in "

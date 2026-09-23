@@ -364,4 +364,42 @@ act on "the same invoice number from the same vendor" and cannot act on "these t
 scored 0.8 similar", and a fuzzy matcher's false positives land in the queue the whole
 design depends on keeping clean.
 
+For the same reason there is no detector for one vendor issuing two invoices of equal
+value on one day. A supplier delivering identical goods to two projects does exactly that,
+and in this domain it is ordinary rather than suspicious.
+
+## ADR-017 — The perceptual hash is for carelessness, not for an adversary
+
+Decision: near-duplicate image detection uses a 64-bit difference hash over a 9x8
+downsample, matched at a Hamming distance of six. It is not hardened against deliberate
+evasion, and this ADR records what it does not catch rather than leaving that to be
+discovered.
+
+Measured against photograph-like content, a re-encode at another JPEG quality moves the
+hash by about one bit, a halving of the resolution by two, and a different photograph by
+roughly thirty-five. The threshold of six sits in a wide gap, so the check is decisive in
+both directions for the case it covers.
+
+It does not survive a horizontal flip (about thirty bits), a rotation of a few degrees
+(about fourteen), or a crop of a tenth of the frame (about twenty-five). A difference hash
+is not invariant under any of those, and nothing about the threshold can fix it.
+
+Why accept that: the case this is for is a photograph re-filed against a second delivery,
+usually as a shortcut or an honest mistake, and that is what the hash catches. Someone who
+mirrors an image to defeat a hash they know the system computes is a different problem,
+and one that would need a learned embedding, a vector index and an accuracy story of its
+own. Building that on the assumption it is needed, before a single confirmed finding
+suggests it is, is the thing ADR-016 argues against.
+
+Consequence: the near-duplicate check is a floor, not a guarantee, and the queue's
+explanations say "looks like the same photograph" rather than asserting reuse. If
+dispositions ever show deliberate evasion, that is the evidence for replacing this, and
+it will be replaced against measurements rather than on principle.
+
+Detection is also quadratic within each hash bucket, which grows faster than a portfolio
+does. Comparisons are restricted to images sharing one of eight 8-bit bands, which is
+lossless at this threshold — six differing bits leave at least two bands identical — and
+the HTTP scan refuses above a ceiling rather than running past a gateway timeout and
+rolling back. Large tenants scan out of band with `impactgraph risk-scan`.
+
 Date: 2026-09-23

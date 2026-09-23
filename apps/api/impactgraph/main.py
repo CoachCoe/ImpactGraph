@@ -94,6 +94,7 @@ from .read_model import (
     CLAIM_ID as SEEDED_CLAIM_ID,
 )
 from .read_model import TransparencyReadRepository, reset_read_model
+from .risk import INTERACTIVE_IMAGE_LIMIT, ScanTooLarge
 from .risk import open_findings as risk_open_findings
 from .risk import precision as risk_precision
 from .risk import record_disposition as record_risk_disposition
@@ -672,11 +673,19 @@ def run_risk_scan(request: Request, user: CurrentUser = None):
     actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
     if session_factory is None:
         raise HTTPException(503, "Risk detection requires PERSISTENCE_MODE=postgres")
-    return _tenant_write(
-        lambda session: {
-            "findings": [_finding_view(f) for f in risk_scan(session, actor.id)],
-        }
-    )
+    try:
+        return _tenant_write(
+            lambda session: {
+                "findings": [
+                    _finding_view(f)
+                    for f in risk_scan(session, actor.id, image_limit=INTERACTIVE_IMAGE_LIMIT)
+                ],
+            }
+        )
+    except ScanTooLarge as exc:
+        # Refused rather than left to time out and roll back, which would look like an
+        # intermittent fault and leave nothing scanned.
+        raise HTTPException(413, str(exc)) from exc
 
 
 @app.get("/risk/findings")
