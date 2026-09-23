@@ -100,7 +100,15 @@ test("operator evidence reaches confirmed state through the durable worker", asy
   // a vendor is approved, which is a judgement this system never makes.
   await expect(page.getByText(/Vendor matches the payee of/)).toBeVisible();
 
-  await page.getByRole("button", { name: "Accept & register evidence" }).click();
+  // Registration is blocked until a person has confirmed the fields a payment is resolved
+  // against. The model reports its own confidence and these are flagged regardless of it.
+  const register = page.getByRole("button", { name: /Accept & register evidence|Confirm \d+ field/ });
+  await expect(register).toBeDisabled();
+  for (const field of ["Invoice number", "Amount (minor units)", "Currency"]) {
+    await page.getByRole("checkbox", { name: `Confirm ${field}` }).check();
+  }
+  await expect(register).toBeEnabled();
+  await register.click();
   // Not complete until the backend has independently observed the expected registry event.
   await expect(page.getByText("Evidence registration confirmed")).toBeVisible({
     timeout: 60_000,

@@ -44,6 +44,7 @@ from .database import create_session_factory
 from .demo import INVOICE_BYTES, TAMPERED_INVOICE_BYTES, store
 from .domain import BlockchainStatus, Role, Visibility
 from .evidence import (
+    EvidenceAnalysisProvider,
     FileEvidenceStorage,
     MockEvidenceAnalysisProvider,
     ReconciliationService,
@@ -56,6 +57,7 @@ from .export import (
     outcomes_csv,
     provenance_csv,
 )
+from .extraction import SCHEMA_FIELDS, TinkerEvidenceAnalysisProvider, review_required_fields
 from .financial import (
     EvidenceReconciliationService,
     FinancialIngestionService,
@@ -105,15 +107,14 @@ session_factory = (
     else None
 )
 evidence_storage = FileEvidenceStorage(settings.evidence_storage_path)
-if settings.ai_provider != "mock":
-    # Accepting a provider name and then using the mock anyway is the same silent-fallback
-    # failure the specification forbids for chains. No real provider is implemented yet.
-    raise RuntimeError(
-        f"AI_PROVIDER={settings.ai_provider!r} is configured but no such provider is "
-        "implemented. Set AI_PROVIDER=mock, or implement the provider behind "
-        "EvidenceAnalysisProvider before selecting it."
-    )
-analysis_provider = MockEvidenceAnalysisProvider()
+# Accepting a provider name and then using the mock anyway would be the silent fallback
+# the specification forbids for chains, so an unknown name is refused at startup by
+# Settings rather than degraded here.
+analysis_provider: EvidenceAnalysisProvider = (
+    TinkerEvidenceAnalysisProvider(model=settings.extraction_model)
+    if settings.ai_provider == "tinker"
+    else MockEvidenceAnalysisProvider()
+)
 reconciliation_service = ReconciliationService()
 evidence_reconciliation = EvidenceReconciliationService(reconciliation_service)
 financial_provider = MockFinancialDataProvider()
@@ -266,20 +267,31 @@ class InvoiceExtraction(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # Required, because reconciliation resolves a payment against these and an operator
+    # confirms every one of them before registration. The rest are nullable: a real
+    # document need not carry an equipment line, and a model that invents one to satisfy
+    # a schema is worse than a model that says the document did not contain it.
     documentType: str
     invoiceNumber: str
-    vendor: str
     amountMinor: int = Field(ge=0)
     currency: str = Field(pattern=r"^[A-Z]{3}$")
-    date: str
-    equipment: str
-    quantity: int = Field(ge=1)
-    projectReference: str
-    confidence: float = Field(ge=0, le=1)
+    vendor: str | None = None
+    date: str | None = None
+    equipment: str | None = None
+    quantity: int | None = Field(default=None, ge=1)
+    projectReference: str | None = None
+    # Self-reported by the model and per field, so the operator screen can mark the ones
+    # worth looking at rather than presenting one number for the whole document.
+    selfReportedConfidence: dict[str, Annotated[float, Field(ge=0, le=1)]]
 
 
 class EvidenceReviewRequest(BaseModel):
     extraction: InvoiceExtraction
+    #: The fields the operator confirmed against the document in front of them. Reviewing
+    #: is the act this records, so the endpoint refuses a review that does not cover every
+    #: field the analysis flagged -- otherwise the confirmation is a checkbox in a browser
+    #: and the API registers whatever a model proposed.
+    confirmed: list[str] = Field(default_factory=list)
 
 
 class WalletSubmissionRequest(BaseModel):
@@ -351,6 +363,13 @@ def evidence_record_response(record: EvidenceRecord) -> dict[str, Any]:
         "visibility": record.visibility,
         "workflowStatus": record.workflow_status,
         "analysisStatus": record.analysis_status,
+        # Which fields a person has to confirm. Always includes the ones reconciliation
+        # resolves a payment against, whatever the model reported about its own certainty:
+        # a misread digit in an invoice number turns a matched payment into an unmatched
+        # one, and the model has been observed misreading exactly that field.
+        "reviewRequired": (
+            review_required_fields(record.extraction) if record.extraction else []
+        ),
         "integrityStatus": record.integrity_status,
         "blockchainStatus": record.blockchain_status,
         "extraction": record.extraction,
@@ -1071,6 +1090,26 @@ def analyze_evidence(evidence_id: str, user: CurrentUser = None):
     return item
 
 
+def _require_confirmation(analyzed: dict[str, Any] | None, confirmed: list[str]) -> list[str]:
+    """The fields a person confirmed, refusing the review when any flagged one is missing.
+
+    Checked against the extraction as the model produced it, not the one being submitted:
+    an operator who edits amountMinor to something they did not read off the document must
+    still say so, and a client could otherwise clear a flag by changing the value.
+    """
+    outstanding = sorted(set(review_required_fields(analyzed or {})) - set(confirmed))
+    if outstanding:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "CONFIRMATION_REQUIRED",
+                "message": "These fields must be confirmed by a person before registration",
+                "fields": outstanding,
+            },
+        )
+    return sorted(set(confirmed) & set(SCHEMA_FIELDS))
+
+
 @app.post("/evidence/{evidence_id}/review")
 def review_evidence(
     evidence_id: str,
@@ -1086,6 +1125,7 @@ def review_evidence(
                 raise HTTPException(404, "Evidence not found")
             if item.workflow_status != "ANALYZED":
                 raise HTTPException(409, "Only ANALYZED evidence can be reviewed")
+            confirmed = _require_confirmation(item.extraction, body.confirmed)
             reviewed_extraction = body.extraction.model_dump(mode="json")
             item.extraction = reviewed_extraction
             item.reconciliation = evidence_reconciliation.reconcile(
@@ -1096,6 +1136,7 @@ def review_evidence(
             item.workflow_status = "REVIEWED"
             metadata = dict(item.metadata_json or {})
             metadata["reviewedBy"] = "Global Water Initiative"
+            metadata["confirmedFields"] = confirmed
             item.metadata_json = metadata
             session.flush()
             return evidence_record_response(item)
@@ -1104,6 +1145,7 @@ def review_evidence(
         raise HTTPException(404, "Evidence not found")
     if item["workflowStatus"] != "ANALYZED":
         raise HTTPException(409, "Only ANALYZED evidence can be reviewed")
+    item["confirmedFields"] = _require_confirmation(item.get("extraction"), body.confirmed)
     item["extraction"] = body.extraction.model_dump(mode="json")
     item["workflowStatus"] = "REVIEWED"
     item["reviewedBy"] = "Global Water Initiative"

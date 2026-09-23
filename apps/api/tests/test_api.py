@@ -257,7 +257,11 @@ def test_operator_evidence_slice_is_submitted_but_not_registered(sign_in):
     analyzed = operator.post(f"/evidence/{evidence_id}/analyze")
     assert analyzed.json()["workflowStatus"] == "ANALYZED"
     reviewed = operator.post(
-        f"/evidence/{evidence_id}/review", json={"extraction": analyzed.json()["extraction"]}
+        f"/evidence/{evidence_id}/review",
+        json={
+            "extraction": analyzed.json()["extraction"],
+            "confirmed": analyzed.json()["reviewRequired"],
+        },
     )
     assert reviewed.json()["workflowStatus"] == "REVIEWED"
 
@@ -288,17 +292,20 @@ def test_operator_correction_is_validated_and_reconciled_again(sign_in):
         },
         files={"file": ("INV-8291.txt", b"Invoice INV-8291", "text/plain")},
     )
-    extraction = operator.post(f"/evidence/{evidence_id}/analyze").json()["extraction"]
+    analyzed = operator.post(f"/evidence/{evidence_id}/analyze").json()
+    extraction, confirmed = analyzed["extraction"], analyzed["reviewRequired"]
     extraction["amountMinor"] = 1
     reviewed = operator.post(
-        f"/evidence/{evidence_id}/review", json={"extraction": extraction}
+        f"/evidence/{evidence_id}/review",
+        json={"extraction": extraction, "confirmed": confirmed},
     )
     assert reviewed.status_code == 200
     assert reviewed.json()["reconciliation"]["status"] == "CONFLICT"
 
     extraction["amountMinor"] = -1
     rejected = operator.post(
-        f"/evidence/{evidence_id}/review", json={"extraction": extraction}
+        f"/evidence/{evidence_id}/review",
+        json={"extraction": extraction, "confirmed": confirmed},
     )
     assert rejected.status_code == 422
 
@@ -588,3 +595,53 @@ def test_the_graph_follows_provenance_edges_rather_than_a_fixed_payment():
             )
         )
     assert payments() == ["ftx-9182", "ftx-9184"]
+
+
+def test_evidence_cannot_be_registered_on_a_model_nobody_checked(sign_in):
+    """The operator screen blocks this, and the screen is not where a guarantee lives.
+
+    Two posts with an operator session were enough to put a misread invoice number on
+    chain: /review took whatever extraction it was handed and moved straight to REVIEWED.
+    """
+    operator = client()
+    sign_in(operator, OPERATOR)
+    evidence_id = "ev-unconfirmed-flow"
+    operator.post(
+        "/evidence",
+        headers={"Idempotency-Key": "unconfirmed-upload"},
+        data={
+            "evidence_id": evidence_id,
+            "project_id": "project-water-12",
+            "evidence_type": "INVOICE",
+            "visibility": "RESTRICTED",
+        },
+        files={"file": ("INV-8291.txt", b"Invoice INV-8291", "text/plain")},
+    )
+    analyzed = operator.post(f"/evidence/{evidence_id}/analyze").json()
+    flagged = analyzed["reviewRequired"]
+    assert {"invoiceNumber", "amountMinor", "currency"} <= set(flagged)
+
+    refused = operator.post(
+        f"/evidence/{evidence_id}/review", json={"extraction": analyzed["extraction"]}
+    )
+    assert refused.status_code == 422
+    assert refused.json()["detail"]["code"] == "CONFIRMATION_REQUIRED"
+    assert set(refused.json()["detail"]["fields"]) == set(flagged)
+
+    # Confirming all but one is still not a review.
+    partial = operator.post(
+        f"/evidence/{evidence_id}/review",
+        json={"extraction": analyzed["extraction"], "confirmed": flagged[1:]},
+    )
+    assert partial.status_code == 422
+    assert partial.json()["detail"]["fields"] == [flagged[0]]
+
+    # Nothing moved: the evidence is still waiting on a person.
+    assert operator.get(f"/evidence/{evidence_id}").json()["workflowStatus"] == "ANALYZED"
+
+    accepted = operator.post(
+        f"/evidence/{evidence_id}/review",
+        json={"extraction": analyzed["extraction"], "confirmed": flagged},
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["workflowStatus"] == "REVIEWED"

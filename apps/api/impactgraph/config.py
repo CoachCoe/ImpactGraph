@@ -82,6 +82,7 @@ class Settings:
         "text/plain",
     )
     ai_provider: str = "mock"
+    extraction_model: str = "thinkingmachines/Inkling-Small"
     worker_metrics_port: int = 9100
 
     @classmethod
@@ -113,6 +114,9 @@ class Settings:
                 if item.strip()
             ),
             ai_provider=os.getenv("AI_PROVIDER", "mock"),
+            extraction_model=os.getenv(
+                "EXTRACTION_MODEL", "thinkingmachines/Inkling-Small"
+            ),
             worker_metrics_port=int(os.getenv("WORKER_METRICS_PORT", "9100")),
         )
         if value.demo_mode == "sepolia" and value.chain_id != 11155111:
@@ -121,8 +125,12 @@ class Settings:
             raise ValueError("Sepolia requires RPC_URL and IMPACT_REGISTRY_ADDRESS")
         if value.confirmations_required < 1:
             raise ValueError("BLOCKCHAIN_CONFIRMATIONS_REQUIRED must be positive")
-        if value.ai_provider not in {"mock", "openai"}:
-            raise ValueError("AI_PROVIDER must be mock or openai")
+        if value.ai_provider not in {"mock", "tinker"}:
+            raise ValueError("AI_PROVIDER must be mock or tinker")
+        if value.ai_provider == "tinker" and not os.getenv("TINKER_API_KEY"):
+            # Refuse at startup rather than on the first upload, which would fail in
+            # front of an operator with a document they had already waited to hash.
+            raise ValueError("AI_PROVIDER=tinker requires TINKER_API_KEY")
         if value.persistence_mode not in {"postgres", "memory"}:
             raise ValueError("PERSISTENCE_MODE must be postgres or memory")
         return value
