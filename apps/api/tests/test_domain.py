@@ -1,6 +1,7 @@
 import os
 import tempfile
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -296,7 +297,6 @@ def test_registry_commitment_is_read_from_the_matching_event():
 
 def test_the_seed_does_not_fabricate_a_registry_reference():
     """A made-up transaction hash would be believed by anything reading the registry."""
-    import tempfile
     from pathlib import Path
 
     from sqlalchemy import create_engine, select
@@ -478,46 +478,56 @@ def test_the_migrations_build_the_schema_the_models_describe():
     They did. A new table's created_at was declared NOT NULL with no server default, which
     every other migration supplies and which the model relies on -- so every insert worked
     against the test database and failed against PostgreSQL with a not-null violation.
+
+    Run against PostgreSQL, because that is what the migrations are written for. One of
+    them alters a column's nullability, which SQLite accepts only in versions newer than
+    the one CI ships -- so checking this on SQLite passed here and failed there while
+    proving nothing about either.
     """
+    postgres = os.environ.get("TEST_POSTGRES_URL")
+    if not postgres:
+        pytest.skip("TEST_POSTGRES_URL is not set; the migrations need PostgreSQL")
+
     from alembic.config import Config
-    from sqlalchemy import create_engine, inspect
+    from sqlalchemy import create_engine, inspect, text
 
     from alembic import command
     from impactgraph.persistence import Base
 
-    # env.py takes the URL from the settings rather than the config, so the environment is
-    # what has to be pointed at the throwaway database.
-    migrated = Path(tempfile.mkdtemp()) / "migrated.db"
-    url = f"sqlite+pysqlite:///{migrated}"
+    # Its own database rather than a schema: alembic reads its settings through
+    # configparser, and a search_path option in the URL is percent-encoded, which
+    # configparser reads as interpolation syntax and refuses.
+    database = f"drift_{uuid4().hex[:12]}"
+    admin = create_engine(postgres, isolation_level="AUTOCOMMIT")
+    with admin.connect() as connection:
+        connection.execute(text(f'CREATE DATABASE "{database}"'))
+    url = postgres.rsplit("/", 1)[0] + f"/{database}"
+
     root = Path(__file__).resolve().parents[1]
     config = Config(str(root / "alembic.ini"))
     config.set_main_option("script_location", str(root / "alembic"))
+    # env.py takes the URL from the settings rather than the config.
     original = os.environ["DATABASE_URL"]
     os.environ["DATABASE_URL"] = url
     try:
         command.upgrade(config, "head")
-    finally:
-        os.environ["DATABASE_URL"] = original
+        migrated = create_engine(url)
+        inspector = inspect(migrated)
+        migrated_tables = set(inspector.get_table_names())
 
-    from_models = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(from_models)
-
-    migrated_tables = set(inspect(create_engine(url)).get_table_names())
-    model_tables = set(Base.metadata.tables)
-    assert model_tables - {"alembic_version"} <= migrated_tables, (
-        "a model has no table in the migrations"
-    )
-
-    migrated_engine = create_engine(url)
-    for table in sorted(model_tables):
-        columns = {c["name"] for c in inspect(migrated_engine).get_columns(table)}
-        expected = set(Base.metadata.tables[table].columns.keys())
-        assert expected <= columns, f"{table} is missing {expected - columns} in the migrations"
-        for column in inspect(migrated_engine).get_columns(table):
-            model_column = Base.metadata.tables[table].columns.get(column["name"])
-            if model_column is None or column["name"] != "created_at":
-                continue
-            assert column["default"] is not None, (
+        for table in sorted(Base.metadata.tables):
+            assert table in migrated_tables, f"{table} has no table in the migrations"
+            columns = {c["name"]: c for c in inspector.get_columns(table)}
+            expected = set(Base.metadata.tables[table].columns.keys())
+            assert expected <= set(columns), (
+                f"{table} is missing {expected - set(columns)} in the migrations"
+            )
+            assert columns["created_at"]["default"] is not None, (
                 f"{table}.created_at has no server default in the migrations, so every "
                 "insert relying on the model's will fail"
             )
+    finally:
+        os.environ["DATABASE_URL"] = original
+        migrated.dispose()
+        with admin.connect() as connection:
+            connection.execute(text(f'DROP DATABASE "{database}" WITH (FORCE)'))
