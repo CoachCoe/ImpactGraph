@@ -40,7 +40,15 @@ export type Claim = {
   attestations: Attestation[];
 };
 
-export type ProvenanceNode = { id: string; type: string; title: string; detail: string };
+export type ProvenanceNode = {
+  id: string;
+  type: string;
+  title: string;
+  detail: string;
+  method?: string;
+  source?: string;
+  confidencePercent?: number | null;
+};
 export type ProvenanceEdge = {
   source: string;
   relationship: string;

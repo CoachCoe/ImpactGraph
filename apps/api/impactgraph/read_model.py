@@ -219,6 +219,16 @@ def seed_read_model(session: Session, storage: EvidenceStorage | None = None) ->
             value=200,
             unit="households",
             region="Kisumu County",
+            # The programme is fictional, so the method says so. A line reading like a
+            # real survey instrument would make the demonstration assert something nobody
+            # measured, which is the failure every other fixture here is careful to avoid.
+            method=(
+                "Not measured. This programme is a demonstration fixture and the figure "
+                "is illustrative; a real outcome would name its instrument, its sample "
+                "and its window here."
+            ),
+            source="Seeded demonstration data",
+            confidence_percent=None,
         )
     )
     session.flush()
@@ -589,6 +599,9 @@ class TransparencyReadRepository:
                     "type": "OUTCOME",
                     "title": f"{row.value} {row.unit} served",
                     "detail": row.region,
+                    "method": row.method,
+                    "source": row.source,
+                    "confidencePercent": row.confidence_percent,
                 }
             )
         return nodes

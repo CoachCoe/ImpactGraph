@@ -365,3 +365,11 @@ class OutcomeRecord(EntityMixin, Base):
     value: Mapped[int] = mapped_column(Integer)
     unit: Mapped[str] = mapped_column(String(80))
     region: Mapped[str] = mapped_column(String(240), default="")
+    # How the figure was arrived at, where it came from, and how sure anyone is. Without
+    # these an outcome is the one number on the page a reader simply has to believe, which
+    # is what the rest of this system exists to avoid.
+    method: Mapped[str] = mapped_column(String(400), default="")
+    source: Mapped[str] = mapped_column(String(240), default="")
+    # Percent, or NULL where the method does not produce one. Nought and unknown are
+    # different answers and a column that cannot hold the difference invents one.
+    confidence_percent: Mapped[int | None] = mapped_column(Integer, nullable=True)
