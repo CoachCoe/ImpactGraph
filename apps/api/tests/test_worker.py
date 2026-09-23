@@ -500,16 +500,19 @@ def test_the_adapter_decodes_every_event_an_operation_waits_for():
     role was held; the database said the grant failed.
     """
     import json
-    from pathlib import Path
 
     from impactgraph.blockchain import EvmBlockchainService
+    from impactgraph.config import _resolve_artifact_path
 
     awaited = {"ProgramCreated", "ClaimCreated", "EvidenceRegistered", "AttestationCreated", "RoleGranted"}
     assert awaited <= set(EvmBlockchainService.event_names)
 
     # And each one is really declared by the contract, not merely spelled plausibly here.
-    artifact = json.loads(
-        Path("../../contracts/out/ImpactRegistry.sol/ImpactRegistry.json").read_text()
-    )
+    # Located the way the application locates it rather than by a path relative to the
+    # working directory, which resolved only where the contracts had already been built.
+    artifact_path = _resolve_artifact_path(None)
+    if not artifact_path.is_file():
+        pytest.skip(f"{artifact_path} is not built; run 'cd contracts && forge build'")
+    artifact = json.loads(artifact_path.read_text())
     declared = {item["name"] for item in artifact["abi"] if item.get("type") == "event"}
     assert set(EvmBlockchainService.event_names) <= declared
