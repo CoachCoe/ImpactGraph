@@ -234,3 +234,68 @@ def test_a_timestamp_reads_the_same_whether_it_was_just_written_or_read_back():
     second = client.post(f"/claims/{CLAIM}/publish").json()["publishedAt"]
     assert first == second
     assert first.endswith("+00:00")
+
+
+# --- The badge an organisation puts on its own site ---
+
+
+def test_a_badge_exists_only_for_a_claim_that_was_published(anonymous):
+    assert anonymous.get(f"/claims/{CLAIM}/badge.svg").status_code == 404
+    operator_client().post(f"/claims/{CLAIM}/publish")
+    assert anonymous.get(f"/claims/{CLAIM}/badge.svg").status_code == 200
+
+
+def test_a_badge_stops_claiming_verification_the_moment_it_is_withdrawn(anonymous):
+    """Every copy of this badge in the world is asserting something. When the claim is
+    challenged they must all stop asserting it, or the product's central promise is a lie
+    held in someone else's cache."""
+    from sqlalchemy import select as _select
+
+    from impactgraph.persistence import ClaimRecord
+
+    operator_client().post(f"/claims/{CLAIM}/publish")
+    assert session_factory is not None
+    with session_factory.begin() as session:
+        session.scalar(_select(ClaimRecord).where(ClaimRecord.external_id == CLAIM)).status = (
+            "VERIFIED"
+        )
+    assert "Independently verified" in anonymous.get(f"/claims/{CLAIM}/badge.svg").text
+
+    with session_factory.begin() as session:
+        session.scalar(_select(ClaimRecord).where(ClaimRecord.external_id == CLAIM)).status = (
+            "CHALLENGED"
+        )
+    withdrawn = anonymous.get(f"/claims/{CLAIM}/badge.svg")
+    assert "Independently verified" not in withdrawn.text
+    assert "Verification withdrawn" in withdrawn.text
+
+
+def test_a_badge_may_not_be_cached_for_longer_than_it_can_be_trusted(anonymous):
+    """A long cache on this is not a performance decision, it is how long the world is
+    allowed to keep believing something that may have stopped being true."""
+    from impactgraph.main import BADGE_MAX_AGE_SECONDS
+
+    operator_client().post(f"/claims/{CLAIM}/publish")
+    headers = anonymous.get(f"/claims/{CLAIM}/badge.svg").headers
+    assert f"max-age={BADGE_MAX_AGE_SECONDS}" in headers["cache-control"]
+    assert "must-revalidate" in headers["cache-control"]
+    assert BADGE_MAX_AGE_SECONDS <= 600, "a badge believed for longer than ten minutes"
+
+
+def test_a_badge_shows_its_own_age(anonymous):
+    """So a copy served from somebody's stale cache says when it was rendered rather than
+    presenting itself as current."""
+    from datetime import UTC, datetime
+
+    operator_client().post(f"/claims/{CLAIM}/publish")
+    assert datetime.now(UTC).strftime("%d %b %Y") in anonymous.get(
+        f"/claims/{CLAIM}/badge.svg"
+    ).text
+
+
+def test_the_badge_is_an_image_a_browser_will_render(anonymous):
+    operator_client().post(f"/claims/{CLAIM}/publish")
+    badge = anonymous.get(f"/claims/{CLAIM}/badge.svg")
+    assert badge.headers["content-type"].startswith("image/svg+xml")
+    assert badge.text.startswith("<svg")
+    assert 'role="img"' in badge.text and "aria-label" in badge.text
