@@ -30,6 +30,7 @@ from .database import create_session_factory
 from .demo import INVOICE_BYTES, store
 from .domain import BlockchainStatus
 from .evidence import FileEvidenceStorage
+from .financial import FinancialIngestionService, MockFinancialDataProvider
 from .hashing import claim_hash, hash_fields, program_hash, sha256_bytes
 from .metrics import REGISTRY
 from .notifications import ConsoleNotificationTransport, NotificationDispatcher
@@ -38,6 +39,7 @@ from .persistence import (
     BlockchainOperationRecord,
     EvidenceRecord,
     ProcessedChainEventRecord,
+    ProgramRecord,
     ProviderCredentialRecord,
 )
 from .read_model import (
@@ -716,6 +718,37 @@ def rotate_encryption_key() -> dict[str, int]:
     return {"resealed": resealed, "skipped": skipped, "credentials": credentials}
 
 
+def financial_sync_loop(interval_seconds: float) -> None:
+    """Import statements on a schedule rather than when somebody remembers.
+
+    Its own process, like retention and notifications. A bank feed that is slow or down
+    must not hold up a registration, and a chain fault must not stop the money arriving.
+
+    Importing is already idempotent by the provider's own reference, so a run that
+    overlaps a manual import records nothing twice.
+    """
+    configure_logging()
+    settings = Settings.from_env()
+    factory = create_session_factory(settings.database_url)
+    service = FinancialIngestionService(MockFinancialDataProvider())
+    log.info("financial_sync.started", interval_seconds=interval_seconds)
+    while True:
+        try:
+            with factory.begin() as session:
+                for program in session.scalars(select(ProgramRecord)):
+                    imported = service.import_statement(session, program.slug)
+                    if imported:
+                        log.info(
+                            "financial_sync.imported",
+                            program=program.slug,
+                            transactions=len(imported),
+                        )
+        except Exception as exc:  # noqa: BLE001 -- must outlive a transient provider fault
+            # The class, never the text: a provider error can carry a URL with a token in it.
+            log.error("financial_sync.failed", error_type=exc.__class__.__name__)
+        time.sleep(interval_seconds)
+
+
 def notification_loop(interval_seconds: float) -> None:
     """Drain notification intent from the outbox.
 
@@ -769,6 +802,10 @@ def main() -> None:
     notify.add_argument("--interval", type=float, default=5.0)
     sub.add_parser("retention-once")
     sub.add_parser("rotate-encryption-key")
+    sync = sub.add_parser("financial-sync")
+    # Hourly: a bank feed does not change faster than that, and a tighter loop is requests
+    # against somebody's rate limit for no new information.
+    sync.add_argument("--interval", type=float, default=3600.0)
     retention = sub.add_parser("retention")
     # Hourly by default: a retention period is measured in years, and checking more often
     # would be load without meaning.
@@ -794,6 +831,8 @@ def main() -> None:
         worker_loop(args.interval)
     elif args.command == "notifications":
         notification_loop(args.interval)
+    elif args.command == "financial-sync":
+        financial_sync_loop(args.interval)
     elif args.command == "rotate-encryption-key":
         rotate_encryption_key()
     elif args.command == "retention-once":
