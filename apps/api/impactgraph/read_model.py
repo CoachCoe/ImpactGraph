@@ -31,6 +31,7 @@ from .persistence import (
     AuditLogRecord,
     BlockchainOperationRecord,
     ClaimRecord,
+    DataProtectionRecord,
     DeliveryRecord,
     DomainEntityRecord,
     EvidenceRecord,
@@ -358,6 +359,10 @@ def reset_read_model(session: Session, storage: EvidenceStorage | None = None) -
         BlockchainOperationRecord,
         IdempotencyRecord,
         AuditLogRecord,
+        # Before the evidence it describes: a record of what made holding an object
+        # lawful must not outlive the object and attach itself to the next one reusing
+        # the identifier.
+        DataProtectionRecord,
         ProvenanceEdgeRecord,
         AttestationRecord,
         ClaimRecord,
