@@ -453,3 +453,11 @@ footer{margin-top:24px;padding:36px var(--gutter) 56px;background:var(--ink-deep
 .programRow small{display:block;color:var(--muted);margin-top:3px;font-size:12px}
 .projectPicker{display:flex;flex-direction:column;gap:6px;margin:16px 0 0;font-family:var(--font-mono);font-size:10px;letter-spacing:var(--track-label-sm);text-transform:uppercase;color:var(--muted)}
 .projectPicker select{width:100%;padding:10px;border:1px solid var(--ghost-line);border-radius:7px;background:var(--field);color:var(--ink);font-family:var(--font-sans);font-size:14px;letter-spacing:0;text-transform:none}
+.personalDataCheck{display:flex;align-items:flex-start;gap:10px;margin:16px 0 0;font-size:13px}
+.personalDataCheck input{width:auto;margin:2px 0 0}
+.personalDataCheck small{display:block;color:var(--muted);margin-top:3px;font-size:12px;line-height:1.5}
+.basisPanel{margin-top:20px;padding:16px 18px;border:1px solid var(--warn);border-radius:9px;background:var(--warn-wash)}
+.basisPanel h3{margin:6px 0 2px;font-size:16px}
+.basisPanel label{display:block;margin-top:12px;font-family:var(--font-mono);font-size:10px;letter-spacing:var(--track-label-sm);text-transform:uppercase;color:var(--muted)}
+.basisPanel input,.basisPanel select{width:100%;margin-top:5px;padding:9px;border:1px solid var(--ghost-line);border-radius:7px;background:var(--field);color:var(--ink);font-family:var(--font-sans);font-size:14px;letter-spacing:0;text-transform:none}
+.basisPanel .button{margin-top:16px}
