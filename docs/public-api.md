@@ -45,13 +45,26 @@ withdrawn.
 60 requests per minute per caller. Every response carries `X-RateLimit-Limit` and
 `X-RateLimit-Remaining`; exceeding it answers `429` with `Retry-After`.
 
-The limit is held in the API process, which means it is one worker's view of one client.
-That is enough to stop a script hammering the database and is not enough to stop anyone
-determined, and this file would rather say so than imply a guarantee that is not there. A
-deployment behind a proxy should limit there as well.
+The limit is held in the API process, so it is one worker's view of one caller. Run two
+workers and the effective limit is twice what this says. It is a brake on accidental
+hammering, not a security control, and a deployment that needs one should limit at the
+proxy as well.
 
-Callers are distinguished by `X-Forwarded-For` where a proxy sets it, falling back to the
-connecting address.
+A caller is identified by the connecting address. `X-Forwarded-For` is **only** believed
+when the connecting address is listed in `TRUSTED_PROXY_ADDRESSES`, because the header is
+set by whoever is calling: believing it unconditionally means a caller sends a different
+value on every request and has no limit at all.
+
+The consequence of leaving that unset while running behind a proxy is that every caller
+looks like the proxy and shares one quota. That is the safe way round, and it is the
+reason to configure it rather than a reason not to.
+
+## Naming the people behind a record
+
+An organisation that funded a programme is named. A private individual is not, on any
+public surface — this API, the proof page, the provenance graph, the money trail or the
+CSV exports — unless that person used their own consent link to ask to be. Nobody else
+can make that choice for them, including the organisation that received the money.
 
 ## The badge
 

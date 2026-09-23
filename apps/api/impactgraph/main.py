@@ -1198,8 +1198,17 @@ def grant_verifier_role(
 
 
 class FunderNameChoice(BaseModel):
+    """The funder's decision, with the link that authorises it.
+
+    The token is in the body rather than the path because a path is written down: the
+    access log, the proxy log, the browser history and the Referer of anything the page
+    links to. Hashing it at rest and then handing it to the one component guaranteed to
+    record it would have been pointless.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
+    token: str = Field(min_length=32, max_length=128)
     publish: bool
 
 
@@ -1225,8 +1234,8 @@ def request_funder_name_consent(request: Request, funding_id: str, user: Current
     )
 
 
-@app.post("/funding/name-consent/{token}")
-def choose_funder_name_publication(request: Request, token: str, body: FunderNameChoice):
+@app.post("/funding/name-consent")
+def choose_funder_name_publication(request: Request, body: FunderNameChoice):
     """The funder's own decision, made with their own link.
 
     Unauthenticated because the link is the authority, in the same way the notification
@@ -1239,7 +1248,7 @@ def choose_funder_name_publication(request: Request, token: str, body: FunderNam
     return _tenant_write(
         lambda session: service.set_publication(
             session,
-            token=token,
+            token=body.token,
             publish=body.publish,
             correlation_id=request.state.correlation_id,
         )

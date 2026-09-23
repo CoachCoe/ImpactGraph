@@ -12,6 +12,7 @@ not pretend otherwise.
 
 from __future__ import annotations
 
+import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -39,6 +40,9 @@ class RateLimiter:
     requests: int = RATE_LIMIT_REQUESTS
     window: float = RATE_LIMIT_WINDOW_SECONDS
     _seen: dict[str, deque[float]] = field(default_factory=dict)
+    #: Sweeping on every request would be wasted work at low volume, and never sweeping
+    #: is the leak. Swept when the table is larger than this and a client has gone quiet.
+    _sweep_above: int = 512
     _lock: Lock = field(default_factory=Lock)
 
     def check(self, client: str) -> tuple[bool, int]:
@@ -48,10 +52,27 @@ class RateLimiter:
             hits = self._seen.setdefault(client, deque())
             while hits and now - hits[0] > self.window:
                 hits.popleft()
+            if not hits and len(self._seen) > self._sweep_above:
+                self._sweep(now)
             if len(hits) >= self.requests:
                 return False, 0
             hits.append(now)
             return True, self.requests - len(hits)
+
+    def _sweep(self, now: float) -> None:
+        """Drop clients with nothing left in the window.
+
+        Without this every distinct address lives for the life of the process. That was an
+        unbounded dictionary a caller could grow, and it is only survivable now because a
+        client is a peer address rather than a header anyone can invent.
+        """
+        stale = [
+            client
+            for client, hits in self._seen.items()
+            if not hits or now - hits[-1] > self.window
+        ]
+        for client in stale:
+            del self._seen[client]
 
     def forget(self) -> None:
         with self._lock:
@@ -62,11 +83,30 @@ limiter = RateLimiter()
 router = APIRouter(prefix="/v1", tags=["public"])
 
 
+def trusted_proxies() -> set[str]:
+    """Addresses whose `X-Forwarded-For` may be believed.
+
+    Empty by default. The header is set by the caller, so believing it unconditionally
+    means anyone sends a different value per request and has no limit at all -- which is
+    what this did, and three lines of shell proved it.
+    """
+    configured = os.getenv("TRUSTED_PROXY_ADDRESSES", "")
+    return {item.strip() for item in configured.split(",") if item.strip()}
+
+
 def _client(request: Request) -> str:
-    # The proxy's idea of the caller where there is one, because otherwise every request
-    # through it counts as the same client and the first caller exhausts everyone's quota.
+    """Who to count this request against.
+
+    The peer address unless the peer is a proxy this deployment configured, in which case
+    the address that proxy reports. Without that check a caller sets the header and the
+    limit evaporates; with it, an unconfigured deployment behind a proxy counts every
+    caller as one, which the documentation says and which is the safe way round.
+    """
+    peer = request.client.host if request.client else "unknown"
+    if peer not in trusted_proxies():
+        return peer
     forwarded = request.headers.get("x-forwarded-for", "")
-    return forwarded.split(",")[0].strip() or (request.client.host if request.client else "unknown")
+    return forwarded.split(",")[0].strip() or peer
 
 
 def enforce_rate_limit(request: Request, response: Response) -> None:

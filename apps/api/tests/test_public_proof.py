@@ -8,6 +8,8 @@ only one who can decide to be named.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -87,7 +89,7 @@ def test_a_funder_can_name_themselves_and_change_their_mind():
     token = client.post(f"/funding/{FUNDING}/name-consent").json()["token"]
 
     published = TestClient(app).post(
-        f"/funding/name-consent/{token}", json={"publish": True}
+        "/funding/name-consent", json={"token": token, "publish": True}
     )
     assert published.status_code == 200, published.text
     assert published.json()["shownAs"] == "Jane Smith"
@@ -97,7 +99,7 @@ def test_a_funder_can_name_themselves_and_change_their_mind():
     )
 
     withdrawn = TestClient(app).post(
-        f"/funding/name-consent/{token}", json={"publish": False}
+        "/funding/name-consent", json={"token": token, "publish": False}
     )
     assert withdrawn.json()["shownAs"] == REDACTED_FUNDER
     assert (
@@ -108,7 +110,8 @@ def test_a_funder_can_name_themselves_and_change_their_mind():
 
 def test_a_link_nobody_was_given_does_not_work():
     refused = TestClient(app).post(
-        "/funding/name-consent/not-a-real-token", json={"publish": True}
+        "/funding/name-consent",
+        json={"token": "x" * 48, "publish": True},
     )
     assert refused.status_code == 404
 
@@ -118,7 +121,7 @@ def test_the_consent_record_does_not_write_the_name_down_again():
 
     client = operator_client()
     token = client.post(f"/funding/{FUNDING}/name-consent").json()["token"]
-    TestClient(app).post(f"/funding/name-consent/{token}", json={"publish": True})
+    TestClient(app).post("/funding/name-consent", json={"token": token, "publish": True})
 
     assert session_factory is not None
     with session_factory() as session:
@@ -364,16 +367,87 @@ def test_hammering_the_public_api_is_refused_with_a_reason_and_a_retry(anonymous
     assert refused.headers["Retry-After"]
 
 
-def test_the_limit_is_per_caller_and_not_shared_by_everyone_behind_a_proxy(anonymous):
-    """Counting every request through a proxy as one client means the first caller
-    exhausts the quota for all of them."""
+def test_a_caller_cannot_hand_themselves_a_fresh_quota(anonymous):
+    """X-Forwarded-For is set by whoever is calling. Believing it unconditionally meant a
+    different value per request and no limit at all -- three lines of shell proved it."""
     from impactgraph.public_api import RATE_LIMIT_REQUESTS
+
+    for attempt in range(RATE_LIMIT_REQUESTS):
+        assert anonymous.get(
+            "/v1/claims", headers={"X-Forwarded-For": f"203.0.113.{attempt}"}
+        ).status_code == 200
+    assert anonymous.get(
+        "/v1/claims", headers={"X-Forwarded-For": "198.51.100.7"}
+    ).status_code == 429
+
+
+def test_a_configured_proxy_is_believed_about_who_is_calling(anonymous, monkeypatch):
+    """Otherwise every caller behind it counts as one, and the first exhausts the quota
+    for all of them."""
+    from impactgraph.public_api import RATE_LIMIT_REQUESTS, trusted_proxies
+
+    trusted_proxies.cache_clear() if hasattr(trusted_proxies, "cache_clear") else None
+    monkeypatch.setenv("TRUSTED_PROXY_ADDRESSES", "testclient")
 
     for _ in range(RATE_LIMIT_REQUESTS):
         anonymous.get("/v1/claims", headers={"X-Forwarded-For": "203.0.113.5"})
     assert anonymous.get(
         "/v1/claims", headers={"X-Forwarded-For": "203.0.113.5"}
     ).status_code == 429
+    # A different caller behind the same proxy still has their own.
     assert anonymous.get(
         "/v1/claims", headers={"X-Forwarded-For": "198.51.100.7"}
     ).status_code == 200
+
+
+def test_the_limiter_does_not_grow_for_ever():
+    """Every distinct client used to live for the life of the process."""
+    from impactgraph.public_api import RateLimiter
+
+    limiter = RateLimiter(requests=2, window=0.01)
+    limiter._sweep_above = 4
+    for index in range(50):
+        limiter.check(f"client-{index}")
+    time.sleep(0.02)
+    limiter.check("someone-new")
+    assert len(limiter._seen) < 50, "clients that went quiet were never dropped"
+
+
+def test_no_public_surface_names_a_private_individual(anonymous):
+    """Enumerated rather than remembered. Four call sites were found by reading and a
+    fifth was not: the CSV export, which is the one surface designed to leave the building
+    and be opened in somebody else's spreadsheet.
+    """
+    operator_client().post(f"/claims/{CLAIM}/publish")
+    surfaces = {
+        "provenance": f"/claims/{CLAIM}/provenance",
+        "claim": f"/claims/{CLAIM}",
+        "proof": f"/claims/{CLAIM}/proof",
+        "public api list": "/v1/claims",
+        "public api claim": f"/v1/claims/{CLAIM}",
+        "money trail": f"/financial/programs/{PROGRAM}",
+        "funding attribution": f"/financial/funding/{FUNDING}/attribution",
+        "money trail export": f"/export/programs/{PROGRAM}/money-trail.csv",
+        "outcomes export": f"/export/programs/{PROGRAM}/outcomes.csv",
+        "provenance export": f"/export/claims/{CLAIM}/provenance.csv",
+        "evidence export": f"/export/claims/{CLAIM}/evidence.csv",
+        "badge": f"/claims/{CLAIM}/badge.svg",
+    }
+    leaked = []
+    for name, path in surfaces.items():
+        response = anonymous.get(path)
+        assert response.status_code == 200, f"{name} answered {response.status_code}"
+        if "Jane Smith" in response.text:
+            leaked.append(name)
+    assert leaked == [], f"a private individual is named by: {', '.join(leaked)}"
+
+
+def test_the_consent_link_is_never_written_into_a_url():
+    """A path is recorded: the access log, the proxy log, the browser history and the
+    Referer of anything the page links to. Hashing the token at rest and then handing it
+    to the one component guaranteed to write it down would have been pointless."""
+    paths = {getattr(route, "path", "") for route in app.routes}
+    assert "/funding/name-consent" in paths
+    assert not any(
+        path.startswith("/funding/name-consent/") for path in paths
+    ), "the consent token is in a path, and paths are logged"

@@ -30,6 +30,7 @@ from .persistence import (
     FinancialTransactionRecord,
     FundingRecord,
     OutcomeRecord,
+    public_funder_name,
 )
 from .verification import claim_subgraph
 
@@ -115,7 +116,10 @@ def money_trail_csv(session: Session, program_ref: str) -> str:
             {
                 "record_type": "FUNDING",
                 "id": item.external_id,
-                "counterparty": item.funder_name,
+                # The same rule as every other surface. This one leaves the building and
+                # is opened in somebody else's spreadsheet, so it is the last place a
+                # private individual's name should have survived.
+                "counterparty": public_funder_name(item),
                 "amount_minor": item.amount_minor,
                 "currency": item.currency,
                 "occurred_on": item.received_on,
