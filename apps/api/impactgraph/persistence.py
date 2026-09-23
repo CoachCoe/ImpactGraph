@@ -227,6 +227,77 @@ class ProviderCredentialRecord(EntityMixin, Base):
     )
 
 
+class BeneficiaryContactRecord(EntityMixin, Base):
+    """Someone a delivery is meant to have reached, held as little as possible.
+
+    A list of aid recipients tied to deliveries is a targeting aid in a conflict or a
+    hostile administrative setting -- displacement, household composition and receipt of
+    assistance are all inferable from it. So the number is sealed, the lookup is by salted
+    hash, and no route returns either.
+
+    Enrolment is separate from delivery in time on purpose. An operator who controls both
+    at the same moment controls who gets asked.
+    """
+
+    __tablename__ = "beneficiary_contacts"
+    program_ref: Mapped[str] = mapped_column(String(160), index=True)
+    #: Salted hash of the phone number. Deduplicates and rate-limits without a directory.
+    contact_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    #: Sealed under the same key as evidence, readable only by the dispatch process.
+    sealed_contact: Mapped[bytes] = mapped_column(LargeBinary)
+    #: Not a name. A reference the operating organisation can resolve if it must, which
+    #: this system deliberately cannot.
+    household_ref: Mapped[str] = mapped_column(String(160), default="")
+    language: Mapped[str] = mapped_column(String(8), default="en")
+    #: Asked to stop. Honoured before anything else is considered.
+    opted_out_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ConfirmationRoundRecord(EntityMixin, Base):
+    """One attempt to ask a sample of people whether a delivery reached them.
+
+    The seed and the method are stored so a third party can re-derive exactly who was
+    selected. Without that, "we sampled randomly" is an assertion by the organisation
+    being checked.
+    """
+
+    __tablename__ = "confirmation_rounds"
+    external_id: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    delivery_ref: Mapped[str] = mapped_column(String(160), index=True)
+    program_ref: Mapped[str] = mapped_column(String(160), index=True)
+    seed: Mapped[str] = mapped_column(String(160))
+    method: Mapped[str] = mapped_column(Text)
+    population: Mapped[int] = mapped_column(Integer)
+    sample_size: Mapped[int] = mapped_column(Integer)
+    #: Set when dispatch actually happened, which requires the safeguarding review.
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ConfirmationResponseRecord(EntityMixin, Base):
+    """One answer, stored so that it cannot be attributed back to a person by anyone
+    using this system.
+
+    The contact hash links a response to a round for deduplication and nothing else. No
+    API returns a response row; only counts, and only above a sample size at which a
+    dissenter cannot be identified by elimination.
+    """
+
+    __tablename__ = "confirmation_responses"
+    __table_args__ = (
+        UniqueConstraint("round_ref", "contact_hash", name="uq_confirmation_one_per_person"),
+    )
+    round_ref: Mapped[str] = mapped_column(String(160), index=True)
+    contact_hash: Mapped[str] = mapped_column(String(64), index=True)
+    #: CONFIRMED / DISPUTED / NO_ANSWER. Not free text: a structured answer can be counted
+    #: without being read, and a free-text one cannot be published without exposing
+    #: whoever wrote it.
+    answer: Mapped[str] = mapped_column(String(16), index=True)
+    responded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class DataProtectionRecord(EntityMixin, Base):
     """What makes holding one evidence object lawful, and who is answerable for it.
 

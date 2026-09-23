@@ -38,6 +38,10 @@ class VerificationContext:
     required_verifications: int
     current_bundle_hash: str
     operator_id: str
+    #: What the people the claim describes said, where they were asked. None means no
+    #: round has been run, which is not the same as nobody confirming.
+    beneficiary_confirmed: int | None = None
+    beneficiary_disputed: int = 0
 
     @property
     def _current(self) -> tuple[ConfirmedVerification, ...]:
@@ -108,6 +112,7 @@ class VerificationPolicyService:
                 "The operating organisation has attested this claim",
                 "Required operator attestation is missing",
             ),
+            self._beneficiary_requirement(context),
             self._require(
                 "INDEPENDENT_VERIFICATION",
                 len(context.qualifying_issuers) >= context.required_verifications,
@@ -178,6 +183,38 @@ class VerificationPolicyService:
         return (
             f"{len(context.qualifying_issuers)} of {context.required_verifications} required "
             f"independent verifications {suffix}"
+        )
+
+    @staticmethod
+    def _beneficiary_requirement(context: VerificationContext) -> PolicyRequirement:
+        """What the people the claim describes said.
+
+        A dispute FAILS: somebody who received the aid says it did not arrive as
+        described, and that is the most direct evidence this system can hold. Nothing
+        above it in the trust model outranks it.
+
+        No round is a WARNING and not a failure. The channel is disabled until the
+        safeguarding review is signed off, so a hard requirement would stall every
+        legitimate claim to enforce a check nobody is allowed to run yet -- and it would
+        make the pressure to switch the channel on come from the wrong direction.
+        """
+        if context.beneficiary_disputed > 0:
+            return PolicyRequirement(
+                "BENEFICIARY_CONFIRMATION",
+                Result.FAIL,
+                f"{context.beneficiary_disputed} of the people asked dispute this delivery",
+            )
+        if context.beneficiary_confirmed is None:
+            return PolicyRequirement(
+                "BENEFICIARY_CONFIRMATION",
+                Result.WARNING,
+                "Nobody the claim describes has been asked. This rests on the operating "
+                "organisation's account of what happened.",
+            )
+        return PolicyRequirement(
+            "BENEFICIARY_CONFIRMATION",
+            Result.PASS,
+            f"{context.beneficiary_confirmed} of the people asked confirm this delivery",
         )
 
     @staticmethod
