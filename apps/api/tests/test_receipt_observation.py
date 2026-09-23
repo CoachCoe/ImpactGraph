@@ -89,7 +89,6 @@ def adapter(emitting_address: str) -> EvmBlockchainService:
     service = EvmBlockchainService.__new__(EvmBlockchainService)
     service.web3 = StubWeb3()
     service.contract = StubContract(emitting_address)
-    service.sender = None
     return service
 
 
