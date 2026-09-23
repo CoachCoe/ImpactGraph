@@ -1,3 +1,8 @@
+// Every test file, not whichever one happens to import it first. jsdom provides no
+// IndexedDB, and the operator page mounts field capture, so a test that never mentions
+// the queue still needs one. Leaving it to individual files passed here and failed in CI
+// on nothing but file ordering.
+import "fake-indexeddb/auto";
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { afterEach } from "vitest";

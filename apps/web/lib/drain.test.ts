@@ -1,4 +1,3 @@
-import "fake-indexeddb/auto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { all, put, remove, type Capture } from "./capture-queue";
 import { drain } from "./drain";
