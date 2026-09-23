@@ -38,8 +38,15 @@ export default async function ProofPage({ params }: Params) {
   if (found.state === "unavailable") return <Unavailable />;
   if (found.state === "missing") return <NotPublished />;
 
-  const { claim, operator, requirements, attestations, onchain, proves, doesNotProve } =
-    found.data;
+  const {
+    claim,
+    operator,
+    requirements,
+    attestations,
+    onchain,
+    proves,
+    doesNotProve,
+  } = found.data;
   const standing = claimStanding(claim.status);
   const network = networkInfo();
 
@@ -59,7 +66,10 @@ export default async function ProofPage({ params }: Params) {
         <h2>What was checked</h2>
         <ul className="checks">
           {requirements.map((item) => (
-            <li key={item.requirement} className={item.status === "PASS" ? "pass" : "warning"}>
+            <li
+              key={item.requirement}
+              className={item.status === "PASS" ? "pass" : "warning"}
+            >
               <b aria-hidden>{item.status === "PASS" ? "✓" : "!"}</b>
               <span>
                 {requirementLabel(item.requirement)}
@@ -75,7 +85,9 @@ export default async function ProofPage({ params }: Params) {
         <dl className="proofFacts">
           <div>
             <dt>Verification bundle</dt>
-            <dd className="hash">{claim.verificationBundleHash ?? "Not yet bundled"}</dd>
+            <dd className="hash">
+              {claim.verificationBundleHash ?? "Not yet bundled"}
+            </dd>
           </div>
           <div>
             <dt>Claim commitment</dt>
@@ -83,10 +95,14 @@ export default async function ProofPage({ params }: Params) {
           </div>
           {attestations.map((item) => (
             <div key={item.id}>
-              <dt>{item.type === "OPERATOR" ? "Operator" : "Independent verifier"}</dt>
+              <dt>
+                {item.type === "OPERATOR" ? "Operator" : "Independent verifier"}
+              </dt>
               <dd>
                 {item.issuer}
-                {item.wallet ? <span className="hash">{item.wallet}</span> : null}
+                {item.wallet ? (
+                  <span className="hash">{item.wallet}</span>
+                ) : null}
               </dd>
             </div>
           ))}
@@ -98,7 +114,8 @@ export default async function ProofPage({ params }: Params) {
           </p>
         ) : (
           <p className="note">
-            No independent attestation has been signed on a chain for this claim yet.
+            No independent attestation has been signed on a chain for this claim
+            yet.
           </p>
         )}
       </section>
@@ -125,8 +142,8 @@ export default async function ProofPage({ params }: Params) {
       <section className="panel">
         <h2>Check it yourself</h2>
         <p className="subtle">
-          Nothing here asks you to take our word for it. Follow the evidence to the
-          documents, re-run the integrity check, and read the method.
+          Nothing here asks you to take our word for it. Follow the evidence to
+          the documents, re-run the integrity check, and read the method.
         </p>
         <div className="uploadActions">
           <Link className="button" href={`/claims/${claim.id}`}>
@@ -138,32 +155,77 @@ export default async function ProofPage({ params }: Params) {
         </div>
       </section>
 
+      {/* Printed for a grant application or a board pack. The hashes and the address of
+          this page go with it, so a printed copy stays checkable rather than becoming a
+          claim on paper that nobody can follow back. */}
+      <section className="panel printOnly">
+        <h2>Checking this from a printed copy</h2>
+        <dl className="proofFacts">
+          <div>
+            <dt>This page</dt>
+            <dd className="hash">/proof/{claim.id}</dd>
+          </div>
+          <div>
+            <dt>Claim commitment</dt>
+            <dd className="hash">{claim.payloadHash}</dd>
+          </div>
+          <div>
+            <dt>Verification bundle</dt>
+            <dd className="hash">
+              {claim.verificationBundleHash ?? "Not yet bundled"}
+            </dd>
+          </div>
+          {onchain?.transactionHash ? (
+            <div>
+              <dt>Attestation transaction</dt>
+              <dd className="hash">{onchain.transactionHash}</dd>
+            </div>
+          ) : null}
+        </dl>
+        <p className="note">
+          Printed from a page that shows live status. Open the address above to
+          see what it says now.
+        </p>
+      </section>
+
       <EmbedBadge claimId={claim.id} statement={claim.statement} />
 
       <p className="proofFooter">
-        Verified on <Link href="/">ImpactGraph</Link> · this page shows the claim&rsquo;s
-        current status, not the status on the day it was shared.
+        Verified on <Link href="/">ImpactGraph</Link> · this page shows the
+        claim&rsquo;s current status, not the status on the day it was shared.
       </p>
     </div>
   );
 }
 
-function EmbedBadge({ claimId, statement }: { claimId: string; statement: string }) {
+function EmbedBadge({
+  claimId,
+  statement,
+}: {
+  claimId: string;
+  statement: string;
+}) {
   const base = process.env.NEXT_PUBLIC_API_URL ?? "";
   const snippet = `<a href="${base}/proof/${claimId}"><img src="${base}/api/claims/${claimId}/badge.svg" alt="${statement.replace(/"/g, "&quot;")}" height="44" /></a>`;
   return (
     <section className="panel">
       <h2>Put this on your own site</h2>
       <p className="subtle">
-        One line of HTML. The badge shows this claim&rsquo;s status at the time someone
-        loads your page &mdash; so if the verification is ever withdrawn, every copy of it
-        says so within five minutes. That is the point: a badge that could not stop saying
-        &ldquo;verified&rdquo; would not be worth putting up.
+        One line of HTML. The badge shows this claim&rsquo;s status at the time
+        someone loads your page &mdash; so if the verification is ever
+        withdrawn, every copy of it says so within five minutes. That is the
+        point: a badge that could not stop saying &ldquo;verified&rdquo; would
+        not be worth putting up.
       </p>
       <pre className="embedSnippet">
         <code>{snippet}</code>
       </pre>
-      <img className="embedPreview" src={`/api/claims/${claimId}/badge.svg`} alt="" height={44} />
+      <img
+        className="embedPreview"
+        src={`/api/claims/${claimId}/badge.svg`}
+        alt=""
+        height={44}
+      />
     </section>
   );
 }
@@ -174,8 +236,9 @@ function NotPublished() {
       <div className="panel">
         <h2>No public proof for this claim</h2>
         <p className="subtle">
-          A claim becomes a public proof only when the organisation behind it chooses to
-          publish one. There may be nothing here because that choice has not been made.
+          A claim becomes a public proof only when the organisation behind it
+          chooses to publish one. There may be nothing here because that choice
+          has not been made.
         </p>
       </div>
     </section>
@@ -188,8 +251,8 @@ function Unavailable() {
       <div className="panel">
         <h2>The transparency API is unavailable</h2>
         <p className="subtle">
-          This page reads live data rather than rendering a fixed copy, so there is nothing
-          to show until the API is reachable.
+          This page reads live data rather than rendering a fixed copy, so there
+          is nothing to show until the API is reachable.
         </p>
       </div>
     </section>

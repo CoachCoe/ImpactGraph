@@ -10,7 +10,12 @@ export type Proof = {
     verificationBundleHash: string | null;
     policyVersion: string;
   };
-  operator: { name: string; organisationRef: string; program: string; region: string };
+  operator: {
+    name: string;
+    organisationRef: string;
+    program: string;
+    region: string;
+  };
   requirements: { requirement: string; status: string; reason: string }[];
   attestations: {
     id: string;
