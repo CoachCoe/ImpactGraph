@@ -7,6 +7,7 @@ separating who operates from who verifies.
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -283,3 +284,30 @@ def test_the_programs_offered_carry_the_projects_evidence_is_filed_under():
     )
     assert showcase["chainStatus"] == "CONFIRMED"
     assert any(project["id"] == "project-water-12" for project in showcase["projects"])
+
+
+def test_the_application_reads_an_unseeded_database_without_inventing_anything():
+    """The showcase is one example tenant, not a precondition for the app existing.
+
+    Every read used to resolve a hardcoded identifier somewhere, so an empty deployment
+    either raised or answered with the seeded program. It should answer that there is
+    nothing, which is a different and truthful thing.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from impactgraph.persistence import Base
+    from impactgraph.read_model import TransparencyReadRepository
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as empty:
+        repository = TransparencyReadRepository(empty)
+        assert repository.programs() == []
+        assert repository.claims() == []
+        # A named record that does not exist is a lookup failure, not an empty answer:
+        # "no such claim" and "this claim has no provenance" are different statements.
+        with pytest.raises(LookupError):
+            repository.program("program-nope")
+        with pytest.raises(LookupError):
+            repository.claim("claim-nope")
