@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -23,11 +24,13 @@ from .blockchain import (
     digest_bytes,
     entity_id_bytes,
 )
-from .config import PUBLIC_CHAIN_IDS, Settings
+from .config import PUBLIC_CHAIN_IDS, Settings, _decode_encryption_key
+from .credentials import seal, unseal
 from .database import create_session_factory
 from .demo import INVOICE_BYTES, store
 from .domain import BlockchainStatus
 from .evidence import FileEvidenceStorage
+from .financial import FinancialIngestionService, MockFinancialDataProvider
 from .hashing import claim_hash, hash_fields, program_hash, sha256_bytes
 from .metrics import REGISTRY
 from .notifications import ConsoleNotificationTransport, NotificationDispatcher
@@ -36,6 +39,8 @@ from .persistence import (
     BlockchainOperationRecord,
     EvidenceRecord,
     ProcessedChainEventRecord,
+    ProgramRecord,
+    ProviderCredentialRecord,
 )
 from .read_model import (
     CLAIM_ID,
@@ -652,6 +657,98 @@ def retention_loop(interval_seconds: float) -> None:
         time.sleep(interval_seconds)
 
 
+def rotate_encryption_key() -> dict[str, int]:
+    """Re-seal everything under a new key-encryption key.
+
+    Re-seals rather than swaps. A swap makes every bank connection dead and every evidence
+    object unrecoverable in one step, which is the failure docs/key-rotation.md exists to
+    prevent.
+
+    An object whose key has already been destroyed is skipped and stays erased: rotation
+    must not resurrect what somebody exercised a right to remove.
+    """
+    configure_logging()
+    settings = Settings.from_env()
+    new_key = _decode_encryption_key(os.getenv("EVIDENCE_ENCRYPTION_KEY_NEXT", ""))
+    if not new_key:
+        raise RuntimeError(
+            "EVIDENCE_ENCRYPTION_KEY_NEXT is required, and must differ from the current key"
+        )
+    if new_key == settings.evidence_encryption_key:
+        raise RuntimeError("The next key is the current key; nothing would be rotated")
+
+    storage = FileEvidenceStorage(
+        settings.evidence_storage_path,
+        settings.evidence_encryption_key,
+        settings.evidence_key_path,
+    )
+    factory = create_session_factory(settings.database_url)
+    resealed = skipped = credentials = 0
+
+    with factory.begin() as session:
+        for record in session.scalars(select(EvidenceRecord)):
+            if storage.rewrap(record.storage_uri, new_key):
+                resealed += 1
+            else:
+                skipped += 1
+        for credential in session.scalars(select(ProviderCredentialRecord)):
+            if credential.revoked_at is not None or not credential.sealed_refresh_token:
+                continue
+            token = unseal(
+                settings.evidence_encryption_key,
+                credential.sealed_refresh_token,
+                associated=f"{credential.organization_ref}:{credential.provider}",
+            )
+            credential.sealed_refresh_token = seal(
+                new_key,
+                token,
+                associated=f"{credential.organization_ref}:{credential.provider}",
+            )
+            credentials += 1
+
+    log.info(
+        "rotation.complete", resealed=resealed, skipped=skipped, credentials=credentials
+    )
+    print(
+        f"Re-sealed {resealed} evidence objects and {credentials} credentials. "
+        f"Skipped {skipped} already-erased objects.\n"
+        "Verify an integrity check and a bank connection under the new key before "
+        "promoting it, and destroy the old key only after that passes."
+    )
+    return {"resealed": resealed, "skipped": skipped, "credentials": credentials}
+
+
+def financial_sync_loop(interval_seconds: float) -> None:
+    """Import statements on a schedule rather than when somebody remembers.
+
+    Its own process, like retention and notifications. A bank feed that is slow or down
+    must not hold up a registration, and a chain fault must not stop the money arriving.
+
+    Importing is already idempotent by the provider's own reference, so a run that
+    overlaps a manual import records nothing twice.
+    """
+    configure_logging()
+    settings = Settings.from_env()
+    factory = create_session_factory(settings.database_url)
+    service = FinancialIngestionService(MockFinancialDataProvider())
+    log.info("financial_sync.started", interval_seconds=interval_seconds)
+    while True:
+        try:
+            with factory.begin() as session:
+                for program in session.scalars(select(ProgramRecord)):
+                    imported = service.import_statement(session, program.slug)
+                    if imported:
+                        log.info(
+                            "financial_sync.imported",
+                            program=program.slug,
+                            transactions=len(imported),
+                        )
+        except Exception as exc:  # noqa: BLE001 -- must outlive a transient provider fault
+            # The class, never the text: a provider error can carry a URL with a token in it.
+            log.error("financial_sync.failed", error_type=exc.__class__.__name__)
+        time.sleep(interval_seconds)
+
+
 def notification_loop(interval_seconds: float) -> None:
     """Drain notification intent from the outbox.
 
@@ -704,6 +801,11 @@ def main() -> None:
     notify = sub.add_parser("notifications")
     notify.add_argument("--interval", type=float, default=5.0)
     sub.add_parser("retention-once")
+    sub.add_parser("rotate-encryption-key")
+    sync = sub.add_parser("financial-sync")
+    # Hourly: a bank feed does not change faster than that, and a tighter loop is requests
+    # against somebody's rate limit for no new information.
+    sync.add_argument("--interval", type=float, default=3600.0)
     retention = sub.add_parser("retention")
     # Hourly by default: a retention period is measured in years, and checking more often
     # would be load without meaning.
@@ -729,6 +831,10 @@ def main() -> None:
         worker_loop(args.interval)
     elif args.command == "notifications":
         notification_loop(args.interval)
+    elif args.command == "financial-sync":
+        financial_sync_loop(args.interval)
+    elif args.command == "rotate-encryption-key":
+        rotate_encryption_key()
     elif args.command == "retention-once":
         retention_once()
     elif args.command == "retention":

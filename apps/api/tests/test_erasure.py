@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 
 import pytest
+from cryptography.exceptions import InvalidTag
 
 from impactgraph.evidence import EvidenceUnrecoverable, FileEvidenceStorage
 from impactgraph.hashing import sha256_bytes
@@ -406,3 +407,33 @@ def test_an_object_cannot_be_made_to_decrypt_as_a_different_one(tmp_path):
     with pytest.raises(Exception) as refused:
         store.retrieve(first)
     assert not isinstance(refused.value, EvidenceUnrecoverable)
+
+
+def test_rotating_the_key_keeps_the_document_readable(tmp_path):
+    """A swap without a re-seal makes every object unrecoverable in one step, so the
+    procedure re-seals -- and the binding has to survive it."""
+    import os as _os
+
+    old_key, new_key = _os.urandom(32), _os.urandom(32)
+    store = FileEvidenceStorage(tmp_path / "objects", old_key)
+    uri = store.store("ev-rotate", DOCUMENT)
+
+    assert store.rewrap(uri, new_key) is True
+    rotated = FileEvidenceStorage(tmp_path / "objects", new_key)
+    assert rotated.retrieve(uri) == DOCUMENT
+    # And the old key no longer opens it, which is the point of rotating.
+    with pytest.raises(InvalidTag):
+        FileEvidenceStorage(tmp_path / "objects", old_key).retrieve(uri)
+
+
+def test_rotation_leaves_an_erased_object_erased(tmp_path):
+    import os as _os
+
+    old_key, new_key = _os.urandom(32), _os.urandom(32)
+    store = FileEvidenceStorage(tmp_path / "objects", old_key)
+    uri = store.store("ev-erased-rotate", DOCUMENT)
+    store.destroy_key(uri)
+
+    assert store.rewrap(uri, new_key) is False
+    with pytest.raises(EvidenceUnrecoverable):
+        FileEvidenceStorage(tmp_path / "objects", new_key).retrieve(uri)

@@ -51,6 +51,61 @@ class FinancialDataProvider(Protocol):
     def fetch_statement(self, program_ref: str) -> list[ProviderTransaction]: ...
 
 
+@dataclass(frozen=True)
+class MemoMatch:
+    """How confidently a bank memo names an invoice.
+
+    A real memo is noisy and truncated -- "CARD PAYMENT TO AQUA SYSTEM", "INV8291/2 REF
+    88213" -- so an exact substring test finds nothing and matching too loosely invents a
+    reconciliation nobody checked. The score is reported and the decision is a person's,
+    which is the same answer extraction reached for the same reason.
+    """
+
+    invoice_number: str
+    confidence: float
+    reason: str
+
+
+#: At or above this, the match is offered as the likely one. Below it the memo is reported
+#: as unmatched rather than guessed at. Self-reported in the same sense as extraction
+#: confidence: a number this code computed, not a probability anyone measured.
+MEMO_MATCH_THRESHOLD = 0.6
+
+
+def _normalise(text: str) -> str:
+    return "".join(character for character in text.upper() if character.isalnum())
+
+
+def match_memo(memo: str, invoice_number: str) -> MemoMatch:
+    """Score one memo against one invoice number.
+
+    Exact containment scores highest. Otherwise the digits are compared, because a bank
+    strips punctuation and truncates prefixes far more often than it alters the number --
+    "INV-8291" arriving as "8291" is ordinary, and as "8921" is a different invoice.
+    """
+    haystack, needle = _normalise(memo), _normalise(invoice_number)
+    if not needle or not memo:
+        return MemoMatch(invoice_number, 0.0, "There is nothing to match against")
+    if needle in haystack:
+        return MemoMatch(invoice_number, 1.0, f"The memo contains {invoice_number}")
+
+    digits = "".join(character for character in needle if character.isdigit())
+    memo_digits = "".join(character for character in haystack if character.isdigit())
+    if digits and digits in memo_digits:
+        return MemoMatch(
+            invoice_number,
+            0.75,
+            f"The memo contains the digits of {invoice_number} without its prefix",
+        )
+    if digits and len(digits) >= 4 and digits[-4:] in memo_digits:
+        return MemoMatch(
+            invoice_number,
+            0.5,
+            f"The memo ends with the last four digits of {invoice_number}, which is weak",
+        )
+    return MemoMatch(invoice_number, 0.0, f"The memo does not resemble {invoice_number}")
+
+
 class MockFinancialDataProvider:
     """Deterministic statement for the Clean Water Kenya showcase.
 
@@ -120,9 +175,16 @@ class FinancialLedger:
 
     @staticmethod
     def spent_against(session: Session, allocation_ref: str, currency: str) -> Money:
+        """What this allocation has actually paid out.
+
+        Reversed money is not spent. Counting it would leave a budget permanently
+        consumed by a payment the bank took back, and the operator with no way to use it
+        short of raising the allocation to cover money that never left.
+        """
         rows = session.scalars(
             select(FinancialTransactionRecord).where(
-                FinancialTransactionRecord.allocation_ref == allocation_ref
+                FinancialTransactionRecord.allocation_ref == allocation_ref,
+                FinancialTransactionRecord.settlement != "REVERSED",
             )
         )
         total = Money.zero(currency)
@@ -398,3 +460,8 @@ class EvidenceReconciliationService:
                 result["status"].value if hasattr(result["status"], "value") else result["status"]
             )
         return result
+
+
+#: A bank reports a payment before it settles and can withdraw it afterwards. Only the
+#: middle one of these is a fact about the world.
+SETTLEMENT_STATES = ("PENDING", "SETTLED", "REVERSED")

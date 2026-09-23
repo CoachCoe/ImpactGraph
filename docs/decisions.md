@@ -262,5 +262,53 @@ can apply consistently is worse than a rule stated plainly.
 Reversible: retention is a policy, not a commitment. Deciding later to strip coordinates
 affects photographs captured after that point and cannot un-commit the ones already
 registered, which is the usual asymmetry and is worth knowing before it is relied on.
+## ADR-013 — Open banking through TrueLayer, and the mock stays
+
+Decision: the real `FinancialDataProvider` is an open-banking adapter against TrueLayer.
+`MockFinancialDataProvider` is kept, not replaced, and remains what CI and the demo run on.
+
+Why TrueLayer: the first programmes are UK-registered organisations, and TrueLayer covers
+UK and EEA banks under FCA authorisation with a data API that returns settled and pending
+transactions separately — a distinction this system needs, because a pending payment is
+not yet a fact about the world and should not support a claim. Plaid is the stronger
+choice for US coverage and is the one to revisit if programmes move there; nothing outside
+the adapter would change, which is the point of ADR-007's seam.
+
+Why the mock stays: CI must run green with no bank credentials, and the demo must work for
+anyone who clones the repository. A mock that exists only until the real thing arrives
+becomes a mock nobody maintains; this one is the fixture the reconciliation states are
+tested against, including the UNMATCHED and CONFLICT cases a real feed produces rarely and
+a test needs every time.
+
+Consequence: two implementations of one Protocol, and the risk that only one is exercised.
+The adapter is therefore tested against recorded provider responses rather than a live
+connection, and this ADR records that **no live bank has been connected**. That is an
+honest gap, not a completed item.
+
+Date: 2026-09-23
+
+## ADR-014 — ImpactGraph observes money and will not move it
+
+Decision: payment initiation stays out of scope, including inbound donation processing.
+This system reads financial activity and never causes any.
+
+Why: ADR-007 made this choice for observation and the pressure now is to widen it, because
+a platform that takes donations directly is a better business. It is a worse witness. A
+system that both moves money and attests to where it went is its own witness, and the
+attestation is worth exactly as much as trusting the system that produced it — which is
+the thing this product exists not to ask for.
+
+The separation is what lets a reader check the claim against a bank record the platform
+did not create. Collapse it and there is one record, from one party, about its own
+behaviour.
+
+Consequence: donations arrive through the organisation's own accounts and appear here as
+observed inbound transactions like any other. ImpactGraph holds read-only credentials and
+no payment permissions, and an adapter requesting a payment scope is a defect rather than
+a feature.
+
+If this is ever reversed, it is reversed here and openly: a new ADR superseding this one,
+stating who then audits the system that both holds the money and reports on it. Widening
+it quietly inside a feature branch is how a trust model is lost.
 
 Date: 2026-09-23

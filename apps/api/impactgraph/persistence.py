@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -192,6 +193,38 @@ class AuditLogRecord(EntityMixin, Base):
     entity_id: Mapped[str] = mapped_column(String(160), index=True)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     correlation_id: Mapped[str] = mapped_column(String(80), index=True)
+
+
+class ProviderCredentialRecord(EntityMixin, Base):
+    """A bank connection held on an organisation's behalf.
+
+    The first real secret this platform keeps for a customer. Encrypted with the same
+    key-encryption key that protects evidence at rest, so there is one key to rotate and
+    one place to lose rather than two.
+
+    Read-only scopes only. ADR-014 says this system observes money and does not move it,
+    and a credential that could move it would make that promise a matter of restraint
+    rather than of capability.
+    """
+
+    __tablename__ = "provider_credentials"
+    organization_ref: Mapped[str] = mapped_column(String(160), index=True)
+    provider: Mapped[str] = mapped_column(String(80), index=True)
+    #: Nonce-prefixed ciphertext of the refresh token. Never the token.
+    sealed_refresh_token: Mapped[bytes] = mapped_column(LargeBinary)
+    #: What the provider granted, recorded so a credential that should not be able to move
+    #: money can be shown not to be able to, rather than assumed.
+    scopes: Mapped[str] = mapped_column(String(400), default="")
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: When it was last exchanged, so a stale connection is visible rather than silent.
+    refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_ref", "provider", name="uq_provider_credential_org_provider"
+        ),
+    )
 
 
 class DataProtectionRecord(EntityMixin, Base):
@@ -404,6 +437,20 @@ class FinancialTransactionRecord(MoneyMixin, EntityMixin, Base):
     source_ref: Mapped[str] = mapped_column(String(160))
     # MATCHED / PARTIAL_MATCH / UNMATCHED / CONFLICT, set by reconciliation against evidence.
     match_status: Mapped[str] = mapped_column(String(24), default="UNMATCHED", index=True)
+    # A bank reports a payment before it settles and can reverse it afterwards. Only a
+    # settled payment is a fact about the world; a pending one has not happened yet and a
+    # reversed one did not happen, and neither may support a claim.
+    settlement: Mapped[str] = mapped_column(
+        String(16), default="SETTLED", server_default="SETTLED", index=True
+    )
+    #: When the provider reported the reversal, so a claim that fell can be traced to it.
+    reversed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: What a converted figure came from, so it can always be traced to the rate that
+    #: produced it rather than being a number nobody can reproduce.
+    rate_source: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    rate_numerator: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rate_denominator: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rate_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class DeliveryRecord(EntityMixin, Base):

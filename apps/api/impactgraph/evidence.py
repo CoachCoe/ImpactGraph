@@ -26,6 +26,7 @@ class EvidenceStorage(Protocol):
     def overwrite(self, storage_uri: str, content: bytes) -> None: ...
     def retrieve(self, storage_uri: str) -> bytes: ...
     def exists(self, storage_uri: str) -> bool: ...
+    def rewrap(self, storage_uri: str, new_key: bytes) -> bool: ...
     def destroy_key(self, storage_uri: str) -> bool: ...
 
 
@@ -105,6 +106,26 @@ class FileEvidenceStorage:
     def exists(self, storage_uri: str) -> bool:
         target, _ = self._paths(storage_uri)
         return target.exists()
+
+    def rewrap(self, storage_uri: str, new_key: bytes) -> bool:
+        """Re-encrypt this object's data key under a new key-encryption key.
+
+        The data key itself is unchanged, so the ciphertext is untouched and only the tiny
+        key file is rewritten. An object whose key has been destroyed is skipped rather
+        than recreated: there is nothing to re-seal and it stays erased.
+        """
+        target, key_path = self._paths(storage_uri)
+        if not key_path.exists():
+            return False
+        # The same binding as the original seal. Re-wrapping without it would produce a
+        # key file that decrypts nowhere, on every object, in one pass.
+        associated = target.stem.encode()
+        wrapped = key_path.read_bytes()
+        data_key = self._cipher.decrypt(wrapped[:12], wrapped[12:], associated)
+        nonce = secrets.token_bytes(12)
+        key_path.write_bytes(nonce + AESGCM(new_key).encrypt(nonce, data_key, associated))
+        key_path.chmod(0o600)
+        return True
 
     def destroy_key(self, storage_uri: str) -> bool:
         """Make the object unrecoverable. Returns whether a key was there to destroy."""
@@ -198,6 +219,7 @@ class ReconciliationService:
         """
         if financial_transaction is None:
             return {
+                "transactionRef": None,
                 "status": ReconciliationStatus.UNMATCHED,
                 "checks": [
                     {
@@ -231,13 +253,7 @@ class ReconciliationService:
                 "Currency matches",
                 "Currency conflicts",
             ),
-            self._check(
-                "TRANSACTION_REFERENCE",
-                bool(financial_transaction.get("memo"))
-                and str(extraction.get("invoiceNumber", "")) in str(financial_transaction["memo"]),
-                f"Payment {financial_transaction['id']} references this document",
-                f"Payment {financial_transaction['id']} does not reference this document",
-            ),
+            self._memo_check(extraction, financial_transaction),
         ]
 
         if delivery is None:
@@ -292,12 +308,76 @@ class ReconciliationService:
             )
         failures = sum(item["result"] == Result.FAIL for item in checks)
         warnings = sum(item["result"] == Result.WARNING for item in checks)
-        status = (
-            ReconciliationStatus.CONFLICT
-            if failures
-            else (ReconciliationStatus.PARTIAL_MATCH if warnings else ReconciliationStatus.MATCHED)
+        # A payment matched by resemblance is not a matched payment. It was routed into
+        # PARTIAL_MATCH, which verification policy accepts, so a claim could verify on
+        # four digits appearing somewhere in a memo with nobody ever seeing it. The score
+        # existed precisely so that would not happen.
+        guessed = any(
+            item["check"] == "TRANSACTION_REFERENCE" and item["result"] == Result.WARNING
+            for item in checks
         )
-        return {"status": status, "checks": checks, "reasons": [item["message"] for item in checks]}
+        if failures:
+            status = ReconciliationStatus.CONFLICT
+        elif guessed:
+            status = ReconciliationStatus.NEEDS_CONFIRMATION
+        elif warnings:
+            status = ReconciliationStatus.PARTIAL_MATCH
+        else:
+            status = ReconciliationStatus.MATCHED
+        return {
+            "status": status,
+            "checks": checks,
+            "reasons": [item["message"] for item in checks],
+            # Which payment this was reconciled against. The messages name it, but a link
+            # recovered by reading prose is not a link -- and a reversal has to find every
+            # piece of evidence resting on the payment that did not happen.
+            "transactionRef": financial_transaction["id"],
+        }
+
+    @staticmethod
+    def _memo_check(
+        extraction: dict[str, Any], financial_transaction: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Whether the payment names this document, and how sure that is.
+
+        A substring test was the whole of this, which finds nothing on a real bank memo:
+        they arrive truncated and stripped of punctuation, so "INV-8291" turns up as
+        "8291" inside something like "CARD PAYMENT TO AQUA SYSTEM 8291".
+
+        A weak resemblance is a WARNING rather than a PASS. Reconciliation is what makes a
+        CONFLICT verdict meaningful, so a match nobody checked is worse here than no match
+        at all -- the score is reported and an operator decides, the same answer extraction
+        reached for the same reason.
+        """
+        from .financial import MEMO_MATCH_THRESHOLD, match_memo
+
+        payment = financial_transaction["id"]
+        match = match_memo(
+            str(financial_transaction.get("memo") or ""),
+            str(extraction.get("invoiceNumber") or ""),
+        )
+        if match.confidence >= 1.0:
+            return {
+                "check": "TRANSACTION_REFERENCE",
+                "result": Result.PASS,
+                "message": f"Payment {payment} references this document",
+            }
+        if match.confidence >= MEMO_MATCH_THRESHOLD:
+            return {
+                "check": "TRANSACTION_REFERENCE",
+                "result": Result.WARNING,
+                "message": (
+                    f"Payment {payment} probably references this document: {match.reason}. "
+                    "Confirm it before relying on the match."
+                ),
+                "confidence": match.confidence,
+            }
+        return {
+            "check": "TRANSACTION_REFERENCE",
+            "result": Result.FAIL,
+            "message": f"Payment {payment} does not reference this document",
+            "confidence": match.confidence,
+        }
 
     @staticmethod
     def _check(name: str, passes: bool, success: str, failure: str) -> dict[str, Any]:
