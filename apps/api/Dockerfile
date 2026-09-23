@@ -30,10 +30,11 @@ COPY contracts/out/ImpactRegistry.sol/ImpactRegistry.json \
      /app/contracts/out/ImpactRegistry.sol/ImpactRegistry.json
 
 ENV CONTRACT_ARTIFACT_PATH=/app/contracts/out/ImpactRegistry.sol/ImpactRegistry.json \
-    EVIDENCE_STORAGE_PATH=/data/evidence
+    EVIDENCE_STORAGE_PATH=/data/evidence \
+    EVIDENCE_KEY_PATH=/data/evidence-keys
 
 RUN useradd --system --uid 10001 impactgraph \
- && mkdir -p /data/evidence \
+ && mkdir -p /data/evidence /data/evidence-keys \
  && chown -R impactgraph:impactgraph /data
 USER impactgraph
 
