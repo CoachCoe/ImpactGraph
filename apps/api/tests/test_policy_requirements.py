@@ -66,6 +66,7 @@ REQUIREMENTS = [
     "EVIDENCE_INTEGRITY",
     "FINANCIAL_RECONCILIATION",
     "OPERATOR_ATTESTATION",
+    "BENEFICIARY_CONFIRMATION",
     "INDEPENDENT_VERIFICATION",
     "BUNDLE_CURRENT",
     "ACTOR_SEPARATION",
@@ -273,3 +274,43 @@ def test_the_requirement_reason_names_the_shortfall():
         item for item in decision.requirements if item.requirement == "INDEPENDENT_VERIFICATION"
     )
     assert "1 of 3" in independent.reason
+
+
+def test_a_dispute_from_somebody_who_received_the_aid_fails_the_claim():
+    """The most direct evidence this system can hold. Nothing above it in the trust model
+    outranks somebody saying the delivery did not arrive as described."""
+    from impactgraph.domain import ClaimStatus, Result
+
+    decision = decide(beneficiary_confirmed=12, beneficiary_disputed=3)
+    beneficiary = next(
+        item for item in decision.requirements if item.requirement == "BENEFICIARY_CONFIRMATION"
+    )
+    assert beneficiary.status == Result.FAIL
+    assert decision.status != ClaimStatus.VERIFIED
+
+
+def test_nobody_having_been_asked_does_not_stall_a_claim():
+    """The channel is disabled until the safeguarding review is signed off, so a hard
+    requirement would stall every legitimate claim to enforce a check nobody is allowed
+    to run yet -- and the pressure to switch the channel on would come from the wrong
+    direction."""
+    from impactgraph.domain import ClaimStatus, Result
+
+    decision = decide()
+    beneficiary = next(
+        item for item in decision.requirements if item.requirement == "BENEFICIARY_CONFIRMATION"
+    )
+    assert beneficiary.status == Result.WARNING
+    assert "rests on the operating organisation's account" in beneficiary.reason
+    assert decision.status == ClaimStatus.VERIFIED
+
+
+def test_confirmation_from_the_people_asked_passes():
+    from impactgraph.domain import Result
+
+    decision = decide(beneficiary_confirmed=37)
+    beneficiary = next(
+        item for item in decision.requirements if item.requirement == "BENEFICIARY_CONFIRMATION"
+    )
+    assert beneficiary.status == Result.PASS
+    assert "37" in beneficiary.reason
