@@ -28,6 +28,7 @@ from .persistence import (
     OutboxRecord,
     ProgramRecord,
     UserRecord,
+    as_utc_iso,
     public_funder_name,
 )
 from .verification import restate_claims_for
@@ -1468,4 +1469,63 @@ class FunderNameService:
             "fundingId": funding.external_id,
             "published": publish,
             "shownAs": public_funder_name(funding),
+        }
+
+
+class ClaimPublicationService:
+    """Deciding that a claim is a public proof, and not being able to take it back.
+
+    An organisation opts in, because no organisation adopts a platform that publishes
+    its failures by default. After that the page shows the current status -- including
+    CHALLENGED or REVOKED -- and there is no route that unpublishes it. A record that can
+    be withdrawn once the verdict turns inconvenient is not a record of anything, and the
+    withdrawal would be the one edit this whole system exists to make impossible.
+    """
+
+    def __init__(self) -> None:
+        self.audit = AuditService()
+
+    def publish(
+        self,
+        session: Session,
+        *,
+        actor: ApplicationActor,
+        claim_id: str,
+        correlation_id: str,
+    ) -> dict[str, Any]:
+        if actor.role not in {Role.OPERATOR, Role.ADMIN}:
+            raise AuthorizationError("Only an operator or administrator may publish a claim")
+        claim = session.scalar(select(ClaimRecord).where(ClaimRecord.external_id == claim_id))
+        if claim is None:
+            raise LookupError("Claim not found")
+        program = session.scalar(
+            select(ProgramRecord).where(ProgramRecord.slug == claim.program_ref)
+        )
+        if program is None:
+            raise LookupError("The claim's program does not exist")
+        if actor.role != Role.ADMIN and program.operator_org_ref != actor.id:
+            raise AuthorizationError("Claim belongs to another operating organisation")
+        if claim.published_at is not None:
+            return {
+                "claimId": claim_id,
+                "publishedAt": as_utc_iso(claim.published_at),
+                "alreadyPublished": True,
+            }
+
+        claim.published_at = datetime.now(UTC)
+        self.audit.record(
+            session,
+            actor=actor,
+            action="CLAIM_PUBLISHED",
+            entity_type="CLAIM",
+            entity_id=claim_id,
+            correlation_id=correlation_id,
+            metadata={"status": claim.status},
+        )
+        return {
+            "claimId": claim_id,
+            "publishedAt": as_utc_iso(claim.published_at),
+            "alreadyPublished": False,
+            "note": "This page now shows whatever the claim's status becomes, including if "
+            "it is later challenged or revoked. There is no way to unpublish it.",
         }

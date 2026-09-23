@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -460,3 +460,16 @@ def public_funder_name(funding: FundingRecord, *, privileged: bool = False) -> s
     if privileged or funding.funder_is_organisation or funding.publish_funder_name:
         return funding.funder_name
     return REDACTED_FUNDER
+
+
+def as_utc_iso(value: datetime | None) -> str | None:
+    """Serialise a stored timestamp the same way whether it came from memory or a database.
+
+    SQLite returns a naive datetime for a timezone-aware column, so the same field came
+    back with an offset when it had just been written and without one when it was read
+    again. Every timestamp this system stores is UTC, so a naive one is read as UTC rather
+    than as local time.
+    """
+    if value is None:
+        return None
+    return (value if value.tzinfo else value.replace(tzinfo=UTC)).isoformat()

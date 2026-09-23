@@ -140,3 +140,97 @@ def test_existing_funding_defaults_to_the_careful_answer():
         )
         assert jane.funder_is_organisation is False
         assert jane.publish_funder_name is False
+
+
+# --- Publishing a claim, and living with having published it ---
+
+
+def test_an_unpublished_claim_has_no_public_proof(anonymous):
+    """Refusing rather than rendering is what makes publication a decision the
+    organisation made rather than a default it was subjected to."""
+    assert anonymous.get(f"/claims/{CLAIM}/proof").status_code == 404
+
+
+def test_publishing_is_opt_in_and_then_permanent():
+    client = operator_client()
+    published = client.post(f"/claims/{CLAIM}/publish")
+    assert published.status_code == 201, published.text
+    assert published.json()["alreadyPublished"] is False
+    assert "no way to unpublish" in published.json()["note"]
+
+    # Publishing again is not an error and does not move the date.
+    again = client.post(f"/claims/{CLAIM}/publish")
+    assert again.json()["alreadyPublished"] is True
+    assert again.json()["publishedAt"] == published.json()["publishedAt"]
+
+    # And there is no route that takes it back.
+    routes = {(route.path, method) for route in app.routes for method in getattr(route, "methods", [])}
+    assert not any(
+        "publish" in path and method in {"DELETE", "PUT"} for path, method in routes
+    ), "a route exists that could withdraw a published proof"
+
+
+def test_a_published_proof_shows_the_status_it_has_now(anonymous):
+    """A page that kept saying VERIFIED after the claim was challenged would be the most
+    damaging thing this product could ship."""
+    from sqlalchemy import select as _select
+
+    from impactgraph.persistence import ClaimRecord
+
+    operator_client().post(f"/claims/{CLAIM}/publish")
+    assert anonymous.get(f"/claims/{CLAIM}/proof").json()["claim"]["status"] == (
+        "VERIFICATION_PENDING"
+    )
+
+    assert session_factory is not None
+    with session_factory.begin() as session:
+        session.scalar(
+            _select(ClaimRecord).where(ClaimRecord.external_id == CLAIM)
+        ).status = "CHALLENGED"
+
+    assert anonymous.get(f"/claims/{CLAIM}/proof").json()["claim"]["status"] == "CHALLENGED"
+
+
+def test_the_proof_says_what_it_does_not_prove(anonymous):
+    """A reader landing here cold has no other way to know, and a proof page that only
+    lists what it establishes is an advertisement."""
+    operator_client().post(f"/claims/{CLAIM}/publish")
+    proof = anonymous.get(f"/claims/{CLAIM}/proof").json()
+    assert proof["proves"] and proof["doesNotProve"]
+    assert any("helped anyone" in item for item in proof["doesNotProve"])
+    assert any("forged invoice" in item for item in proof["doesNotProve"])
+
+
+def test_the_proof_leads_with_the_organisation_that_did_the_work(anonymous):
+    operator_client().post(f"/claims/{CLAIM}/publish")
+    proof = anonymous.get(f"/claims/{CLAIM}/proof").json()
+    assert proof["operator"]["name"] == "Global Water Initiative"
+    assert proof["operator"]["program"]
+
+
+def test_a_proof_does_not_name_the_individual_who_funded_it(anonymous):
+    operator_client().post(f"/claims/{CLAIM}/publish")
+    assert "Jane Smith" not in str(anonymous.get(f"/claims/{CLAIM}/proof").json())
+
+
+def test_an_operator_cannot_publish_another_organisations_claim():
+    from tests.test_ownership_scoping import make_outsider
+
+    make_outsider()
+    outsider = TestClient(app)
+    outsider.post(
+        "/auth/login",
+        json={"email": "operator@otherwater.example", "password": DEMO_PASSWORD},
+    )
+    assert outsider.post(f"/claims/{CLAIM}/publish").status_code == 403
+
+
+def test_a_timestamp_reads_the_same_whether_it_was_just_written_or_read_back():
+    """SQLite returns a naive datetime for a timezone-aware column, so the same field came
+    back with an offset when it had just been written and without one afterwards. A client
+    comparing the two got different values for one moment."""
+    client = operator_client()
+    first = client.post(f"/claims/{CLAIM}/publish").json()["publishedAt"]
+    second = client.post(f"/claims/{CLAIM}/publish").json()["publishedAt"]
+    assert first == second
+    assert first.endswith("+00:00")

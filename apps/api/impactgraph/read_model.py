@@ -44,6 +44,7 @@ from .persistence import (
     ProcessedChainEventRecord,
     ProgramRecord,
     ProvenanceEdgeRecord,
+    as_utc_iso,
     public_funder_name,
 )
 from .verification import EvidenceScoreService, claim_subgraph, evaluate_persisted_claim
@@ -540,10 +541,89 @@ class TransparencyReadRepository:
                 "projectId": record.project_ref,
                 "statement": record.statement,
                 "status": record.status,
-                "verifiedAt": record.verified_at.isoformat() if record.verified_at else None,
+                "verifiedAt": as_utc_iso(record.verified_at),
             }
             for record in self.session.scalars(query)
         ]
+
+    def proof(self, claim_id: str) -> dict[str, Any]:
+        """A published claim, as a stranger with no context should receive it.
+
+        Only a published claim. Refusing an unpublished one rather than rendering it is
+        what makes publication a decision the organisation made rather than a default it
+        was subjected to.
+
+        The status is read now, not at publication: a page that kept saying VERIFIED after
+        the claim was challenged would be the most damaging thing this product could ship.
+        """
+        record = self._claim(claim_id)
+        if record.published_at is None:
+            raise LookupError("This claim has not been published as a public proof")
+        claim = self.claim(claim_id)
+        program = self.session.scalar(
+            select(ProgramRecord).where(ProgramRecord.slug == record.program_ref)
+        )
+        decision, _evidence, _verifiers = evaluate_persisted_claim(self.session, record)
+        onchain = next(
+            (
+                item
+                for item in claim["attestations"]
+                if item.get("onchain") and item.get("transactionHash")
+            ),
+            None,
+        )
+        return {
+            "claim": {
+                "id": claim["id"],
+                "statement": claim["statement"],
+                "status": claim["status"],
+                "verifiedAt": claim["verifiedAt"],
+                "payloadHash": claim["payloadHash"],
+                "verificationBundleHash": claim["verificationBundleHash"],
+                "policyVersion": claim["policyVersion"],
+            },
+            # The programme leads, because the organisation that did the work is who a
+            # reader should understand this to be about.
+            "operator": {
+                "name": program.operator_name if program else "",
+                "organisationRef": program.operator_org_ref if program else "",
+                "program": program.name if program else "",
+                "region": program.region if program else "",
+            },
+            "requirements": [
+                {
+                    "requirement": item.requirement,
+                    "status": item.status,
+                    "reason": item.reason,
+                }
+                for item in decision.requirements
+            ],
+            "attestations": claim["attestations"],
+            "onchain": onchain,
+            "publishedAt": as_utc_iso(record.published_at),
+            # What the verification does and does not mean, in the product rather than in
+            # the repository. A reader landing here cold has no other way to know.
+            "proves": [
+                (
+                    "The documents behind this claim were committed to a public blockchain, "
+                    "and re-reading them still produces the same commitment."
+                ),
+                (
+                    "Named verifiers signed the exact bundle shown here, with wallets "
+                    "anyone can check on the chain."
+                ),
+            ],
+            "doesNotProve": [
+                (
+                    "That the work described actually helped anyone. This records what was "
+                    "delivered and what it cost, not whether it was worth doing."
+                ),
+                (
+                    "That the original documents are truthful. A forged invoice, committed "
+                    "honestly, is still a forged invoice."
+                ),
+            ],
+        }
 
     def claim(self, claim_id: str) -> dict[str, Any]:
         record = self._claim(claim_id)
@@ -565,7 +645,7 @@ class TransparencyReadRepository:
             "payloadHash": record.payload_hash,
             "verificationBundleHash": record.verification_bundle_hash,
             "policyVersion": record.verification_policy_version,
-            "verifiedAt": record.verified_at.isoformat() if record.verified_at else None,
+            "verifiedAt": as_utc_iso(record.verified_at),
             "evidenceIds": self._supporting_evidence_ids(record.external_id),
             "attestations": [
                 {

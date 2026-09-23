@@ -95,6 +95,7 @@ from .services import (
     ApplicationActor,
     AuditService,
     AuthorizationError,
+    ClaimPublicationService,
     DataProtectionApplicationService,
     DomainConflictError,
     EvidenceApplicationService,
@@ -996,6 +997,35 @@ def claim(claim_id: str):
     if claim_id != store.claim["id"]:
         raise HTTPException(404, "Claim not found")
     return store.claim
+
+
+@app.post("/claims/{claim_id}/publish", status_code=201)
+def publish_claim(request: Request, claim_id: str, user: CurrentUser = None):
+    """Publish a claim as a public proof. There is no route that unpublishes it."""
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    if session_factory is None:
+        raise HTTPException(503, "Publishing requires PERSISTENCE_MODE=postgres")
+    service = ClaimPublicationService()
+    return _tenant_write(
+        lambda session: service.publish(
+            session,
+            actor=actor,
+            claim_id=claim_id,
+            correlation_id=request.state.correlation_id,
+        )
+    )
+
+
+@app.get("/claims/{claim_id}/proof")
+def claim_proof(claim_id: str):
+    """A published claim, for a reader with no account and no context.
+
+    404 for a claim nobody published, so that publication is a decision an organisation
+    made rather than a default it was subjected to.
+    """
+    if session_factory is None:
+        raise HTTPException(503, "This requires PERSISTENCE_MODE=postgres")
+    return database_read("proof", claim_id)
 
 
 @app.get("/claims/{claim_id}/provenance")
