@@ -28,7 +28,7 @@ from .database import create_session_factory
 from .demo import INVOICE_BYTES, store
 from .domain import BlockchainStatus
 from .evidence import FileEvidenceStorage
-from .hashing import claim_hash, hash_fields, sha256_bytes
+from .hashing import claim_hash, hash_fields, program_hash, sha256_bytes
 from .metrics import REGISTRY
 from .notifications import ConsoleNotificationTransport, NotificationDispatcher
 from .observability import configure_logging, logger
@@ -481,7 +481,7 @@ def bootstrap_chain() -> None:
     else:
         _await(
             "program",
-            chain.create_program(PROGRAM_ID, hash_fields("program", (("id", PROGRAM_ID),))),
+            chain.create_program(PROGRAM_ID, program_hash(PROGRAM_ID)),
         )
     if chain.entity_exists(CLAIM_ID):
         actions.append({"action": "claim", "transactionHash": "already present"})

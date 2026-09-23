@@ -159,3 +159,94 @@ def test_public_provenance_does_not_publish_a_restricted_document_field():
     assert public_evidence_reference("ev-inv-8291", "RESTRICTED") == redacted, (
         "the reference has to be stable, or the same record looks like several"
     )
+
+
+def test_a_program_is_owned_by_the_session_not_the_request_body():
+    """The owning organisation is never client-supplied.
+
+    An operator who could name it could create a program inside another tenancy and then
+    file evidence against it, which is the whole separation this system rests on.
+    """
+    make_outsider()
+    client = TestClient(app)
+    sign_in(client, OUTSIDER)
+    created = client.post(
+        "/programs",
+        headers={"Idempotency-Key": "outsider-program"},
+        json={"id": "program-outsider-wells", "name": "Outsider Wells", "region": "Nairobi"},
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["operatorOrgRef"] == "org-other-water"
+    # There is no field to say otherwise, and inventing one is refused rather than ignored.
+    refused = client.post(
+        "/programs",
+        headers={"Idempotency-Key": "outsider-program-2"},
+        json={
+            "id": "program-outsider-two",
+            "name": "Outsider Two",
+            "region": "Nairobi",
+            "operatorOrgRef": "org-global-water",
+        },
+    )
+    assert refused.status_code == 422
+
+
+def test_an_operator_cannot_create_a_project_under_another_organisations_program():
+    make_outsider()
+    client = TestClient(app)
+    sign_in(client, OUTSIDER)
+    response = client.post(
+        f"/programs/{PROGRAM_ID}/projects",
+        headers={"Idempotency-Key": "outsider-project"},
+        json={"id": "project-outsider-1", "name": "Borehole"},
+    )
+    assert response.status_code == 403, response.text
+
+    owner = TestClient(app)
+    sign_in(owner, OPERATOR)
+    allowed = owner.post(
+        f"/programs/{PROGRAM_ID}/projects",
+        headers={"Idempotency-Key": "owner-project"},
+        json={"id": "project-owner-1", "name": "Borehole"},
+    )
+    assert allowed.status_code == 201, allowed.text
+
+
+def test_a_claim_cannot_be_created_against_a_program_the_registry_has_not_confirmed():
+    """Otherwise createClaim is submitted only to revert with UnknownProgram, and the
+    operator learns about it from a worker log rather than from the request they made."""
+    client = TestClient(app)
+    sign_in(client, OPERATOR)
+    created = client.post(
+        "/programs",
+        headers={"Idempotency-Key": "pending-program"},
+        json={"id": "program-pending-wells", "name": "Pending Wells", "region": "Kisumu"},
+    )
+    assert created.json()["chainStatus"] == "PENDING"
+
+    refused = client.post(
+        "/claims",
+        headers={"Idempotency-Key": "pending-claim"},
+        json={
+            "id": "claim-pending-1",
+            "programId": "program-pending-wells",
+            "projectId": "project-owner-1",
+            "statement": "100 households reached.",
+            "outcomeId": "outcome-pending-1",
+        },
+    )
+    assert refused.status_code == 409
+    assert "confirmed" in refused.json()["detail"]
+
+
+def test_creating_a_program_is_idempotent_on_the_key():
+    client = TestClient(app)
+    sign_in(client, OPERATOR)
+    body = {"id": "program-idempotent-1", "name": "Idempotent", "region": "Kisumu"}
+    first = client.post("/programs", headers={"Idempotency-Key": "prog-once"}, json=body)
+    second = client.post("/programs", headers={"Idempotency-Key": "prog-once"}, json=body)
+    assert first.status_code == 201
+    assert second.json() == first.json()
+    # A second key for the same identifier is a different request, and the name is taken.
+    conflict = client.post("/programs", headers={"Idempotency-Key": "prog-twice"}, json=body)
+    assert conflict.status_code == 409

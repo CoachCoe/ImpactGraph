@@ -4,7 +4,7 @@ import logging
 from uuid import UUID
 
 import pytest
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from impactgraph.blockchain import MockBlockchainService
@@ -12,19 +12,21 @@ from impactgraph.domain import Role
 from impactgraph.observability import configure_logging
 from impactgraph.persistence import (
     AuditLogRecord,
-    Base,
     BlockchainOperationRecord,
     EvidenceRecord,
     OutboxRecord,
     ProcessedChainEventRecord,
+    ProgramRecord,
 )
 from impactgraph.services import (
     ApplicationActor,
     DomainConflictError,
     EvidenceApplicationService,
+    TenantApplicationService,
     mark_evidence_reviewed,
 )
 from impactgraph.worker import BlockchainOutboxWorker
+from tests.support import memory_factory
 
 
 class FlakyBlockchain(MockBlockchainService):
@@ -40,9 +42,7 @@ class FlakyBlockchain(MockBlockchainService):
 
 
 def factory() -> sessionmaker[Session]:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    return sessionmaker(engine, expire_on_commit=False)
+    return memory_factory()
 
 
 def pending_registration(
@@ -253,3 +253,93 @@ def test_onchain_mismatch_is_logged_with_the_persisted_status():
     ]
     assert observed, "the observation should be logged even when it fails the onchain check"
     assert observed[-1]["status"] == "FAILED"
+
+
+class WrongProgramCommitment(MockBlockchainService):
+    def create_program(self, entity_id: str, commitment: str) -> str:
+        return super().create_program(entity_id, "sha256:" + "c" * 64)
+
+
+def pending_program(
+    db_factory: sessionmaker[Session], program_id: str = "program-new-wells"
+) -> str:
+    service = TenantApplicationService(chain_id=31337)
+    actor = ApplicationActor("org-global-water", Role.OPERATOR)
+    with db_factory.begin() as db:
+        response = service.create_program(
+            db,
+            actor=actor,
+            program_id=program_id,
+            name="New Wells",
+            region="Kisumu",
+            verification_threshold=1,
+            correlation_id="corr-program",
+            idempotency_key="program-key",
+        )
+    return response["operationId"]
+
+
+def test_a_program_becomes_usable_only_once_its_registry_entity_is_observed():
+    db_factory = memory_factory()
+    pending_program(db_factory)
+    with db_factory() as db:
+        program = db.scalar(
+            select(ProgramRecord).where(ProgramRecord.slug == "program-new-wells")
+        )
+        assert program is not None and program.chain_status == "PENDING"
+
+    result = BlockchainOutboxWorker(
+        session_factory=db_factory,
+        blockchain=MockBlockchainService(),
+        confirmations_required=1,
+    ).run_once()
+    assert result.confirmed == 1
+    with db_factory() as db:
+        program = db.scalar(
+            select(ProgramRecord).where(ProgramRecord.slug == "program-new-wells")
+        )
+        assert program is not None and program.chain_status == "CONFIRMED"
+
+
+def test_a_program_is_not_confirmed_by_an_event_committing_to_something_else():
+    """Any contract can emit a ProgramCreated. The receipt is checked against the
+    commitment this service computed, not accepted because it arrived."""
+    db_factory = memory_factory()
+    operation_id = pending_program(db_factory)
+    result = BlockchainOutboxWorker(
+        session_factory=db_factory,
+        blockchain=WrongProgramCommitment(),
+        confirmations_required=1,
+    ).run_once()
+    assert result.failed == 1
+    with db_factory() as db:
+        operation = db.get(BlockchainOperationRecord, UUID(operation_id))
+        program = db.scalar(
+            select(ProgramRecord).where(ProgramRecord.slug == "program-new-wells")
+        )
+        assert operation is not None and operation.status == "FAILED"
+        assert "different identifier" in (operation.error or "")
+        assert program is not None and program.chain_status == "FAILED"
+
+
+def test_a_failed_program_submission_does_not_reach_for_an_evidence_record():
+    """The failure path used to resolve the operation's entity as evidence unconditionally,
+    which is a LookupError for every operation whose entity is not evidence."""
+
+    class Unreachable(MockBlockchainService):
+        def create_program(self, entity_id: str, commitment: str) -> str:
+            raise ConnectionError("temporary RPC failure")
+
+    db_factory = memory_factory()
+    pending_program(db_factory)
+    result = BlockchainOutboxWorker(
+        session_factory=db_factory,
+        blockchain=Unreachable(),
+        confirmations_required=1,
+    ).run_once()
+    assert result.failed == 1
+    with db_factory() as db:
+        program = db.scalar(
+            select(ProgramRecord).where(ProgramRecord.slug == "program-new-wells")
+        )
+        assert program is not None and program.chain_status == "FAILED"

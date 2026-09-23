@@ -23,6 +23,16 @@ def hash_fields(kind: str, fields: Iterable[tuple[str, str]]) -> str:
     return sha256_bytes(payload)
 
 
+def program_hash(program_id: str) -> str:
+    """What `createProgram` commits to.
+
+    Shared with `bootstrap-chain`, which creates the showcase program synchronously. A
+    second encoding would make a program created through the API unverifiable against one
+    created by the CLI, and the worker checks the receipt against this.
+    """
+    return hash_fields("program", (("id", program_id),))
+
+
 def claim_hash(claim_id: str, statement: str, outcome_id: str, schema_version: str = "1.0") -> str:
     return hash_fields(
         "claim",

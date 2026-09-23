@@ -189,3 +189,47 @@ Tradeoff: a reader must trust the application for the count, having trusted the 
 the signatures. The trust model already says which is which.
 
 Date: 2026-09-22
+
+## ADR-011 — Commitments are to publishable bytes, and originals are erasable
+
+Decision: the content hash committed to the registry is taken over the bytes this system is
+willing to publish — after redaction, after any client-side compression — and never over a
+raw camera original. Where a raw original is retained at all, it is encrypted under a key
+held per object, so destroying that key renders it unrecoverable while leaving the
+commitment truthful about what was committed.
+
+Why: UK GDPR gives a data subject a right to erasure, and ADR-001 chose a registry whose
+records cannot be removed. The tension is only irreconcilable if the thing committed is the
+thing that must be erased. Commit the redacted bytes and it dissolves: the published object
+and its commitment are retained and remain checkable, and the erasable material — the
+unredacted face, the household name — was never what the chain attested to.
+
+The ordering follows from this and is not negotiable. `upload_evidence` hashes at
+`main.py:944`, immediately on receipt, which is the correct integrity behaviour and the
+wrong privacy behaviour if those bytes carry a face. Anything that changes bytes must
+therefore happen before the hash: redaction, and the client-side compression that
+offline field capture needs. Two features that look unrelated are sequenced by this.
+
+The client must not compute the hash. The server hashing what it actually received is what
+makes `verify_integrity` an independent check rather than a restatement of a client's
+claim, and an offline capture queue must not become a way to commit bytes the server never
+saw.
+
+Consequence: today nothing redacts, and the hash is over the raw upload — so this decision
+describes the boundary the upload path must be moved to, not where it currently sits. Until
+it is, operators must not be invited to upload photographs of people. After it is, an
+operator cannot prove the unredacted original once its key is destroyed. That is the
+intended effect and not a defect: what survives is what the system said it would keep.
+
+Alternatives considered: committing to the raw original and relying on access control,
+rejected because a hash of erased bytes is a permanent public record of something that no
+longer lawfully exists and cannot be shown to correspond to anything. Storing no original
+at all, rejected because redaction is a judgement and an operator who redacted the wrong
+region has no recourse. Keeping originals in an off-chain store deleted on request, which
+is where crypto-erasure lands anyway but without a defensible story about backups.
+
+Tradeoff: evidence becomes weaker than the camera made it, by design. A redacted
+photograph corroborates less than an unredacted one, and the product is choosing the
+corroboration it can lawfully keep over the corroboration it could briefly hold.
+
+Date: 2026-09-23

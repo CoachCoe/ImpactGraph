@@ -95,6 +95,8 @@ from .services import (
     AuthorizationError,
     DomainConflictError,
     EvidenceApplicationService,
+    IdempotencyConflictError,
+    TenantApplicationService,
     VerificationApplicationService,
 )
 from .verification import restate_claims_for
@@ -283,6 +285,34 @@ class InvoiceExtraction(BaseModel):
     # Self-reported by the model and per field, so the operator screen can mark the ones
     # worth looking at rather than presenting one number for the whole document.
     selfReportedConfidence: dict[str, Annotated[float, Field(ge=0, le=1)]]
+
+
+class ProgramCreateRequest(BaseModel):
+    """The owning organisation is deliberately absent: it comes from the session."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=3, max_length=120, pattern=r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
+    name: str = Field(min_length=1, max_length=240)
+    region: str = Field(min_length=1, max_length=240)
+    verificationThreshold: int = Field(default=1, ge=1, le=10)
+
+
+class ProjectCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=3, max_length=160, pattern=r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
+    name: str = Field(min_length=1, max_length=240)
+
+
+class ClaimCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=3, max_length=160, pattern=r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
+    programId: str = Field(min_length=1, max_length=160)
+    projectId: str = Field(min_length=1, max_length=160)
+    statement: str = Field(min_length=1, max_length=1000)
+    outcomeId: str = Field(min_length=1, max_length=160)
 
 
 class EvidenceReviewRequest(BaseModel):
@@ -913,6 +943,115 @@ def evidence(evidence_id: str, user: CurrentUser = None):
     if evidence_id not in store.evidence:
         raise HTTPException(404, "Evidence not found")
     return store.evidence[evidence_id]
+
+
+def _tenant_write(operation):
+    """Run a tenant creation and map its domain errors onto the HTTP contract."""
+    try:
+        with session_factory.begin() as session:
+            return operation(session)
+    except AuthorizationError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except IdempotencyConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (ValueError, DomainConflictError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/programs", status_code=201)
+def create_program(
+    request: Request,
+    body: ProgramCreateRequest,
+    background_tasks: BackgroundTasks,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    """Create a program and queue the registry entity it needs to be usable.
+
+    The program is returned PENDING. It cannot accept evidence until the worker has
+    observed the ProgramCreated event, because `registerEvidence` reverts with
+    UnknownProgram against a registry that has never heard of it.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    key = require_idempotency(idempotency_key)
+    if session_factory is None:
+        raise HTTPException(503, "Creating a program requires PERSISTENCE_MODE=postgres")
+    service = TenantApplicationService(settings.chain_id)
+    response = _tenant_write(
+        lambda session: service.create_program(
+            session,
+            actor=actor,
+            program_id=body.id,
+            name=body.name,
+            region=body.region,
+            verification_threshold=body.verificationThreshold,
+            correlation_id=request.state.correlation_id,
+            idempotency_key=key,
+        )
+    )
+    if response.get("operationId"):
+        background_tasks.add_task(process_backend_operation, UUID(response["operationId"]))
+    return response
+
+
+@app.post("/programs/{program_id}/projects", status_code=201)
+def create_project(
+    request: Request,
+    program_id: str,
+    body: ProjectCreateRequest,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    """A project is not a registry entity, so this is a database write and nothing else."""
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    key = require_idempotency(idempotency_key)
+    if session_factory is None:
+        raise HTTPException(503, "Creating a project requires PERSISTENCE_MODE=postgres")
+    service = TenantApplicationService(settings.chain_id)
+    return _tenant_write(
+        lambda session: service.create_project(
+            session,
+            actor=actor,
+            program_id=program_id,
+            project_id=body.id,
+            name=body.name,
+            correlation_id=request.state.correlation_id,
+            idempotency_key=key,
+        )
+    )
+
+
+@app.post("/claims", status_code=201)
+def create_claim(
+    request: Request,
+    body: ClaimCreateRequest,
+    background_tasks: BackgroundTasks,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    key = require_idempotency(idempotency_key)
+    if session_factory is None:
+        raise HTTPException(503, "Creating a claim requires PERSISTENCE_MODE=postgres")
+    service = TenantApplicationService(settings.chain_id)
+    response = _tenant_write(
+        lambda session: service.create_claim(
+            session,
+            actor=actor,
+            claim_id=body.id,
+            program_id=body.programId,
+            project_id=body.projectId,
+            statement=body.statement,
+            outcome_id=body.outcomeId,
+            correlation_id=request.state.correlation_id,
+            idempotency_key=key,
+        )
+    )
+    if response.get("operationId"):
+        background_tasks.add_task(process_backend_operation, UUID(response["operationId"]))
+    return response
 
 
 @app.post("/evidence", status_code=201)

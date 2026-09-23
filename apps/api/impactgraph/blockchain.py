@@ -84,7 +84,11 @@ class MockBlockchainService:
         return tx
 
     def create_program(self, entity_id: str, commitment: str) -> str:
-        return self._submit("ProgramCreated", entity_id)
+        # The commitment is part of ProgramCreated on chain, and the worker checks a
+        # receipt against it. A mock that omitted it made that check unexercisable.
+        return self._submit(
+            "ProgramCreated", entity_id, commitment=Web3.to_hex(digest_bytes(commitment))
+        )
 
     def record_funding(self, entity_id: str, program_id: str, commitment: str) -> str:
         return self._submit("FundingRecorded", entity_id)
@@ -123,7 +127,12 @@ class MockBlockchainService:
         return self._submit("OutcomeRecorded", entity_id)
 
     def create_claim(self, entity_id: str, program_id: str, commitment: str) -> str:
-        return self._submit("ClaimCreated", entity_id)
+        return self._submit(
+            "ClaimCreated",
+            entity_id,
+            programId=Web3.to_hex(entity_id_bytes(program_id)),
+            claimHash=Web3.to_hex(digest_bytes(commitment)),
+        )
 
     def link_provenance(self, source_id: str, relationship: str, target_id: str) -> str:
         return self._submit("ProvenanceLinked", f"{source_id}:{relationship}:{target_id}")

@@ -87,6 +87,10 @@ def seed_read_model(session: Session, storage: EvidenceStorage | None = None) ->
             operator_org_ref=OPERATOR_ORG_REF,
             region="Kisumu County, Kenya",
             status="ACTIVE",
+            # `bootstrap-chain` creates this program's registry entity and waits for the
+            # receipt, so by the time anything can reference it the chain has it. A program
+            # created through the API starts PENDING and is confirmed by the worker.
+            chain_status="CONFIRMED",
         )
     )
     # The models intentionally avoid broad ORM relationships; establish the FK parent

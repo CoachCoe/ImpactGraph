@@ -37,9 +37,15 @@ class ProgramRecord(EntityMixin, Base):
     operator_name: Mapped[str] = mapped_column(String(240))
     # The organisation that operates this program. Separation of duties is decided
     # against this, not against a hardcoded identifier.
-    operator_org_ref: Mapped[str] = mapped_column(String(160), default="")
+    operator_org_ref: Mapped[str] = mapped_column(String(160), default="", index=True)
     region: Mapped[str] = mapped_column(String(240))
     status: Mapped[str] = mapped_column(String(40))
+    # Whether the registry entity exists. `registerEvidence` reverts with UnknownProgram
+    # without it, so evidence filed against a program still waiting for its receipt would
+    # fail in the worker rather than at the point the operator could do something about it.
+    chain_status: Mapped[str] = mapped_column(
+        String(40), default="NOT_STARTED", server_default="NOT_STARTED"
+    )
     # How many distinct independent verifiers this program's claims require. One is what
     # every program did implicitly before the column existed.
     verification_threshold: Mapped[int] = mapped_column(Integer, default=1, server_default="1")

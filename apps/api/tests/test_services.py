@@ -1,10 +1,10 @@
-from sqlalchemy import create_engine, func, select
+import pytest
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from impactgraph.domain import Role
 from impactgraph.persistence import (
     AuditLogRecord,
-    Base,
     BlockchainOperationRecord,
     EvidenceRecord,
     IdempotencyRecord,
@@ -13,16 +13,16 @@ from impactgraph.persistence import (
 from impactgraph.services import (
     ApplicationActor,
     AuthorizationError,
+    DomainConflictError,
     EvidenceApplicationService,
     IdempotencyConflictError,
     mark_evidence_reviewed,
 )
+from tests.support import memory_session
 
 
 def session() -> Session:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    return Session(engine)
+    return memory_session()
 
 
 def test_create_evidence_is_idempotent_and_audited():
@@ -144,3 +144,77 @@ def test_donor_cannot_manage_evidence():
         pass
     else:
         raise AssertionError("Donor managed evidence")
+
+
+def test_evidence_cannot_be_registered_against_a_program_the_registry_lacks():
+    """registerEvidence reverts with UnknownProgram, and the revert would surface as a
+    worker failure hours later rather than as an answer to the operator's request.
+
+    Before programs could be created through the API every program was on chain by the
+    time anything referenced it. Now one can sit in PostgreSQL with its receipt pending.
+    """
+    db = memory_session(chain_status="PENDING")
+    service = EvidenceApplicationService()
+    actor = ApplicationActor("operator-1", Role.OPERATOR)
+    with db.begin():
+        service.create_uploaded(
+            db,
+            actor=actor,
+            evidence_id="ev-pending-program",
+            project_ref="project-water-12",
+            evidence_type="INVOICE",
+            storage_uri="file:///safe/ev-pending",
+            content_hash="sha256:" + "a" * 64,
+            mime_type="application/pdf",
+            visibility="RESTRICTED",
+            correlation_id="corr-pending",
+            idempotency_key="pending-key",
+        )
+        evidence = db.scalar(
+            select(EvidenceRecord).where(EvidenceRecord.external_id == "ev-pending-program")
+        )
+        evidence.metadata_json = {"programId": "program-clean-water-kenya-2026"}
+        mark_evidence_reviewed(db, "ev-pending-program")
+
+    with db.begin(), pytest.raises(DomainConflictError, match="PENDING on chain"):
+        service.request_registration(
+            db,
+            actor=actor,
+            evidence_id="ev-pending-program",
+            correlation_id="corr-pending",
+            idempotency_key="pending-register",
+        )
+
+
+def test_registration_names_a_program_that_does_not_exist_at_all():
+    db = memory_session()
+    service = EvidenceApplicationService()
+    actor = ApplicationActor("operator-1", Role.OPERATOR)
+    with db.begin():
+        service.create_uploaded(
+            db,
+            actor=actor,
+            evidence_id="ev-ghost-program",
+            project_ref="project-water-12",
+            evidence_type="INVOICE",
+            storage_uri="file:///safe/ev-ghost",
+            content_hash="sha256:" + "a" * 64,
+            mime_type="application/pdf",
+            visibility="RESTRICTED",
+            correlation_id="corr-ghost",
+            idempotency_key="ghost-key",
+        )
+        evidence = db.scalar(
+            select(EvidenceRecord).where(EvidenceRecord.external_id == "ev-ghost-program")
+        )
+        evidence.metadata_json = {"programId": "program-does-not-exist"}
+        mark_evidence_reviewed(db, "ev-ghost-program")
+
+    with db.begin(), pytest.raises(DomainConflictError, match="does not exist"):
+        service.request_registration(
+            db,
+            actor=actor,
+            evidence_id="ev-ghost-program",
+            correlation_id="corr-ghost",
+            idempotency_key="ghost-register",
+        )
