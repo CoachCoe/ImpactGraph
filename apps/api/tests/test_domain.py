@@ -1,3 +1,5 @@
+import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -467,3 +469,55 @@ def test_seeding_reports_why_it_did_not_register():
     object.__setattr__(settings, "registry_address", "0x" + "9" * 40)
     assert register_seeded_evidence(settings) is None
     assert "holds no signing key" in seeded_registration_note(settings)
+
+
+def test_the_migrations_build_the_schema_the_models_describe():
+    """The suite creates tables from the models and production runs the migrations, so the
+    two can disagree and only the deployment finds out.
+
+    They did. A new table's created_at was declared NOT NULL with no server default, which
+    every other migration supplies and which the model relies on -- so every insert worked
+    against the test database and failed against PostgreSQL with a not-null violation.
+    """
+    from alembic.config import Config
+    from sqlalchemy import create_engine, inspect
+
+    from alembic import command
+    from impactgraph.persistence import Base
+
+    # env.py takes the URL from the settings rather than the config, so the environment is
+    # what has to be pointed at the throwaway database.
+    migrated = Path(tempfile.mkdtemp()) / "migrated.db"
+    url = f"sqlite+pysqlite:///{migrated}"
+    root = Path(__file__).resolve().parents[1]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "alembic"))
+    original = os.environ["DATABASE_URL"]
+    os.environ["DATABASE_URL"] = url
+    try:
+        command.upgrade(config, "head")
+    finally:
+        os.environ["DATABASE_URL"] = original
+
+    from_models = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(from_models)
+
+    migrated_tables = set(inspect(create_engine(url)).get_table_names())
+    model_tables = set(Base.metadata.tables)
+    assert model_tables - {"alembic_version"} <= migrated_tables, (
+        "a model has no table in the migrations"
+    )
+
+    migrated_engine = create_engine(url)
+    for table in sorted(model_tables):
+        columns = {c["name"] for c in inspect(migrated_engine).get_columns(table)}
+        expected = set(Base.metadata.tables[table].columns.keys())
+        assert expected <= columns, f"{table} is missing {expected - columns} in the migrations"
+        for column in inspect(migrated_engine).get_columns(table):
+            model_column = Base.metadata.tables[table].columns.get(column["name"])
+            if model_column is None or column["name"] != "created_at":
+                continue
+            assert column["default"] is not None, (
+                f"{table}.created_at has no server default in the migrations, so every "
+                "insert relying on the model's will fail"
+            )

@@ -24,7 +24,9 @@ def upgrade() -> None:
     op.create_table(
         "data_protection_records",
         sa.Column("id", sa.UUID(as_uuid=True), primary_key=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
         sa.Column("evidence_ref", sa.String(160), nullable=False, unique=True),
         sa.Column("lawful_basis", sa.String(40), nullable=False),
         sa.Column("special_category", sa.Boolean(), nullable=False, server_default=sa.false()),
