@@ -65,6 +65,10 @@ class EvidenceRecord(EntityMixin, Base):
     __tablename__ = "evidence"
     external_id: Mapped[str] = mapped_column(String(160), unique=True)
     project_ref: Mapped[str] = mapped_column(String(160))
+    #: Visually similar, not byte-identical. The content hash proves bytes are unchanged;
+    #: this finds the same photograph re-encoded or re-cropped for another delivery. They
+    #: answer different questions and both are needed.
+    perceptual_hash: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     #: Declared by the operator uploading it, because nothing else can know. Registration
     #: is refused until such an object has a data protection record naming a basis.
     personal_data: Mapped[bool] = mapped_column(
@@ -296,6 +300,37 @@ class ConfirmationResponseRecord(EntityMixin, Base):
     responded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class RiskFindingRecord(EntityMixin, Base):
+    """Something that looks wrong, for a person to decide about.
+
+    A finding never changes a claim's status. A false fraud accusation against an NGO is
+    a serious harm, and an automated one is a harm the system caused on its own.
+
+    Every finding carries its explanation and the records behind it, because an
+    unexplained score is not actionable and gets ignored -- which is worse than no queue,
+    since it trains reviewers that the queue is noise.
+    """
+
+    __tablename__ = "risk_findings"
+    external_id: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    #: Scoped so detection never reaches across tenants.
+    organization_ref: Mapped[str] = mapped_column(String(160), index=True)
+    #: DUPLICATE_INVOICE / REUSED_IMAGE / VENDOR_CONCENTRATION.
+    kind: Mapped[str] = mapped_column(String(48), index=True)
+    #: Plain language, written for the person who has to act on it.
+    explanation: Mapped[str] = mapped_column(Text)
+    #: The identifiers the finding rests on, so a reviewer can go and look.
+    subjects: Mapped[dict] = mapped_column(JSON, default=dict)
+    #: OPEN / INVESTIGATING / CONFIRMED / DISMISSED. The last two are the dispositions
+    #: that make a false positive rate measurable.
+    state: Mapped[str] = mapped_column(String(24), default="OPEN", index=True)
+    assigned_to: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    #: Why a reviewer decided what they decided. Required to close one, because a queue
+    #: that can be emptied without saying why measures nothing.
+    disposition_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class DataProtectionRecord(EntityMixin, Base):

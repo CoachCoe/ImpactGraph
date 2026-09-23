@@ -74,6 +74,7 @@ export function Header() {
           <Link href="/financial">Money trail</Link>
           <Link href="/about">How it works</Link>
           {session?.role === "OPERATOR" && <Link href="/operator">Operator</Link>}
+          {session?.role === "OPERATOR" && <Link href="/risk">Review queue</Link>}
           {session?.role === "VERIFIER" && <Link href="/verifier">Verifier</Link>}
           {session?.role === "ADMIN" && <Link href="/admin">Admin</Link>}
         </nav>

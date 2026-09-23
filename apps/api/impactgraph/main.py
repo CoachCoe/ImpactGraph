@@ -44,6 +44,7 @@ from .cli import register_seeded_evidence
 from .config import Settings
 from .database import create_session_factory
 from .demo import INVOICE_BYTES, TAMPERED_INVOICE_BYTES, store
+from .detection import perceptual_hash_for
 from .domain import BlockchainStatus, Role, Visibility
 from .evidence import (
     EvidenceAnalysisProvider,
@@ -86,12 +87,17 @@ from .persistence import (
     FinancialTransactionRecord,
     OutboxRecord,
     ProgramRecord,
+    RiskFindingRecord,
     UserRecord,
 )
 from .read_model import (
     CLAIM_ID as SEEDED_CLAIM_ID,
 )
 from .read_model import TransparencyReadRepository, reset_read_model
+from .risk import open_findings as risk_open_findings
+from .risk import precision as risk_precision
+from .risk import record_disposition as record_risk_disposition
+from .risk import scan as risk_scan
 from .services import (
     ApplicationActor,
     AuditService,
@@ -623,6 +629,106 @@ def record_reversal(
             transaction_ref=transaction_ref,
             reason=body.reason,
             correlation_id=request.state.correlation_id,
+        )
+    )
+
+
+class DispositionRequest(BaseModel):
+    """What a reviewer decided, and why.
+
+    The reason is required to close one. A queue that can be emptied without saying why
+    measures nothing, and the false positive rate this detection has to be judged on is
+    exactly what those reasons add up to.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    state: Literal["OPEN", "INVESTIGATING", "CONFIRMED", "DISMISSED"]
+    note: str = Field(default="", max_length=2000)
+
+
+def _finding_view(finding: RiskFindingRecord) -> dict[str, Any]:
+    return {
+        "id": finding.external_id,
+        "kind": finding.kind,
+        "explanation": finding.explanation,
+        "subjects": finding.subjects,
+        "state": finding.state,
+        "assignedTo": finding.assigned_to,
+        "dispositionNote": finding.disposition_note,
+        "raisedAt": finding.created_at.isoformat() if finding.created_at else None,
+        "closedAt": finding.closed_at.isoformat() if finding.closed_at else None,
+    }
+
+
+@app.post("/risk/scan")
+def run_risk_scan(request: Request, user: CurrentUser = None):
+    """Look for the things that look wrong, within one organisation's own records.
+
+    Never public and never cross-tenant: an invoice appearing in two organisations is a
+    coincidence or a matter for a regulator, and neither is a reason to show one customer
+    another customer's records.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    if session_factory is None:
+        raise HTTPException(503, "Risk detection requires PERSISTENCE_MODE=postgres")
+    return _tenant_write(
+        lambda session: {
+            "findings": [_finding_view(f) for f in risk_scan(session, actor.id)],
+        }
+    )
+
+
+@app.get("/risk/findings")
+def list_risk_findings(user: CurrentUser = None):
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    if session_factory is None:
+        raise HTTPException(503, "Risk detection requires PERSISTENCE_MODE=postgres")
+    with session_factory() as session:
+        return {"findings": [_finding_view(f) for f in risk_open_findings(session, actor.id)]}
+
+
+@app.get("/risk/precision")
+def risk_precision_view(user: CurrentUser = None):
+    """How often each detector was right, from what reviewers decided about its findings.
+
+    Precision only. Nothing here knows about the fraud it never surfaced, so a recall
+    figure would be invented.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    if session_factory is None:
+        raise HTTPException(503, "Risk detection requires PERSISTENCE_MODE=postgres")
+    with session_factory() as session:
+        return {"byKind": risk_precision(session, actor.id)}
+
+
+@app.post("/risk/findings/{finding_id}/disposition")
+def dispose_risk_finding(
+    request: Request,
+    finding_id: str,
+    body: DispositionRequest,
+    user: CurrentUser = None,
+):
+    """Record what a person decided. Nothing about a claim changes as a result.
+
+    A false accusation of fraud against an operating organisation is a serious harm; the
+    decision to act on a finding stays with a person, and this only writes down that they
+    made it.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    if session_factory is None:
+        raise HTTPException(503, "Risk detection requires PERSISTENCE_MODE=postgres")
+    return _tenant_write(
+        lambda session: _finding_view(
+            record_risk_disposition(
+                session,
+                external_id=finding_id,
+                organization_ref=actor.id,
+                state=body.state,
+                actor_id=actor.id,
+                note=body.note,
+                correlation_id=request.state.correlation_id,
+            )
         )
     )
 
@@ -1506,6 +1612,9 @@ async def upload_evidence(
                     mime_type=file.content_type or "application/octet-stream",
                     visibility=normalized_visibility,
                     personal_data=personal_data,
+                    perceptual_hash=perceptual_hash_for(
+                        file.content_type or "", content
+                    ),
                     correlation_id=request.state.correlation_id,
                     idempotency_key=key,
                 )

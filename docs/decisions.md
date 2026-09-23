@@ -312,3 +312,56 @@ stating who then audits the system that both holds the money and reports on it. 
 it quietly inside a feature branch is how a trust model is lost.
 
 Date: 2026-09-23
+
+## ADR-015 — Detection raises questions for people; it never answers them
+
+Decision: a risk finding is an observation with an explanation attached, and nothing else.
+No finding changes a claim's status, notifies anyone outside the operating organisation,
+or is visible to the public. Closing one requires a reviewer to write down why.
+
+Why: a false accusation of fraud against an aid organisation is a serious harm, and one
+made automatically is a harm this system caused rather than surfaced. The detectors here
+find that two invoices carry the same number, or that two deliveries are evidenced by the
+same photograph. Those are facts about records. Whether either is fraud, a filing mistake,
+a deliberate split order or a vendor's duplicate billing is a judgement about people and
+circumstances that the records do not contain.
+
+The mandatory disposition note is the other half. Precision is the only quality measure
+available — nothing here can know about the fraud it never surfaced, so recall is not
+measurable and a figure implying otherwise would be invented — and precision is whatever
+the reviewers say it is. Without the notes there is no measure at all, and an unmeasured
+detector accumulates false positives until the queue is ignored.
+
+Consequence: the queue is operator-facing and tenant-scoped. Detection deliberately does
+not run across organisations, although that is where the value would be: the same vendor
+defrauding three charities is invisible inside any one of them. Making it visible is a
+data-sharing question with contractual and competition dimensions, and the engineering for
+it should not exist before that groundwork does.
+
+## ADR-016 — Deterministic detectors first, statistics only once there is a baseline
+
+Decision: ship exact and near-duplicate matching, perceptual image hashing and vendor
+concentration. Do not ship round-number clustering, threshold-proximity or Benford-style
+checks yet.
+
+Why: those checks need a baseline to be meaningful, and this platform does not have the
+volume to estimate one. Run against thin data they mostly report ordinary variation. A
+queue that is mostly noise teaches reviewers to clear it without reading, which costs more
+than having no queue: it spends their attention and then also hides the real findings
+among the noise.
+
+The deterministic checks have the opposite property. "These two invoices carry the same
+number from the same vendor" is either true or it is not, a reviewer can check it in a
+minute, and the rate at which it is wrong is small and knowable.
+
+Consequence: the statistical layer waits on the precision figures the disposition notes
+produce. When it arrives, it arrives measured against them rather than on the assumption
+that more detectors are better.
+
+The vendor and invoice matching is exact after normalising case and punctuation, and is
+therefore defeated by "Acme Ltd" against "Acme Limited". That is accepted: a reviewer can
+act on "the same invoice number from the same vendor" and cannot act on "these two names
+scored 0.8 similar", and a fuzzy matcher's false positives land in the queue the whole
+design depends on keeping clean.
+
+Date: 2026-09-23
