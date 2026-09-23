@@ -55,7 +55,9 @@ log = logger("impactgraph.worker")
 def seed() -> None:
     settings = Settings.from_env()
     storage = FileEvidenceStorage(
-        settings.evidence_storage_path, settings.evidence_encryption_key
+        settings.evidence_storage_path,
+        settings.evidence_encryption_key,
+        settings.evidence_key_path,
     )
     invoice_uri = storage.uri_for("ev-inv-8291")
     storage.overwrite(invoice_uri, INVOICE_BYTES)
@@ -99,7 +101,9 @@ def demo_reset(local_only: bool) -> None:
     if not local_only or settings.demo_mode == "sepolia":
         raise RuntimeError("Demo reset is restricted to an explicitly selected local environment")
     storage = FileEvidenceStorage(
-        settings.evidence_storage_path, settings.evidence_encryption_key
+        settings.evidence_storage_path,
+        settings.evidence_encryption_key,
+        settings.evidence_key_path,
     )
     if settings.persistence_mode == "postgres":
         factory = create_session_factory(settings.database_url)
@@ -611,7 +615,9 @@ def retention_once() -> RetentionResult:
     worker = RetentionWorker(
         session_factory=create_session_factory(settings.database_url),
         storage=FileEvidenceStorage(
-            settings.evidence_storage_path, settings.evidence_encryption_key
+            settings.evidence_storage_path,
+            settings.evidence_encryption_key,
+            settings.evidence_key_path,
         ),
     )
     result = worker.run_once()
@@ -630,7 +636,9 @@ def retention_loop(interval_seconds: float) -> None:
     worker = RetentionWorker(
         session_factory=create_session_factory(settings.database_url),
         storage=FileEvidenceStorage(
-            settings.evidence_storage_path, settings.evidence_encryption_key
+            settings.evidence_storage_path,
+            settings.evidence_encryption_key,
+            settings.evidence_key_path,
         ),
     )
     log.info("retention.started", interval_seconds=interval_seconds)

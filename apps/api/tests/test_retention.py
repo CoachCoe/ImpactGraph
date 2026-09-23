@@ -28,7 +28,9 @@ def worker():
     return RetentionWorker(
         session_factory=session_factory,
         storage=FileEvidenceStorage(
-            Settings.from_env().evidence_storage_path, TEST_ENCRYPTION_KEY
+            Settings.from_env().evidence_storage_path,
+            TEST_ENCRYPTION_KEY,
+            Settings.from_env().evidence_key_path,
         ),
     )
 

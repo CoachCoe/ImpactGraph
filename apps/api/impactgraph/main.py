@@ -113,7 +113,9 @@ session_factory = (
     else None
 )
 evidence_storage = FileEvidenceStorage(
-    settings.evidence_storage_path, settings.evidence_encryption_key
+    settings.evidence_storage_path,
+    settings.evidence_encryption_key,
+    settings.evidence_key_path,
 )
 # Accepting a provider name and then using the mock anyway would be the silent fallback
 # the specification forbids for chains, so an unknown name is refused at startup by

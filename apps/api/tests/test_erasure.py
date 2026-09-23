@@ -331,3 +331,78 @@ def test_an_erased_object_still_appears_with_what_became_of_it():
     assert entry["erasedAt"] is not None
     assert entry["objectedAt"] is not None
     assert entry["evidenceId"] not in client.get("/data-subjects/subject-erased").json()["erasable"]
+
+
+def test_erasure_removes_what_the_model_read_out_of_the_document():
+    """Destroying the storage key is not erasure on its own.
+
+    The extraction is the document restated as fields -- for a household register that is
+    the person's name, their household and where they live -- and it sat in a column,
+    served over the API to anyone who could read the record, after the file was gone.
+    """
+    from sqlalchemy import select
+
+    from impactgraph.persistence import EvidenceRecord
+
+    client = operator_client()
+    upload(client, "ev-derivatives", personal=True)
+    analyzed = client.post("/evidence/ev-derivatives/analyze").json()
+    assert analyzed["extraction"] is not None
+    client.post(
+        "/evidence/ev-derivatives/review",
+        json={"extraction": analyzed["extraction"], "confirmed": analyzed["reviewRequired"]},
+    )
+    declare_for(client, "ev-derivatives", "subject-derivatives")
+
+    erased = client.post("/evidence/ev-derivatives/erase", json={"reason": "They objected."})
+    assert erased.status_code == 200, erased.text
+    assert "extraction" in erased.json()["derivativesCleared"]
+
+    served = client.get("/evidence/ev-derivatives").json()
+    assert served["extraction"] is None
+    assert served.get("reconciliation") is None
+    assert served.get("providerMetadata") is None
+
+    assert session_factory is not None
+    with session_factory() as session:
+        record = session.scalar(
+            select(EvidenceRecord).where(EvidenceRecord.external_id == "ev-derivatives")
+        )
+        assert record.extraction is None
+        assert "providerMetadata" not in (record.metadata_json or {})
+        # The commitment stays: it cannot be withdrawn from the ledger anyway, and it
+        # reveals nothing about the document it commits to.
+        assert record.content_hash.startswith("sha256:")
+
+
+def test_the_key_is_not_stored_beside_the_object_it_unlocks(tmp_path):
+    """One backup containing both undoes every erasure the moment it is restored."""
+    import os as _os
+
+    store = FileEvidenceStorage(tmp_path / "objects", _os.urandom(32))
+    uri = store.store("ev-separate", DOCUMENT)
+
+    objects = {path.name for path in (tmp_path / "objects").iterdir()}
+    assert objects == {"ev-separate.bin"}, "a key was written beside the ciphertext"
+    assert store.key_root != store.root
+    assert {path.name for path in store.key_root.iterdir()} == {"ev-separate.key"}
+    assert store.retrieve(uri) == DOCUMENT
+
+
+def test_an_object_cannot_be_made_to_decrypt_as_a_different_one(tmp_path):
+    """The identifier is authenticated with the ciphertext, so moving files around cannot
+    substitute one document for another."""
+    import os as _os
+
+    store = FileEvidenceStorage(tmp_path / "objects", _os.urandom(32))
+    first = store.store("ev-first", b"the first document\n")
+    store.store("ev-second", b"the second document\n")
+
+    # Swap both halves of the pair, which without associated data would decrypt cleanly.
+    (store.root / "ev-first.bin").write_bytes((store.root / "ev-second.bin").read_bytes())
+    (store.key_root / "ev-first.key").write_bytes(
+        (store.key_root / "ev-second.key").read_bytes()
+    )
+    with pytest.raises(Exception) as refused:
+        store.retrieve(first)
+    assert not isinstance(refused.value, EvidenceUnrecoverable)

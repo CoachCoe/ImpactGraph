@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .evidence import EvidenceStorage
 from .observability import correlation_context, logger
 from .persistence import AuditLogRecord, DataProtectionRecord, EvidenceRecord
+from .services import strip_derivatives
 from .verification import restate_claims_for
 
 log = logger("impactgraph.retention")
@@ -84,10 +85,14 @@ class RetentionWorker:
         """
         try:
             with self.session_factory() as session, session.begin():
+                # Locked, and skipped where another worker already holds it. Two workers
+                # otherwise both pass the erased_at check and both write an audit entry
+                # claiming to be the erasure. Ignored by SQLite, which has no concurrent
+                # writers for this to matter to.
                 record = session.scalar(
-                    select(DataProtectionRecord).where(
-                        DataProtectionRecord.evidence_ref == evidence_id
-                    )
+                    select(DataProtectionRecord)
+                    .where(DataProtectionRecord.evidence_ref == evidence_id)
+                    .with_for_update(skip_locked=True)
                 )
                 evidence = session.scalar(
                     select(EvidenceRecord).where(EvidenceRecord.external_id == evidence_id)
@@ -95,6 +100,7 @@ class RetentionWorker:
                 if record is None or evidence is None or record.erased_at is not None:
                     return False
                 destroyed = self.storage.destroy_key(evidence.storage_uri)
+                cleared = strip_derivatives(evidence)
                 now = datetime.now(UTC)
                 record.erased_at = now
                 evidence.integrity_status = "UNRECOVERABLE"
@@ -111,6 +117,7 @@ class RetentionWorker:
                             "reason": "Retention schedule reached",
                             "retainUntil": record.retain_until,
                             "keyDestroyed": destroyed,
+                            "derivativesCleared": cleared,
                             "claimsRestated": restated,
                         },
                         correlation_id=f"retention-{evidence_id}",

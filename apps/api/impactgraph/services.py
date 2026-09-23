@@ -1132,6 +1132,32 @@ LAWFUL_BASES = (
 SPECIAL_CATEGORY_BASES = ("CONSENT",)
 
 
+def strip_derivatives(evidence: EvidenceRecord) -> list[str]:
+    """Remove everything that came out of the document, keeping the commitment to it.
+
+    Destroying the storage key is not erasure on its own. The extraction is the document
+    restated as fields -- for a household register that is the person's name, their
+    household and where they live -- and it sits in a column, served over the API to
+    anyone who could read the record. The reconciliation is derived from it and the
+    provider metadata carries what the model was asked and answered.
+
+    The content hash stays. It is the commitment, it cannot be withdrawn from the ledger
+    anyway, and it reveals nothing about the document it commits to.
+    """
+    cleared: list[str] = []
+    if evidence.extraction is not None:
+        evidence.extraction = None
+        cleared.append("extraction")
+    if evidence.reconciliation is not None:
+        evidence.reconciliation = None
+        cleared.append("reconciliation")
+    metadata = dict(evidence.metadata_json or {})
+    if metadata.pop("providerMetadata", None) is not None:
+        evidence.metadata_json = metadata
+        cleared.append("providerMetadata")
+    return cleared
+
+
 class DataProtectionApplicationService:
     """The record that makes holding an evidence object lawful, and erasure when it stops.
 
@@ -1321,6 +1347,7 @@ class DataProtectionApplicationService:
 
         now = datetime.now(UTC)
         destroyed = self.storage.destroy_key(evidence.storage_uri)
+        cleared = strip_derivatives(evidence)
         record.withdrawn_at = record.withdrawn_at or now
         record.erased_at = now
         evidence.integrity_status = "UNRECOVERABLE"
@@ -1337,6 +1364,7 @@ class DataProtectionApplicationService:
             metadata={
                 "reason": reason,
                 "keyDestroyed": destroyed,
+                "derivativesCleared": cleared,
                 "claimsRestated": restated,
             },
         )
@@ -1344,6 +1372,7 @@ class DataProtectionApplicationService:
             "evidenceId": evidence_id,
             "erasedAt": now.isoformat(),
             "keyDestroyed": destroyed,
+            "derivativesCleared": cleared,
             "claimsRestated": restated,
             # The commitment is not withdrawn, and saying so is the honest part.
             "commitment": "The onchain commitment remains; it records that these bytes were "

@@ -80,7 +80,9 @@ def seed_read_model(session: Session, storage: EvidenceStorage | None = None) ->
     # demo repeatable, so it has to undo a tamper even when the rows are already present.
     _settings = Settings.from_env()
     evidence_store = storage or FileEvidenceStorage(
-        _settings.evidence_storage_path, _settings.evidence_encryption_key
+        _settings.evidence_storage_path,
+        _settings.evidence_encryption_key,
+        _settings.evidence_key_path,
     )
     storage_uri = evidence_store.uri_for(EVIDENCE_ID)
     evidence_store.overwrite(storage_uri, INVOICE_BYTES)

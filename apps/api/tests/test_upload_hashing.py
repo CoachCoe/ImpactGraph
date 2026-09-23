@@ -65,7 +65,9 @@ def test_the_stored_object_is_byte_identical_to_what_was_sent():
         )
     settings = Settings.from_env()
     storage = FileEvidenceStorage(
-        settings.evidence_storage_path, settings.evidence_encryption_key
+        settings.evidence_storage_path,
+        settings.evidence_encryption_key,
+        settings.evidence_key_path,
     )
     assert storage.retrieve(record.storage_uri) == payload
     assert record.content_hash == sha256_bytes(payload)

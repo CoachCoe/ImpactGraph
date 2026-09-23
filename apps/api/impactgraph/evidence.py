@@ -42,9 +42,14 @@ class FileEvidenceStorage:
     pointing at nothing, and could not be told apart from an object that never existed.
     """
 
-    def __init__(self, root: Path, key: bytes) -> None:
+    def __init__(self, root: Path, key: bytes, key_root: Path | None = None) -> None:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        # A separate location, because erasure is destroying the key and a backup that
+        # contains both undoes it on restore. Defaulting beside the objects would make
+        # the separation something every deployment has to remember to arrange.
+        self.key_root = (key_root or root.parent / f"{root.name}-keys").resolve()
+        self.key_root.mkdir(parents=True, exist_ok=True)
         if len(key) != 32:
             raise ValueError("The evidence encryption key must be 32 bytes")
         self._cipher = AESGCM(key)
@@ -56,21 +61,26 @@ class FileEvidenceStorage:
         target = Path(storage_uri.removeprefix("file://")).resolve()
         if self.root not in target.parents:
             raise ValueError("Evidence path is outside configured storage")
-        return target, target.with_suffix(".key")
+        return target, self.key_root / f"{target.stem}.key"
 
     def _seal(self, target: Path, key_path: Path, content: bytes) -> None:
+        # The identifier is authenticated alongside the ciphertext, so an object cannot be
+        # made to decrypt as a different one by moving files around.
+        associated = target.stem.encode()
         data_key = AESGCM.generate_key(bit_length=256)
         nonce = secrets.token_bytes(12)
-        target.write_bytes(nonce + AESGCM(data_key).encrypt(nonce, content, None))
+        target.write_bytes(nonce + AESGCM(data_key).encrypt(nonce, content, associated))
         wrap_nonce = secrets.token_bytes(12)
-        key_path.write_bytes(wrap_nonce + self._cipher.encrypt(wrap_nonce, data_key, None))
+        key_path.write_bytes(
+            wrap_nonce + self._cipher.encrypt(wrap_nonce, data_key, associated)
+        )
         key_path.chmod(0o600)
 
     def store(self, evidence_id: str, content: bytes) -> str:
         if not evidence_id.replace("-", "").replace("_", "").isalnum():
             raise ValueError("Unsafe evidence identifier")
         target = self.root / f"{evidence_id}.bin"
-        key_path = target.with_suffix(".key")
+        key_path = self.key_root / f"{evidence_id}.key"
         if target.exists():
             # Ciphertext differs for identical bytes, so immutability is checked against
             # what was stored rather than against the encrypted form.
@@ -86,10 +96,11 @@ class FileEvidenceStorage:
             raise EvidenceUnrecoverable(
                 "The key for this evidence has been destroyed; its contents are unrecoverable"
             )
+        associated = target.stem.encode()
         wrapped = key_path.read_bytes()
-        data_key = self._cipher.decrypt(wrapped[:12], wrapped[12:], None)
+        data_key = self._cipher.decrypt(wrapped[:12], wrapped[12:], associated)
         sealed = target.read_bytes()
-        return AESGCM(data_key).decrypt(sealed[:12], sealed[12:], None)
+        return AESGCM(data_key).decrypt(sealed[:12], sealed[12:], associated)
 
     def exists(self, storage_uri: str) -> bool:
         target, _ = self._paths(storage_uri)

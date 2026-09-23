@@ -95,6 +95,9 @@ class Settings:
     explorer_url: str = ""
     confirmations_required: int = 1
     evidence_storage_path: Path = Path("./var/evidence")
+    #: Where the wrapped per-object keys live. Separate from the objects because erasure
+    #: destroys a key, and one backup containing both undoes every erasure on restore.
+    evidence_key_path: Path = Path("./var/evidence-keys")
     #: Wraps each object's own data key. Destroying a wrapped key is how evidence is
     #: erased while the commitment to it stays true -- see ADR-011.
     evidence_encryption_key: bytes = b""
@@ -128,6 +131,9 @@ class Settings:
             explorer_url=os.getenv("BLOCK_EXPLORER_URL", ""),
             confirmations_required=int(os.getenv("BLOCKCHAIN_CONFIRMATIONS_REQUIRED", "1")),
             evidence_storage_path=Path(os.getenv("EVIDENCE_STORAGE_PATH", "./var/evidence")),
+            evidence_key_path=Path(
+                os.getenv("EVIDENCE_KEY_PATH", "./var/evidence-keys")
+            ),
             evidence_encryption_key=_decode_encryption_key(
                 os.getenv("EVIDENCE_ENCRYPTION_KEY", "")
             ),

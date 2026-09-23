@@ -21,6 +21,9 @@ _TMP = Path(os.environ["IMPACTGRAPH_TEST_ROOT"])
 os.environ["PERSISTENCE_MODE"] = "postgres"
 os.environ["DATABASE_URL"] = f"sqlite+pysqlite:///{_TMP / 'test.db'}"
 os.environ["EVIDENCE_STORAGE_PATH"] = str(_TMP / "evidence")
+# Separate from the objects, as a deployment keeps them, so the suite exercises the same
+# two-location arrangement rather than a convenient single one.
+os.environ["EVIDENCE_KEY_PATH"] = str(_TMP / "evidence-keys")
 os.environ["AI_PROVIDER"] = "mock"
 # Generated per run, and thrown away with the sandbox. Evidence is encrypted at rest, so
 # every test that stores or reads an object goes through the same path production does.
@@ -45,7 +48,11 @@ from impactgraph.read_model import reset_read_model, seed_read_model
 
 _factory = create_session_factory(os.environ["DATABASE_URL"])
 Base.metadata.create_all(_factory.kw["bind"])
-_storage = FileEvidenceStorage(Path(os.environ["EVIDENCE_STORAGE_PATH"]), TEST_ENCRYPTION_KEY)
+_storage = FileEvidenceStorage(
+    Path(os.environ["EVIDENCE_STORAGE_PATH"]),
+    TEST_ENCRYPTION_KEY,
+    Path(os.environ["EVIDENCE_KEY_PATH"]),
+)
 
 
 @pytest.fixture(autouse=True)

@@ -39,9 +39,17 @@ captured the evidence recorded it.
 POST /evidence/{evidenceId}/erase   {"reason": "..."}
 ```
 
-This destroys the encryption key for the object. The ciphertext may remain on disk and no
-longer means anything. Claims that rested on the object are re-evaluated in the same
-transaction, so a claim cannot keep a verified badge above evidence that no longer exists.
+This destroys the encryption key for the object, and clears everything derived from it —
+the extraction, the reconciliation and the provider metadata. The extraction matters: it is
+the document restated as fields, so for a household register it holds the name and the
+household, and destroying only the file would have left that readable in the database.
+
+The ciphertext may remain on disk and no longer means anything. Claims that rested on the
+object are re-evaluated in the same transaction, so a claim cannot keep a verified badge
+above evidence that no longer exists.
+
+The content hash is kept. It is the commitment, it cannot be withdrawn from the ledger
+anyway, and it reveals nothing about the document.
 
 Erasure is also automatic: `impactgraph.cli retention` erases every object past the
 `retainUntil` date on its record, whether or not anyone asked.
@@ -86,9 +94,20 @@ controller is named, both are answerable.
 - **Redaction is not implemented.** Committed bytes are the uploaded bytes, so ADR-011's
   requirement that commitments cover publishable content is a decision the upload path has
   not yet been moved to. Do not invite uploads of photographs of people until it has been.
-- **Erasure destroys the key, not the ciphertext.** Backups taken before erasure contain
-  the encrypted object; they do not contain the key if the key store is backed up
-  separately, which is the point of keeping them apart.
+- **Erasure destroys the key, not the ciphertext.** Objects live in
+  `EVIDENCE_STORAGE_PATH` and their wrapped keys in `EVIDENCE_KEY_PATH`, which default to
+  separate directories and should be separate volumes with separate backup policies.
+- **A restore undoes an erasure.** If a backup of the key store predates an erasure and is
+  restored, the key returns, the key-encryption key in the environment is unchanged, and
+  the document is readable again. Nothing in this system detects that. **Re-apply every
+  erasure recorded after the backup was taken**, which `GET /data-subjects/{ref}` and the
+  `erased_at` column let you enumerate. If that is not operationally realistic, shorten the
+  retention of the key-store backups until it is.
+- **The personal-data flag is a declaration, not a detection.** Registration is gated on
+  `personal_data` being set at upload, and an operator who does not set it registers a
+  photograph of a person with no basis and no record. Nothing inspects the document to
+  check. Train for it, and treat the flag as an assertion someone made rather than a fact
+  the system established.
 - **Special-category data** — health, vulnerability — is accepted only under explicit
   consent. Whether a substantial-public-interest condition applies instead is a question
   for counsel, not for this file.
