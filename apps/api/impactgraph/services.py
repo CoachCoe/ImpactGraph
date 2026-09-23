@@ -715,6 +715,87 @@ class TenantApplicationService:
         )
         return response
 
+    def retry_registry_entity(
+        self,
+        session: Session,
+        *,
+        actor: ApplicationActor,
+        program_id: str,
+        correlation_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Queue the registry entity again for a program whose submission failed.
+
+        A failed submission is not a failed program. The chain call fails for transient
+        reasons -- a timeout, a nonce collision, a node restart -- and without this the
+        program is a tombstone: claims refuse it, evidence refuses it, and the identifier
+        is taken so it cannot be created again. Evidence has had this from the start, in
+        `request_registration` accepting REGISTRATION_FAILED.
+        """
+        self._operator(actor)
+        request_hash = hash_fields("retry_program_entity_request", (("program_id", program_id),))
+        replay = self.idempotency.replay_or_validate(
+            session,
+            key=idempotency_key,
+            operation="RETRY_PROGRAM_ENTITY",
+            request_hash=request_hash,
+        )
+        if replay is not None:
+            return replay
+        program = self._owned(
+            session.scalar(select(ProgramRecord).where(ProgramRecord.slug == program_id)), actor
+        )
+        if program.chain_status != "FAILED":
+            raise DomainConflictError(
+                f"Program {program_id!r} is {program.chain_status} on chain; only a failed "
+                "registry entity can be retried"
+            )
+
+        operation_id = uuid4()
+        program.chain_status = "PENDING"
+        session.add(
+            BlockchainOperationRecord(
+                id=operation_id,
+                entity_id=program_id,
+                operation_type="CREATE_PROGRAM_ENTITY",
+                status=BlockchainStatus.CREATED,
+                expected_event="ProgramCreated",
+                chain_id=self.chain_id,
+                confirmations=0,
+                correlation_id=correlation_id,
+            )
+        )
+        session.add(
+            OutboxRecord(
+                topic="blockchain.create_program",
+                payload={
+                    "operationId": str(operation_id),
+                    "programId": program_id,
+                    "commitment": program_hash(program_id),
+                },
+                correlation_id=correlation_id,
+            )
+        )
+        response = {"id": program_id, "chainStatus": "PENDING", "operationId": str(operation_id)}
+        self.audit.record(
+            session,
+            actor=actor,
+            action="PROGRAM_ENTITY_RETRIED",
+            entity_type="PROGRAM",
+            entity_id=program_id,
+            correlation_id=correlation_id,
+            metadata={"operationId": str(operation_id)},
+        )
+        self.idempotency.remember(
+            session,
+            key=idempotency_key,
+            operation="RETRY_PROGRAM_ENTITY",
+            request_hash=request_hash,
+            response_status=202,
+            response_body=response,
+        )
+        return response
+
     def create_claim(
         self,
         session: Session,

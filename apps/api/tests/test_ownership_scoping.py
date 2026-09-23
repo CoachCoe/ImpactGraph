@@ -311,3 +311,120 @@ def test_the_application_reads_an_unseeded_database_without_inventing_anything()
             repository.program("program-nope")
         with pytest.raises(LookupError):
             repository.claim("claim-nope")
+
+
+def _failed_program(client: TestClient, slug: str) -> None:
+    from sqlalchemy import select
+
+    from impactgraph.persistence import ProgramRecord
+
+    created = client.post(
+        "/programs",
+        headers={"Idempotency-Key": f"create-{slug}"},
+        json={"id": slug, "name": slug, "region": "Kisumu"},
+    )
+    assert created.status_code == 201, created.text
+    assert session_factory is not None
+    with session_factory.begin() as session:
+        session.scalar(
+            select(ProgramRecord).where(ProgramRecord.slug == slug)
+        ).chain_status = "FAILED"
+
+
+def test_a_program_whose_registry_entity_failed_is_not_a_tombstone():
+    """The chain call fails for transient reasons -- a timeout, a nonce collision, a node
+    restart. Without a retry the program is unusable for ever and its identifier is taken,
+    so the organisation's only recourse is to invent a different one."""
+    owner = TestClient(app)
+    sign_in(owner, OPERATOR)
+    _failed_program(owner, "program-transient-failure")
+
+    # Everything that depends on the entity refuses it, which is correct...
+    blocked = owner.post(
+        "/claims",
+        headers={"Idempotency-Key": "claim-on-failed"},
+        json={
+            "id": "claim-on-failed",
+            "programId": "program-transient-failure",
+            "projectId": "project-water-12",
+            "statement": "Nothing yet.",
+            "outcomeId": "outcome-on-failed",
+        },
+    )
+    assert blocked.status_code == 409
+
+    # ...and the operator can put it back on the queue rather than starting again.
+    retried = owner.post(
+        "/programs/program-transient-failure/registry-entity",
+        headers={"Idempotency-Key": "retry-1"},
+    )
+    assert retried.status_code == 202, retried.text
+    assert retried.json()["chainStatus"] == "PENDING"
+
+
+def test_only_a_failed_entity_is_retried_and_only_by_its_owner():
+    owner = TestClient(app)
+    sign_in(owner, OPERATOR)
+    # A confirmed program is not re-queued: that would create a second entity for it.
+    assert owner.post(
+        f"/programs/{PROGRAM_ID}/registry-entity", headers={"Idempotency-Key": "retry-confirmed"}
+    ).status_code == 409
+
+    _failed_program(owner, "program-not-yours")
+    make_outsider()
+    outsider = TestClient(app)
+    sign_in(outsider, OUTSIDER)
+    assert outsider.post(
+        "/programs/program-not-yours/registry-entity", headers={"Idempotency-Key": "retry-theirs"}
+    ).status_code == 403
+
+
+def test_an_unfinished_claim_is_not_published_by_being_listed():
+    """Any claim is readable by identifier. Enumerating them is a different thing: it would
+    publish an organisation's unfinished statements the moment they were written."""
+    owner = TestClient(app)
+    sign_in(owner, OPERATOR)
+    owner.post(
+        "/programs",
+        headers={"Idempotency-Key": "draft-program"},
+        json={"id": "program-draft-home", "name": "Draft Home", "region": "Kisumu"},
+    )
+    from sqlalchemy import select
+
+    from impactgraph.persistence import ClaimRecord, ProgramRecord
+
+    assert session_factory is not None
+    with session_factory.begin() as session:
+        session.scalar(
+            select(ProgramRecord).where(ProgramRecord.slug == "program-draft-home")
+        ).chain_status = "CONFIRMED"
+    created = owner.post(
+        "/claims",
+        headers={"Idempotency-Key": "draft-claim"},
+        json={
+            "id": "claim-unfinished",
+            "programId": "program-draft-home",
+            "projectId": "project-water-12",
+            "statement": "A number we have not evidenced yet.",
+            "outcomeId": "outcome-unfinished",
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["status"] == "EVIDENCE_PENDING"
+
+    anonymous = TestClient(app).get("/claims").json()
+    assert all(item["id"] != "claim-unfinished" for item in anonymous), (
+        "an unfinished claim was published to everyone by being listed"
+    )
+    # Its own operator sees it, because they are the ones who have to finish it.
+    assert any(item["id"] == "claim-unfinished" for item in owner.get("/claims").json())
+    # And it is still readable by identifier, which is the transparency this product is for.
+    assert TestClient(app).get("/claims/claim-unfinished").status_code == 200
+
+    with session_factory.begin() as session:
+        session.scalar(
+            select(ClaimRecord).where(ClaimRecord.external_id == "claim-unfinished")
+        ).status = "VERIFICATION_PENDING"
+    assert any(
+        item["id"] == "claim-unfinished" for item in TestClient(app).get("/claims").json()
+    ), "a claim put forward for verification must be listed to everyone"

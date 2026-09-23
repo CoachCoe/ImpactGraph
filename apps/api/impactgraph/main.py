@@ -930,15 +930,25 @@ def project(project_id: str):
 
 
 @app.get("/claims")
-def claims(status: str | None = None, program: str | None = None):
+def claims(status: str | None = None, program: str | None = None, user: CurrentUser = None):
     """Claims, optionally by status and program.
 
     The verifier workspace named one claim in its source, so a second organisation's work
     was unreachable and the queue its own comment described did not exist.
+
+    Drafts are left out for anyone but the organisation that wrote them. Any claim can
+    still be read by its identifier -- that is the transparency this product is for -- but
+    enumerating them would publish an organisation's unfinished statements the moment they
+    were written, which is a different thing from making the finished ones inspectable.
     """
     if session_factory is None:
         raise HTTPException(503, "Listing claims requires PERSISTENCE_MODE=postgres")
-    return database_read("claims", status, program)
+    own_drafts = (
+        user.organization_external_id
+        if user and user.role in {Role.OPERATOR, Role.ADMIN}
+        else None
+    )
+    return database_read("claims", status, program, own_drafts)
 
 
 @app.get("/claims/{claim_id}")
@@ -1163,6 +1173,39 @@ def create_project(
             idempotency_key=key,
         )
     )
+
+
+@app.post("/programs/{program_id}/registry-entity", status_code=202)
+def retry_program_entity(
+    request: Request,
+    program_id: str,
+    background_tasks: BackgroundTasks,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    """Queue the registry entity again after a failed submission.
+
+    Without this a program whose chain call failed for a transient reason is a tombstone:
+    claims refuse it, evidence refuses it, and its identifier is taken so it cannot be
+    created again. Evidence has always been able to retry; a program could not.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    key = require_idempotency(idempotency_key)
+    if session_factory is None:
+        raise HTTPException(503, "Retrying a registry entity requires PERSISTENCE_MODE=postgres")
+    service = TenantApplicationService(settings.chain_id)
+    response = _tenant_write(
+        lambda session: service.retry_registry_entity(
+            session,
+            actor=actor,
+            program_id=program_id,
+            correlation_id=request.state.correlation_id,
+            idempotency_key=key,
+        )
+    )
+    if response.get("operationId"):
+        background_tasks.add_task(process_backend_operation, UUID(response["operationId"]))
+    return response
 
 
 @app.post("/claims", status_code=201)
