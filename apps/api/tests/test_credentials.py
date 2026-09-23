@@ -134,3 +134,28 @@ def test_a_rotated_key_cannot_read_what_the_old_one_sealed(session):
 def test_a_key_of_the_wrong_length_is_refused_rather_than_padded():
     with pytest.raises(ValueError, match="32 bytes"):
         seal(os.urandom(16), TOKEN, associated="org-a:truelayer")
+
+
+def test_rotation_re_seals_a_credential_under_the_new_key(session):
+    """The runbook says the procedure re-seals rather than swaps. This is the part of it
+    that has to be true for a bank connection rather than only for evidence."""
+    import os as _os
+
+    from impactgraph.credentials import seal as _seal
+    from impactgraph.credentials import unseal as _unseal
+
+    new_key = _os.urandom(32)
+    with session.begin():
+        store(session, key=KEY, organization_ref="org-a", provider="truelayer",
+              refresh_token=TOKEN, scopes="accounts", expires_at=None)
+
+    with session.begin():
+        record = session.scalar(select(ProviderCredentialRecord))
+        token = _unseal(KEY, record.sealed_refresh_token, associated="org-a:truelayer")
+        record.sealed_refresh_token = _seal(new_key, token, associated="org-a:truelayer")
+
+    assert refresh_token_for(
+        session, key=new_key, organization_ref="org-a", provider="truelayer"
+    ) == TOKEN
+    with pytest.raises(Exception):
+        refresh_token_for(session, key=KEY, organization_ref="org-a", provider="truelayer")

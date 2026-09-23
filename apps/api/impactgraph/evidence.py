@@ -26,6 +26,7 @@ class EvidenceStorage(Protocol):
     def overwrite(self, storage_uri: str, content: bytes) -> None: ...
     def retrieve(self, storage_uri: str) -> bytes: ...
     def exists(self, storage_uri: str) -> bool: ...
+    def rewrap(self, storage_uri: str, new_key: bytes) -> bool: ...
     def destroy_key(self, storage_uri: str) -> bool: ...
 
 
@@ -105,6 +106,26 @@ class FileEvidenceStorage:
     def exists(self, storage_uri: str) -> bool:
         target, _ = self._paths(storage_uri)
         return target.exists()
+
+    def rewrap(self, storage_uri: str, new_key: bytes) -> bool:
+        """Re-encrypt this object's data key under a new key-encryption key.
+
+        The data key itself is unchanged, so the ciphertext is untouched and only the tiny
+        key file is rewritten. An object whose key has been destroyed is skipped rather
+        than recreated: there is nothing to re-seal and it stays erased.
+        """
+        target, key_path = self._paths(storage_uri)
+        if not key_path.exists():
+            return False
+        # The same binding as the original seal. Re-wrapping without it would produce a
+        # key file that decrypts nowhere, on every object, in one pass.
+        associated = target.stem.encode()
+        wrapped = key_path.read_bytes()
+        data_key = self._cipher.decrypt(wrapped[:12], wrapped[12:], associated)
+        nonce = secrets.token_bytes(12)
+        key_path.write_bytes(nonce + AESGCM(new_key).encrypt(nonce, data_key, associated))
+        key_path.chmod(0o600)
+        return True
 
     def destroy_key(self, storage_uri: str) -> bool:
         """Make the object unrecoverable. Returns whether a key was there to destroy."""
