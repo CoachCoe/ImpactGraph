@@ -461,3 +461,33 @@ footer{margin-top:24px;padding:36px var(--gutter) 56px;background:var(--ink-deep
 .basisPanel label{display:block;margin-top:12px;font-family:var(--font-mono);font-size:10px;letter-spacing:var(--track-label-sm);text-transform:uppercase;color:var(--muted)}
 .basisPanel input,.basisPanel select{width:100%;margin-top:5px;padding:9px;border:1px solid var(--ghost-line);border-radius:7px;background:var(--field);color:var(--ink);font-family:var(--font-sans);font-size:14px;letter-spacing:0;text-transform:none}
 .basisPanel .button{margin-top:16px}
+.proof{max-width:840px;margin:0 auto;display:grid;gap:22px}
+/* A grid item will not shrink below its content without this, so one unbroken hash or
+   the embed snippet widens the whole page rather than scrolling inside its own box. */
+.proof>*{min-width:0}
+.proof .hash{overflow-wrap:anywhere}
+.proofHead{padding:28px 0 4px}
+.proofHead h1{margin:8px 0 6px;font-size:clamp(24px,4vw,34px);line-height:1.25}
+.proofBy{color:var(--muted);margin:0 0 14px}
+.proofFacts{display:grid;gap:14px;margin:16px 0 0}
+.proofFacts dt{font-family:var(--font-mono);font-size:10px;letter-spacing:var(--track-label-sm);text-transform:uppercase;color:var(--muted)}
+.proofFacts dd{margin:4px 0 0}
+.proofLimits{border-color:var(--warn)}
+.plainList{margin:12px 0 0;padding-left:18px;display:grid;gap:10px;font-size:14px;line-height:1.6}
+.embedSnippet{margin:14px 0 0;padding:13px;border:1px solid var(--ghost-line);border-radius:8px;background:var(--field);overflow-x:auto;font-family:var(--font-mono);font-size:11px;line-height:1.6}
+.embedPreview{display:block;margin-top:14px}
+.proofFooter{text-align:center;color:var(--muted);font-size:12px;padding:6px 0 30px}
+@media (max-width:700px){.proofHead{padding-top:18px}}
+
+/* A proof printed for a grant application or a board pack. The controls go, the hashes
+   stay, and the page says it was a snapshot of something that keeps changing. */
+.printOnly{display:none}
+@media print{
+  header,footer,.embedSnippet,.embedPreview,.uploadActions{display:none!important}
+  .printOnly{display:block}
+  body{background:#fff;color:#000}
+  .proof{max-width:none;gap:14px}
+  .panel{border:1px solid #bbb;break-inside:avoid;page-break-inside:avoid}
+  .hash{word-break:break-all;font-size:9pt}
+  a[href]::after{content:""}
+}

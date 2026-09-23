@@ -21,6 +21,7 @@ from .persistence import (
     DeliveryRecord,
     FinancialTransactionRecord,
     FundingRecord,
+    public_funder_name,
 )
 
 
@@ -252,7 +253,7 @@ def financial_summary(session: Session, program_ref: str) -> dict[str, Any]:
         "funding": [
             {
                 "id": row.external_id,
-                "funder": row.funder_name,
+                "funder": public_funder_name(row),
                 "amount": Money(row.amount_minor, row.currency).as_dict(),
                 "receivedOn": row.received_on,
                 "sourceRef": row.source_ref,

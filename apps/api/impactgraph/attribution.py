@@ -31,6 +31,7 @@ from .persistence import (
     FundingRecord,
     OutcomeRecord,
     ProvenanceEdgeRecord,
+    public_funder_name,
 )
 
 
@@ -255,7 +256,7 @@ def funding_attribution(session: Session, funding_ref: str) -> dict[str, Any]:
     uncommitted, overcommitted = _remainder(received, committed)
     return {
         "fundingId": funding.external_id,
-        "funder": funding.funder_name,
+        "funder": public_funder_name(funding),
         "programId": funding.program_ref,
         "receivedOn": funding.received_on,
         "received": received.as_dict(),

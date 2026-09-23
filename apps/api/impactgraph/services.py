@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -20,11 +22,14 @@ from .persistence import (
     DataProtectionRecord,
     DomainEntityRecord,
     EvidenceRecord,
+    FundingRecord,
     IdempotencyRecord,
     OrganizationRecord,
     OutboxRecord,
     ProgramRecord,
     UserRecord,
+    as_utc_iso,
+    public_funder_name,
 )
 from .verification import restate_claims_for
 
@@ -1377,4 +1382,150 @@ class DataProtectionApplicationService:
             # The commitment is not withdrawn, and saying so is the honest part.
             "commitment": "The onchain commitment remains; it records that these bytes were "
             "once committed, which is still true.",
+        }
+
+
+class FunderNameService:
+    """Whether a funder is named in public, decided by the funder.
+
+    An operator knows the name already and has no endpoint that publishes it. They can
+    ask for a consent link and pass it to the person, and the person decides. The link is
+    the whole authority, so it is stored hashed and the plaintext is returned once.
+
+    Withdrawable, unlike the publication of a claim. A claim published and then withdrawn
+    would make the record editable; a person changing their mind about being named is the
+    thing this exists to respect.
+    """
+
+    def __init__(self) -> None:
+        self.audit = AuditService()
+
+    def issue_consent_link(
+        self,
+        session: Session,
+        *,
+        actor: ApplicationActor,
+        funding_id: str,
+        correlation_id: str,
+    ) -> dict[str, Any]:
+        if actor.role not in {Role.OPERATOR, Role.ADMIN}:
+            raise AuthorizationError("Only an operator or administrator may request this")
+        funding = session.scalar(
+            select(FundingRecord).where(FundingRecord.external_id == funding_id)
+        )
+        if funding is None:
+            raise LookupError("Funding not found")
+        token = secrets.token_urlsafe(48)
+        funding.name_consent_token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        self.audit.record(
+            session,
+            actor=actor,
+            action="FUNDER_NAME_CONSENT_REQUESTED",
+            entity_type="FUNDING",
+            entity_id=funding_id,
+            correlation_id=correlation_id,
+            metadata={},
+        )
+        return {
+            "fundingId": funding_id,
+            "token": token,
+            "note": "Send this to the funder. Requesting it does not publish anything, and "
+            "there is no way for anyone else to decide this on their behalf.",
+        }
+
+    @staticmethod
+    def _by_token(session: Session, token: str) -> FundingRecord:
+        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        funding = session.scalar(
+            select(FundingRecord).where(FundingRecord.name_consent_token_hash == digest)
+        )
+        if funding is None:
+            raise LookupError("That link is not valid")
+        return funding
+
+    def set_publication(
+        self,
+        session: Session,
+        *,
+        token: str,
+        publish: bool,
+        correlation_id: str,
+    ) -> dict[str, Any]:
+        funding = self._by_token(session, token)
+        funding.publish_funder_name = publish
+        session.add(
+            AuditLogRecord(
+                actor_id="funder",
+                action="FUNDER_NAME_PUBLISHED" if publish else "FUNDER_NAME_WITHDRAWN",
+                entity_type="FUNDING",
+                entity_id=funding.external_id,
+                # Never the name: an entry recording a choice about a name should not be
+                # a second place the name is written down.
+                metadata_json={},
+                correlation_id=correlation_id,
+            )
+        )
+        return {
+            "fundingId": funding.external_id,
+            "published": publish,
+            "shownAs": public_funder_name(funding),
+        }
+
+
+class ClaimPublicationService:
+    """Deciding that a claim is a public proof, and not being able to take it back.
+
+    An organisation opts in, because no organisation adopts a platform that publishes
+    its failures by default. After that the page shows the current status -- including
+    CHALLENGED or REVOKED -- and there is no route that unpublishes it. A record that can
+    be withdrawn once the verdict turns inconvenient is not a record of anything, and the
+    withdrawal would be the one edit this whole system exists to make impossible.
+    """
+
+    def __init__(self) -> None:
+        self.audit = AuditService()
+
+    def publish(
+        self,
+        session: Session,
+        *,
+        actor: ApplicationActor,
+        claim_id: str,
+        correlation_id: str,
+    ) -> dict[str, Any]:
+        if actor.role not in {Role.OPERATOR, Role.ADMIN}:
+            raise AuthorizationError("Only an operator or administrator may publish a claim")
+        claim = session.scalar(select(ClaimRecord).where(ClaimRecord.external_id == claim_id))
+        if claim is None:
+            raise LookupError("Claim not found")
+        program = session.scalar(
+            select(ProgramRecord).where(ProgramRecord.slug == claim.program_ref)
+        )
+        if program is None:
+            raise LookupError("The claim's program does not exist")
+        if actor.role != Role.ADMIN and program.operator_org_ref != actor.id:
+            raise AuthorizationError("Claim belongs to another operating organisation")
+        if claim.published_at is not None:
+            return {
+                "claimId": claim_id,
+                "publishedAt": as_utc_iso(claim.published_at),
+                "alreadyPublished": True,
+            }
+
+        claim.published_at = datetime.now(UTC)
+        self.audit.record(
+            session,
+            actor=actor,
+            action="CLAIM_PUBLISHED",
+            entity_type="CLAIM",
+            entity_id=claim_id,
+            correlation_id=correlation_id,
+            metadata={"status": claim.status},
+        )
+        return {
+            "claimId": claim_id,
+            "publishedAt": as_utc_iso(claim.published_at),
+            "alreadyPublished": False,
+            "note": "This page now shows whatever the claim's status becomes, including if "
+            "it is later challenged or revoked. There is no way to unpublish it.",
         }

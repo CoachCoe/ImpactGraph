@@ -24,6 +24,7 @@ from prometheus_client import CONTENT_TYPE_LATEST
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select, text
 
+from . import public_api
 from .attribution import MixedCurrencyError, funding_attribution
 from .auth import (
     SESSION_COOKIE,
@@ -95,9 +96,11 @@ from .services import (
     ApplicationActor,
     AuditService,
     AuthorizationError,
+    ClaimPublicationService,
     DataProtectionApplicationService,
     DomainConflictError,
     EvidenceApplicationService,
+    FunderNameService,
     IdempotencyConflictError,
     OnboardingApplicationService,
     TenantApplicationService,
@@ -997,6 +1000,94 @@ def claim(claim_id: str):
     return store.claim
 
 
+# The read-only API third parties query. Mounted here because this module owns the
+# wiring; the contract lives in public_api.
+public_api.register(
+    app,
+    read=database_read,
+    claims_list=lambda program: database_read("claims", None, program, None) or [],
+)
+
+
+@app.post("/claims/{claim_id}/publish", status_code=201)
+def publish_claim(request: Request, claim_id: str, user: CurrentUser = None):
+    """Publish a claim as a public proof. There is no route that unpublishes it."""
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    if session_factory is None:
+        raise HTTPException(503, "Publishing requires PERSISTENCE_MODE=postgres")
+    service = ClaimPublicationService()
+    return _tenant_write(
+        lambda session: service.publish(
+            session,
+            actor=actor,
+            claim_id=claim_id,
+            correlation_id=request.state.correlation_id,
+        )
+    )
+
+
+@app.get("/claims/{claim_id}/proof")
+def claim_proof(claim_id: str):
+    """A published claim, for a reader with no account and no context.
+
+    404 for a claim nobody published, so that publication is a decision an organisation
+    made rather than a default it was subjected to.
+    """
+    if session_factory is None:
+        raise HTTPException(503, "This requires PERSISTENCE_MODE=postgres")
+    return database_read("proof", claim_id)
+
+
+#: How long a badge may be believed. A verification that has been withdrawn is the one
+#: thing an embedded badge must not keep asserting, and the cost of being wrong is far
+#: higher than the cost of a request.
+BADGE_MAX_AGE_SECONDS = 300
+
+#: Deliberately not a single "verified or not". A challenged claim says so, because the
+#: whole point of the badge updating is that a reader learns when it stopped being true.
+BADGE_APPEARANCE: dict[str, tuple[str, str]] = {
+    "VERIFIED": ("Independently verified", "#3fb68b"),
+    "CHALLENGED": ("Verification withdrawn", "#e3a23b"),
+    "REJECTED": ("Rejected by the verifier", "#e3a23b"),
+    "REVOKED": ("Revoked", "#c2543d"),
+    "VERIFICATION_PENDING": ("Verification pending", "#8fa3a3"),
+    "EVIDENCE_PENDING": ("Evidence pending", "#8fa3a3"),
+}
+
+
+@app.get("/claims/{claim_id}/badge.svg")
+def claim_badge(claim_id: str):
+    """A badge an organisation can embed on its own site.
+
+    It reflects the claim's status now. A badge that cached "verified" for ever would be
+    actively harmful: the moment a claim is challenged, every copy of it in the world is
+    asserting something this system has stopped standing behind. Hence a short max-age and
+    `must-revalidate` rather than a long one, and the rendered date so a stale copy shows
+    its own age instead of hiding it.
+    """
+    if session_factory is None:
+        raise HTTPException(503, "This requires PERSISTENCE_MODE=postgres")
+    proof = database_read("proof", claim_id)
+    status = proof["claim"]["status"]
+    label, colour = BADGE_APPEARANCE.get(status, ("Status unknown", "#5b6664"))
+    rendered = datetime.now(UTC).strftime("%d %b %Y")
+    width = 116 + 7 * len(label)
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="44" role="img" aria-label="ImpactGraph: {label}">
+  <title>ImpactGraph: {label} (as at {rendered})</title>
+  <rect width="{width}" height="44" rx="6" fill="#0e1e1e"/>
+  <circle cx="18" cy="22" r="6" fill="{colour}"/>
+  <text x="32" y="19" fill="#f4fafa" font-family="system-ui,sans-serif" font-size="13">{label}</text>
+  <text x="32" y="34" fill="#8fa3a3" font-family="system-ui,sans-serif" font-size="10">ImpactGraph · {rendered}</text>
+</svg>"""
+    return Response(
+        content=svg,
+        media_type="image/svg+xml",
+        headers={
+            "Cache-Control": f"public, max-age={BADGE_MAX_AGE_SECONDS}, must-revalidate"
+        },
+    )
+
+
 @app.get("/claims/{claim_id}/provenance")
 def provenance(claim_id: str):
     if session_factory:
@@ -1104,6 +1195,64 @@ def grant_verifier_role(
     if response.get("operationId"):
         background_tasks.add_task(process_backend_operation, UUID(response["operationId"]))
     return response
+
+
+class FunderNameChoice(BaseModel):
+    """The funder's decision, with the link that authorises it.
+
+    The token is in the body rather than the path because a path is written down: the
+    access log, the proxy log, the browser history and the Referer of anything the page
+    links to. Hashing it at rest and then handing it to the one component guaranteed to
+    record it would have been pointless.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=32, max_length=128)
+    publish: bool
+
+
+@app.post("/funding/{funding_id}/name-consent", status_code=201)
+def request_funder_name_consent(request: Request, funding_id: str, user: CurrentUser = None):
+    """Issue a link the funder can use to decide whether they are named.
+
+    Requesting it publishes nothing. There is deliberately no endpoint by which an
+    operator, who knows the name already, can publish it: that choice belongs to the
+    person it names.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    if session_factory is None:
+        raise HTTPException(503, "This requires PERSISTENCE_MODE=postgres")
+    service = FunderNameService()
+    return _tenant_write(
+        lambda session: service.issue_consent_link(
+            session,
+            actor=actor,
+            funding_id=funding_id,
+            correlation_id=request.state.correlation_id,
+        )
+    )
+
+
+@app.post("/funding/name-consent")
+def choose_funder_name_publication(request: Request, body: FunderNameChoice):
+    """The funder's own decision, made with their own link.
+
+    Unauthenticated because the link is the authority, in the same way the notification
+    confirmation link is. Withdrawable, because a person changing their mind about being
+    named is exactly what this exists to respect.
+    """
+    if session_factory is None:
+        raise HTTPException(503, "This requires PERSISTENCE_MODE=postgres")
+    service = FunderNameService()
+    return _tenant_write(
+        lambda session: service.set_publication(
+            session,
+            token=body.token,
+            publish=body.publish,
+            correlation_id=request.state.correlation_id,
+        )
+    )
 
 
 @app.get("/operator/programs")
