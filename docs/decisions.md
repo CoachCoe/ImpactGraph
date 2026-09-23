@@ -233,3 +233,34 @@ photograph corroborates less than an unredacted one, and the product is choosing
 corroboration it can lawfully keep over the corroboration it could briefly hold.
 
 Date: 2026-09-23
+
+## ADR-012 — Location metadata is kept, and is corroboration rather than proof
+
+Decision: EXIF GPS captured by the device is retained on evidence photographs and is not
+stripped by redaction. Faces and identifying content are what redaction removes; where a
+delivery happened is what makes the photograph worth anything as evidence.
+
+Why: ADR-011 requires commitments to cover publishable bytes, and #3 asks for personal
+data to be minimised before hashing, while field capture wants the coordinates kept as a
+corroborating signal. Those pull in opposite directions and the conflict has to be settled
+rather than decided by whichever feature is built first. A coordinate is about a place; a
+face is about a person. The first is the evidence, the second is the exposure.
+
+Consequence: compression must preserve the EXIF segment. Canvas-based compression discards
+it, so a naive "resize before upload" silently destroys the corroboration this decision
+keeps — the APP1 segment is carried across explicitly, and a test pins it.
+
+A coordinate is still only a claim about a device, not about the world. It says where a
+phone reported being, which a determined operator can falsify, so it corroborates and
+never proves. Nothing in verification policy may gate on it.
+
+Alternatives considered: stripping all EXIF, which is the safer default and throws away
+the reason to capture in the field at all; and keeping EXIF only for photographs with no
+person in them, rejected because that judgement cannot be made reliably and a rule nobody
+can apply consistently is worse than a rule stated plainly.
+
+Reversible: retention is a policy, not a commitment. Deciding later to strip coordinates
+affects photographs captured after that point and cannot un-commit the ones already
+registered, which is the usual asymmetry and is worth knowing before it is relied on.
+
+Date: 2026-09-23
