@@ -39,6 +39,22 @@ async function navigateByHeader(page: Page, name: RegExp): Promise<void> {
     .click();
 }
 
+/**
+ * Open a program from the landing page.
+ *
+ * A deployment with one program shows its record directly; one with several asks which,
+ * because a donor arriving at the front door of a multi-tenant system has to say whose
+ * money they are following. Both are real deployments and the journey must work on either.
+ */
+async function openProgram(page: Page): Promise<void> {
+  await page.goto("/");
+  const chooser = page.getByRole("heading", { name: "Choose a program" });
+  if (await chooser.isVisible().catch(() => false)) {
+    await page.locator(".programRow").first().click();
+  }
+  await expect(page.getByText(/Recorded funding/i).first()).toBeVisible();
+}
+
 async function expectNoHorizontalScroll(page: Page): Promise<void> {
   const fits = await page
     .locator("body")
@@ -49,11 +65,11 @@ async function expectNoHorizontalScroll(page: Page): Promise<void> {
 test("a donor can follow the money to what it reached, without an account", async ({
   page,
 }) => {
-  await page.goto("/");
-  await expect(page.getByText(/Recorded funding/i).first()).toBeVisible();
+  await openProgram(page);
   await expectNoHorizontalScroll(page);
 
-  await navigateByHeader(page, /^Money trail$/);
+  // From a program's record, "see where the money went" carries which program with it.
+  await page.getByRole("link", { name: /See where the money went/i }).click();
   await expect(page).toHaveURL(/\/financial/);
 
   await page.getByRole("link", { name: /Jane Smith/ }).first().click();

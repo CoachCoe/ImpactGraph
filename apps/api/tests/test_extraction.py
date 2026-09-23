@@ -380,3 +380,18 @@ def test_reading_evidence_back_says_what_still_needs_confirming(sign_in):
     read = client.get("/evidence/ev-inv-8291")
     assert read.status_code == 200
     assert set(RECONCILIATION_KEYS) <= set(read.json()["reviewRequired"])
+
+
+def test_every_extraction_this_system_serves_is_one_it_would_accept_back():
+    """Each store kept its own copy of the fixture, and one of them drifted: the in-memory
+    demo still carried a single `confidence` float after the shape became per-field, so
+    /review refused the extraction that same store had just served."""
+    from impactgraph.demo import DemoStore
+    from impactgraph.evidence import MOCK_INVOICE_EXTRACTION
+    from impactgraph.main import InvoiceExtraction
+
+    for extraction in (
+        MOCK_INVOICE_EXTRACTION,
+        DemoStore().evidence["ev-inv-8291"]["extraction"],
+    ):
+        InvoiceExtraction(**extraction)
