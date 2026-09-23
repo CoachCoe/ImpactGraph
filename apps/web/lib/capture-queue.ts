@@ -11,7 +11,10 @@
  * offline queue must not quietly become.
  */
 
-export type QueuedState = "queued" | "uploading" | "uploaded" | "failed";
+/** What is still on the device. There is no "delivered" state, because a capture the
+ *  server has acknowledged is removed -- keeping one would be a vocabulary entry the
+ *  product never uses, and a count that is always zero. */
+export type QueuedState = "queued" | "uploading" | "failed";
 
 export type Capture = {
   id: string;
@@ -76,8 +79,8 @@ export function put(capture: Capture): Promise<unknown> {
 }
 
 export function all(): Promise<Capture[]> {
-  return transact<Capture[]>("readonly", (store) => store.getAll()).then((rows) =>
-    rows.sort((a, b) => a.capturedAt.localeCompare(b.capturedAt)),
+  return transact<Capture[]>("readonly", (store) => store.getAll()).then(
+    (rows) => rows.sort((a, b) => a.capturedAt.localeCompare(b.capturedAt)),
   );
 }
 
@@ -88,20 +91,18 @@ export function remove(id: string): Promise<unknown> {
 /**
  * What the operator is told, and never more than is true.
  *
- * "Uploaded" means the server acknowledged the bytes, not that this device finished
- * sending them. Everything else is still on the phone and says so, because an operator
- * who believes evidence is filed when it is sitting in a queue will stop looking for it.
+ * Everything counted here is still on the phone and says so. An operator who believes
+ * evidence is filed while it is sitting in a queue will stop looking for it, so the only
+ * thing that reports delivery is a drain that actually delivered.
  */
 export function summarise(captures: readonly Capture[]): {
   onThisDevice: number;
   uploading: number;
-  delivered: number;
   failed: number;
 } {
   return {
     onThisDevice: captures.filter((item) => item.state === "queued").length,
     uploading: captures.filter((item) => item.state === "uploading").length,
-    delivered: captures.filter((item) => item.state === "uploaded").length,
     failed: captures.filter((item) => item.state === "failed").length,
   };
 }

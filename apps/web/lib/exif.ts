@@ -89,7 +89,9 @@ export function hasLocation(app1: Uint8Array | null): boolean {
   const u32 = (at: number) =>
     little
       ? app1[at] | (app1[at + 1] << 8) | (app1[at + 2] << 16) | (app1[at + 3] << 24)
-      : (app1[at] << 24) | (app1[at + 1] << 16) | (app1[at + 2] << 8) | app1[at + 3];
+      : // Unsigned: a big-endian offset with the high bit set is otherwise negative, and
+        // the bounds check below would be passing for the wrong reason.
+        ((app1[at] << 24) | (app1[at + 1] << 16) | (app1[at + 2] << 8) | app1[at + 3]) >>> 0;
 
   const ifd0 = tiff + u32(tiff + 4);
   if (ifd0 + 2 > app1.length) return false;

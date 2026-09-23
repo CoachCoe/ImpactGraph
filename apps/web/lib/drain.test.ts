@@ -74,3 +74,32 @@ describe("draining the queue", () => {
     expect(result).toMatchObject({ delivered: 1, remaining: 0 });
   });
 });
+
+describe("two drains at once", () => {
+  beforeEach(async () => {
+    for (const item of await all()) await remove(item.id);
+    vi.stubGlobal("navigator", { onLine: true });
+  });
+
+  it("uploads a capture once even when capture, reconnect and the timer all ask", async () => {
+    /* Relying on the server's idempotency key to cover a race on this side is relying on
+       somebody else's property to hold up ours. */
+    await put(capture("a"));
+    await put(capture("bb"));
+    const sent: string[] = [];
+    const slowUpload = async (item: { id: string }) => {
+      sent.push(item.id);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    };
+
+    const [first, second, third] = await Promise.all([
+      drain(slowUpload),
+      drain(slowUpload),
+      drain(slowUpload),
+    ]);
+
+    expect(sent.sort()).toEqual(["a", "bb"]);
+    expect(first.delivered + second.delivered + third.delivered).toBe(2);
+    expect(await all()).toHaveLength(0);
+  });
+});

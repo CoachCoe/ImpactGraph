@@ -18,14 +18,16 @@ async function clear() {
   for (const item of await all()) await remove(item.id);
 }
 
-describe("capturing in the field", () => {
-  beforeEach(async () => {
-    await clear();
-    api.mockReset();
-    api.mockResolvedValue({});
-    vi.stubGlobal("navigator", { onLine: true });
-  });
+// At file level: a beforeEach inside one describe does not run for the others, and the
+// queue and the stubbed navigator are shared by every test in the file.
+beforeEach(async () => {
+  await clear();
+  api.mockReset();
+  api.mockResolvedValue({});
+  vi.stubGlobal("navigator", { onLine: true });
+});
 
+describe("capturing in the field", () => {
   it("files a photograph the operator took", async () => {
     render(<FieldCapture projectId="project-water-12" />);
     fireEvent.change(screen.getByLabelText("Take a photograph"), {
@@ -109,5 +111,36 @@ describe("capturing in the field", () => {
     expect(await screen.findByText("Not sent")).toBeInTheDocument();
     expect(screen.getByText(/Network request failed/)).toBeInTheDocument();
     expect(await all()).toHaveLength(1);
+  });
+});
+
+describe("when the phone cannot store the photograph", () => {
+  it("says so instead of letting it vanish", async () => {
+    /* Storage full, or private browsing refusing IndexedDB outright. Without this the
+       operator takes a photograph, nothing appears, and nothing tells them. */
+    const queue = await import("@/lib/capture-queue");
+    const put = vi.spyOn(queue, "put").mockRejectedValue(new Error("QuotaExceededError"));
+    vi.stubGlobal("navigator", { onLine: false });
+
+    render(<FieldCapture projectId="project-water-12" />);
+    fireEvent.change(screen.getByLabelText("Take a photograph"), {
+      target: { files: [photograph("borehole.jpg")] },
+    });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/could not be stored/);
+    expect(screen.getByRole("alert")).toHaveTextContent("borehole.jpg");
+    put.mockRestore();
+  });
+});
+
+describe("what the operator is told after a delivery", () => {
+  it("reports what was filed from the drain that filed it", async () => {
+    render(<FieldCapture projectId="project-water-12" />);
+    fireEvent.change(screen.getByLabelText("Take a photograph"), {
+      target: { files: [photograph()] },
+    });
+    expect(await screen.findByText(/1 photograph filed/)).toBeInTheDocument();
+    // And the list is empty, because the server has it.
+    expect(await all()).toHaveLength(0);
   });
 });

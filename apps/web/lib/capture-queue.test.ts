@@ -66,18 +66,18 @@ describe("what the operator is told", () => {
       capture({ state: "queued" }),
       capture({ state: "queued" }),
       capture({ state: "uploading" }),
-      capture({ state: "uploaded" }),
       capture({ state: "failed" }),
     ]);
-    expect(summary).toEqual({
-      onThisDevice: 2,
-      uploading: 1,
-      delivered: 1,
-      failed: 1,
-    });
+    expect(summary).toEqual({ onThisDevice: 2, uploading: 1, failed: 1 });
   });
 
-  it("says nothing is delivered when nothing has been", () => {
-    expect(summarise([capture(), capture()]).delivered).toBe(0);
+  it("has no way to describe a capture as delivered, because a delivered one is gone", () => {
+    // The queue holds what is still on the device. Counting a delivered state would be a
+    // number that is always zero and a label nothing can reach.
+    expect(Object.keys(summarise([capture()]))).toEqual([
+      "onThisDevice",
+      "uploading",
+      "failed",
+    ]);
   });
 });

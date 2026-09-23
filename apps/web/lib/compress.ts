@@ -21,13 +21,15 @@ import { hasLocation, readApp1, withApp1 } from "@/lib/exif";
  * or more each and several minutes for one delivery -- long enough that people stop
  * bothering, which is the actual failure.
  *
- * 1600px on the long edge at quality 0.72 lands a typical delivery photograph at roughly
- * 200-350 KB: legible enough to read a meter or a serial number, and around five to nine
- * seconds on that profile. The whole capture-to-filed round trip for one photograph
- * should sit inside fifteen seconds, and a delivery of four inside a minute.
+ * 1600px on the long edge at quality 0.72 is chosen to keep a delivery photograph legible
+ * enough to read a meter or a serial number while staying in the low hundreds of
+ * kilobytes.
  *
- * These are the numbers to re-measure if either is changed. Raising the edge to 2048
- * roughly doubles the bytes and therefore the wait.
+ * The budget below is arithmetic, not a measurement: 300 KB at 400 kbit/s is about six
+ * seconds, and fifteen leaves room for the request either side of it. Nobody has yet put
+ * a real phone on a throttled connection and timed this, and the number should be
+ * replaced by one that came from doing so. Raising the edge to 2048 roughly doubles the
+ * bytes and therefore the wait.
  */
 export const MAX_EDGE = 1600;
 export const QUALITY = 0.72;
@@ -82,7 +84,11 @@ export async function compressForUpload(file: File): Promise<Compressed> {
 }
 
 async function reencode(file: File): Promise<Uint8Array | null> {
-  if (typeof createImageBitmap !== "function" || typeof document === "undefined") return null;
+  if (
+    typeof createImageBitmap !== "function" ||
+    typeof document === "undefined"
+  )
+    return null;
   try {
     const bitmap = await createImageBitmap(file);
     const scale = Math.min(1, MAX_EDGE / Math.max(bitmap.width, bitmap.height));

@@ -506,3 +506,4 @@ footer{margin-top:24px;padding:36px var(--gutter) 56px;background:var(--ink-deep
 .captureList li.uploaded em{color:var(--ok)}
 .captureList li.failed em{color:var(--fail)}
 .captureList li.uploading em{color:var(--warn)}
+.captureStatus.filed{color:var(--ok-ink)}

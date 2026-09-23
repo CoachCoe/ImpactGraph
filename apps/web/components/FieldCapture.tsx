@@ -17,13 +17,17 @@ export function FieldCapture({ projectId }: { projectId: string }) {
   const [captures, setCaptures] = useState<Capture[]>([]);
   const [busy, setBusy] = useState(false);
   const [online, setOnline] = useState(true);
+  // Reported by the drain that actually delivered them, rather than inferred from a state
+  // the queue never holds.
+  const [justFiled, setJustFiled] = useState(0);
+  const [problem, setProblem] = useState<string | null>(null);
 
   const refresh = useCallback(async () => setCaptures(await all()), []);
 
   const send = useCallback(async () => {
     setBusy(true);
     try {
-      await drain(async (capture, body) => {
+      const result = await drain(async (capture, body) => {
         const form = new FormData();
         form.set("evidence_id", `ev-${capture.id}`);
         form.set("project_id", capture.projectId);
@@ -40,6 +44,7 @@ export function FieldCapture({ projectId }: { projectId: string }) {
           body: form,
         });
       });
+      if (result.delivered > 0) setJustFiled(result.delivered);
     } finally {
       setBusy(false);
       await refresh();
@@ -70,19 +75,29 @@ export function FieldCapture({ projectId }: { projectId: string }) {
   const capture = async (event: ChangeEvent<HTMLInputElement>) => {
     const chosen = Array.from(event.target.files ?? []);
     event.target.value = "";
+    setProblem(null);
     for (const file of chosen) {
-      const compressed = await compressForUpload(file);
-      await put({
-        id: crypto.randomUUID(),
-        projectId,
-        filename: file.name || "capture.jpg",
-        mimeType: compressed.mimeType,
-        bytes: compressed.bytes,
-        capturedAt: new Date().toISOString(),
-        hasLocation: compressed.hasLocation,
-        state: "queued",
-        attempts: 0,
-      });
+      try {
+        const compressed = await compressForUpload(file);
+        await put({
+          id: crypto.randomUUID(),
+          projectId,
+          filename: file.name || "capture.jpg",
+          mimeType: compressed.mimeType,
+          bytes: compressed.bytes,
+          capturedAt: new Date().toISOString(),
+          hasLocation: compressed.hasLocation,
+          state: "queued",
+          attempts: 0,
+        });
+      } catch {
+        // Storage full, or private browsing refusing IndexedDB outright. Without this the
+        // photograph is gone and nothing says so, which is the failure this whole screen
+        // exists to prevent.
+        setProblem(
+          `${file.name || "That photograph"} could not be stored on this phone. Free some space, or send what is already queued before taking more.`,
+        );
+      }
     }
     await refresh();
     void send();
@@ -96,8 +111,8 @@ export function FieldCapture({ projectId }: { projectId: string }) {
       <span className="eyebrow">FIELD CAPTURE</span>
       <h2>Photograph a delivery</h2>
       <p className="subtle">
-        Works with no signal. Photographs stay on this phone until they reach the server,
-        and survive closing the browser.
+        Works with no signal. Photographs stay on this phone until they reach
+        the server, and survive closing the browser.
       </p>
 
       <label className="captureButton">
@@ -112,12 +127,29 @@ export function FieldCapture({ projectId }: { projectId: string }) {
         />
       </label>
 
-      <p className={online ? "captureStatus" : "captureStatus offline"} role="status">
-        {waiting === 0
-          ? "Nothing waiting on this phone."
-          : `${waiting} ${waiting === 1 ? "photograph is" : "photographs are"} on this phone and not yet filed.`}
-        {online ? "" : " No connection — they will be sent when there is one."}
+      <p
+        className={online ? "captureStatus" : "captureStatus offline"}
+        role="status"
+      >
+        {`${
+          waiting === 0
+            ? "Nothing waiting on this phone."
+            : `${waiting} ${waiting === 1 ? "photograph is" : "photographs are"} on this phone and not yet filed.`
+        }${online ? "" : " No connection — they will be sent when there is one."}`}
       </p>
+
+      {problem ? (
+        <div className="errorMessage" role="alert">
+          <b>Not captured</b>
+          <span>{problem}</span>
+        </div>
+      ) : null}
+
+      {justFiled > 0 && captures.length === 0 ? (
+        <p className="captureStatus filed" role="status">
+          {`${justFiled} ${justFiled === 1 ? "photograph" : "photographs"} filed. The server has ${justFiled === 1 ? "it" : "them"}.`}
+        </p>
+      ) : null}
 
       {captures.length > 0 ? (
         <ul className="captureList">
@@ -138,7 +170,11 @@ export function FieldCapture({ projectId }: { projectId: string }) {
       ) : null}
 
       {waiting > 0 ? (
-        <button className="secondary full" onClick={() => void send()} disabled={busy || !online}>
+        <button
+          className="secondary full"
+          onClick={() => void send()}
+          disabled={busy || !online}
+        >
           {busy ? "Sending…" : "Send now"}
         </button>
       ) : null}
@@ -146,10 +182,10 @@ export function FieldCapture({ projectId }: { projectId: string }) {
   );
 }
 
-/** Deliberately not "saved" or "done" for anything still on the device. */
+/** Deliberately not "saved" or "done": everything in this list is still on the device.
+ *  A delivered capture is not in the list at all, because the server has it. */
 const LABEL: Record<Capture["state"], string> = {
   queued: "On this phone",
   uploading: "Sending",
-  uploaded: "Filed",
   failed: "Not sent",
 };
