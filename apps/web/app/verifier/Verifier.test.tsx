@@ -48,7 +48,11 @@ const VERIFICATION = {
   status: "VERIFICATION_PENDING",
   policyVersion: "1.0",
   requirements: [
-    { requirement: "EVIDENCE_INTEGRITY", status: "PASS", reason: "Matches its commitments" },
+    {
+      requirement: "EVIDENCE_INTEGRITY",
+      status: "PASS",
+      reason: "Matches its commitments",
+    },
   ],
   evidenceScore: { total: 72, components: [] },
 };
@@ -72,17 +76,31 @@ function stubFetch(operationStates: unknown[]) {
   const mock = vi.fn().mockImplementation((url: string) => {
     const path = String(url);
     // Order matters: "/verification-requests/.../intent" also contains "/verification".
-    const body = path.endsWith("/intent")
-      ? INTENT
-      : path.endsWith("/submitted")
-        ? { status: "SUBMITTED" }
-        : path.endsWith("/verification")
-          ? VERIFICATION
-          : path.includes("/evidence/")
-            ? { id: "ev-inv-8291", reconciliation: { status: "MATCHED", checks: [] } }
-            : path.includes("/claims/")
-              ? CLAIM
-              : (operationStates.shift() ?? operationStates.at(-1));
+    // The workspace reads its queue before it reads a claim, and picks the claim to
+    // review from it. Checked before "/claims/" because a query string is not a path.
+    const body = path.includes("/claims?")
+      ? [
+          {
+            id: CLAIM.id,
+            statement: CLAIM.statement,
+            status: CLAIM.status,
+            projectId: CLAIM.projectId,
+          },
+        ]
+      : path.endsWith("/intent")
+        ? INTENT
+        : path.endsWith("/submitted")
+          ? { status: "SUBMITTED" }
+          : path.endsWith("/verification")
+            ? VERIFICATION
+            : path.includes("/evidence/")
+              ? {
+                  id: "ev-inv-8291",
+                  reconciliation: { status: "MATCHED", checks: [] },
+                }
+              : path.includes("/claims/")
+                ? CLAIM
+                : (operationStates.shift() ?? operationStates.at(-1));
     return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
   });
   vi.stubGlobal("fetch", mock);
@@ -112,12 +130,16 @@ describe("Verifier wallet workflow", () => {
     stubWallet();
     stubFetch([]);
     render(<Verifier />);
-    expect(await screen.findByText(CLAIM.verificationBundleHash)).toBeInTheDocument();
+    expect(
+      await screen.findByText(CLAIM.verificationBundleHash),
+    ).toBeInTheDocument();
   });
 
   it("records a verifier rejection without creating a wallet attestation", async () => {
     const fetchMock = stubFetch([]);
-    vi.spyOn(window, "prompt").mockReturnValue("The evidence does not establish the outcome.");
+    vi.spyOn(window, "prompt").mockReturnValue(
+      "The evidence does not establish the outcome.",
+    );
     render(<Verifier />);
     await screen.findByText(`“${CLAIM.statement}”`);
     fireEvent.click(screen.getByRole("button", { name: "Reject" }));
@@ -132,7 +154,12 @@ describe("Verifier wallet workflow", () => {
   it("waits for backend confirmation and policy before showing verified", async () => {
     stubWallet();
     stubFetch([
-      { status: "CONFIRMED", claimStatus: "VERIFIED", confirmations: 1, error: null },
+      {
+        status: "CONFIRMED",
+        claimStatus: "VERIFIED",
+        confirmations: 1,
+        error: null,
+      },
     ]);
     await startVerification();
     await waitFor(() =>
@@ -143,23 +170,34 @@ describe("Verifier wallet workflow", () => {
 
   it("stays pending while the operation is only SUBMITTED", async () => {
     stubWallet();
-    stubFetch([{ status: "SUBMITTED", claimStatus: "VERIFICATION_PENDING", error: null }]);
+    stubFetch([
+      { status: "SUBMITTED", claimStatus: "VERIFICATION_PENDING", error: null },
+    ]);
     await startVerification();
     await waitFor(() =>
       expect(screen.getByText("Attestation submitted")).toBeInTheDocument(),
     );
-    expect(screen.queryByText("✓ Attestation confirmed")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("✓ Attestation confirmed"),
+    ).not.toBeInTheDocument();
   });
 
   it("does not show verified when the chain confirmed but policy has not", async () => {
     stubWallet();
     stubFetch([
-      { status: "CONFIRMED", claimStatus: "VERIFICATION_PENDING", confirmations: 1, error: null },
+      {
+        status: "CONFIRMED",
+        claimStatus: "VERIFICATION_PENDING",
+        confirmations: 1,
+        error: null,
+      },
     ]);
     await startVerification();
     await waitFor(() => expect(writeContract).toHaveBeenCalledOnce());
     // A confirmed transaction is not a verified claim: policy decides, not the chain.
-    expect(screen.queryByText("✓ Attestation confirmed")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("✓ Attestation confirmed"),
+    ).not.toBeInTheDocument();
   });
 
   it("reports a wallet rejection without implying an attestation exists", async () => {

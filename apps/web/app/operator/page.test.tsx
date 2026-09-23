@@ -12,6 +12,17 @@ vi.mock("@/lib/api", () => ({ api: (...args: unknown[]) => api(...args) }));
 
 // What the model read, and what the API says a person still has to confirm. The vendor is
 // wrong on purpose: a confident misread is the failure this screen exists to catch.
+const PROGRAMS = [
+  {
+    id: "program-clean-water-kenya-2026",
+    name: "Clean Water Kenya",
+    region: "Kisumu County",
+    operator: "Global Water Initiative",
+    chainStatus: "CONFIRMED",
+    projects: [{ id: "project-water-12", name: "Water Project #12" }],
+  },
+];
+
 const ANALYZED = {
   id: "ev-1",
   workflowStatus: "ANALYZED",
@@ -36,7 +47,11 @@ const ANALYZED = {
 async function analyze() {
   render(<OperatorPage />);
   fireEvent.click(screen.getByRole("button", { name: "Load demo INV-8291" }));
-  fireEvent.click(screen.getByRole("button", { name: "Upload & analyze" }));
+  // The workspace has to know which project the document is filed under before it can
+  // upload one, so the control stays disabled until that has arrived.
+  const upload = screen.getByRole("button", { name: "Upload & analyze" });
+  await waitFor(() => expect(upload).toBeEnabled());
+  fireEvent.click(upload);
   await screen.findByDisplayValue("INV-6291");
 }
 
@@ -44,7 +59,13 @@ describe("operator review", () => {
   beforeEach(() => {
     api.mockReset();
     api.mockImplementation((path: string) =>
-      Promise.resolve(path.endsWith("/analyze") ? ANALYZED : { operationId: "op-1", status: "CONFIRMED" }),
+      Promise.resolve(
+        path.includes("/operator/programs")
+          ? PROGRAMS
+          : path.endsWith("/analyze")
+            ? ANALYZED
+            : { operationId: "op-1", status: "CONFIRMED" },
+      ),
     );
   });
 

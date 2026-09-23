@@ -443,3 +443,13 @@ footer{margin-top:24px;padding:36px var(--gutter) 56px;background:var(--ink-deep
   footer{padding:28px 16px 40px;display:block}
   footer>span{display:block;margin-top:6px}
 }
+.queuePanel{margin-bottom:18px}
+.queue{list-style:none;margin:12px 0 0;padding:0;display:grid;gap:8px}
+.queueItem{display:flex;flex-direction:column;gap:3px;width:100%;text-align:left;padding:11px 13px;border:1px solid var(--line);border-radius:8px;background:var(--card-quiet);color:var(--ink);cursor:pointer;font:inherit}
+.queueItem small{color:var(--muted);font-family:var(--font-mono);font-size:10px;letter-spacing:var(--track-label-sm);text-transform:uppercase}
+.queueItem.current{border-color:var(--ok);background:var(--ok-quiet)}
+.programList{display:grid;gap:10px;margin-top:18px}
+.programRow{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:15px 17px;border:1px solid var(--line);border-radius:9px;background:var(--card-quiet);color:var(--ink);text-decoration:none}
+.programRow small{display:block;color:var(--muted);margin-top:3px;font-size:12px}
+.projectPicker{display:flex;flex-direction:column;gap:6px;margin:16px 0 0;font-family:var(--font-mono);font-size:10px;letter-spacing:var(--track-label-sm);text-transform:uppercase;color:var(--muted)}
+.projectPicker select{width:100%;padding:10px;border:1px solid var(--ghost-line);border-radius:7px;background:var(--field);color:var(--ink);font-family:var(--font-sans);font-size:14px;letter-spacing:0;text-transform:none}

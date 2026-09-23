@@ -1,10 +1,9 @@
 import Link from "next/link";
 import { Status } from "@/components/Status";
 import { readFromApi } from "@/lib/api";
+import { resolveProgram } from "@/lib/programs";
 import type { Claim, Program, Verification } from "@/lib/types";
 import { attestationCount, claimStanding, programSentence } from "@/lib/sentences";
-
-const PROGRAM_ID = "program-clean-water-kenya-2026";
 
 const money = (minor: number, currency: string) =>
   new Intl.NumberFormat("en-US", {
@@ -13,9 +12,16 @@ const money = (minor: number, currency: string) =>
     maximumFractionDigits: 0,
   }).format(minor / 100);
 
-export default async function DonorDashboard() {
-  const program = await readFromApi<Program>(`/programs/${PROGRAM_ID}`);
-  if (!program) return <ApiUnavailable />;
+export default async function DonorDashboard({
+  searchParams,
+}: {
+  searchParams: Promise<{ program?: string }>;
+}) {
+  const chosen = await resolveProgram((await searchParams).program);
+  if (chosen.state === "unavailable") return <ApiUnavailable />;
+  if (chosen.state === "none") return <NoPrograms />;
+  if (chosen.state === "choose") return <ChooseProgram programs={chosen.programs} />;
+  const program = chosen.program;
 
   const claim = await readFromApi<Claim>(`/claims/${program.featuredClaimId}`);
   const verification = claim
@@ -37,7 +43,9 @@ export default async function DonorDashboard() {
             segment.link ? (
               <Link
                 key={index}
-                href={segment.link === "money" ? "/financial" : `/claims/${program.featuredClaimId}`}
+                href={segment.link === "money"
+                    ? `/financial?program=${program.id}`
+                    : `/claims/${program.featuredClaimId}`}
               >
                 {segment.text}
               </Link>
@@ -128,7 +136,7 @@ export default async function DonorDashboard() {
                   <Link className="button" href={`/claims/${claim.id}`}>
                     Follow the evidence <span aria-hidden>→</span>
                   </Link>
-                  <Link className="secondary" href="/financial">
+                  <Link className="secondary" href={`/financial?program=${program.id}`}>
                     See where the money went
                   </Link>
                 </div>
@@ -138,6 +146,47 @@ export default async function DonorDashboard() {
         </div>
       </section>
     </>
+  );
+}
+
+function ChooseProgram({ programs }: { programs: Program[] }) {
+  return (
+    <section className="section">
+      <div className="sectionHead">
+        <div>
+          <span className="eyebrow">PROGRAMS</span>
+          <h2>Choose a program</h2>
+          <p>Each one carries its own record, funding and evidence.</p>
+        </div>
+      </div>
+      <div className="programList">
+        {programs.map((item) => (
+          <Link key={item.id} className="programRow" href={`/?program=${item.id}`}>
+            <span>
+              <b>{item.name}</b>
+              <small>
+                {item.operator} · {item.region}
+              </small>
+            </span>
+            <Status kind={item.status === "ACTIVE" ? "verified" : "pending"}>{item.status}</Status>
+          </Link>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function NoPrograms() {
+  return (
+    <section className="section">
+      <div className="panel">
+        <h2>No programs yet</h2>
+        <p className="subtle">
+          Nothing has been recorded to show. An operator creates the first program, and it
+          becomes readable here once its registry entity is confirmed on chain.
+        </p>
+      </div>
+    </section>
   );
 }
 

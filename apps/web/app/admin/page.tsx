@@ -1,13 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { RequireRole } from "@/components/RequireRole";
 import { Status } from "@/components/Status";
 import { api } from "@/lib/api";
-import type { IntegrityResult } from "@/lib/types";
-
-const EVIDENCE_ID = "ev-inv-8291";
+import type { Claim, IntegrityResult } from "@/lib/types";
 
 export default function AdminPage() {
   return <RequireRole role="ADMIN">{() => <AdminConsole />}</RequireRole>;
@@ -17,6 +15,19 @@ function AdminConsole() {
   const [result, setResult] = useState<IntegrityResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // Resolved rather than named: the demonstration has to act on evidence that exists, and
+  // "ev-inv-8291" only exists where the showcase seed ran.
+  const [evidenceId, setEvidenceId] = useState<string | null>(null);
+
+  useEffect(() => {
+    void (async () => {
+      const claims = (await api<{ id: string }[]>("/claims").catch(() => null)) ?? [];
+      const first = claims[0]?.id;
+      if (!first) return;
+      const claim = await api<Claim>(`/claims/${first}`).catch(() => null);
+      setEvidenceId(claim?.evidenceIds[0] ?? null);
+    })();
+  }, []);
 
   const run = async (label: string, action: () => Promise<void>) => {
     setBusy(label);
@@ -33,14 +44,14 @@ function AdminConsole() {
   const tamper = () =>
     run("tamper", async () => {
       setResult(
-        await api<IntegrityResult>(`/demo/evidence/${EVIDENCE_ID}/tamper`, { method: "POST" }),
+        await api<IntegrityResult>(`/demo/evidence/${evidenceId}/tamper`, { method: "POST" }),
       );
     });
 
   const recheck = () =>
     run("recheck", async () => {
       setResult(
-        await api<IntegrityResult>(`/evidence/${EVIDENCE_ID}/verify-integrity`, {
+        await api<IntegrityResult>(`/evidence/${evidenceId}/verify-integrity`, {
           method: "POST",
         }),
       );
@@ -65,15 +76,15 @@ function AdminConsole() {
       <section className="panel">
         <h2>Alter the stored evidence</h2>
         <p className="subtle">
-          This overwrites the stored bytes of {EVIDENCE_ID} — it does not set a flag. The
+          This overwrites the stored bytes of {evidenceId ?? "the registered evidence"} — it does not set a flag. The
           registered commitment is untouched, so the next integrity check must disagree with
           it. ImpactGraph can change its own storage; it cannot change what was committed.
         </p>
         <div className="uploadActions">
-          <button className="danger" onClick={tamper} disabled={busy !== null}>
+          <button className="danger" onClick={tamper} disabled={busy !== null || !evidenceId}>
             {busy === "tamper" ? "Altering…" : "Tamper with stored evidence"}
           </button>
-          <button className="secondary" onClick={recheck} disabled={busy !== null}>
+          <button className="secondary" onClick={recheck} disabled={busy !== null || !evidenceId}>
             {busy === "recheck" ? "Re-hashing…" : "Re-run integrity check"}
           </button>
           <button className="secondary" onClick={reset} disabled={busy !== null}>
@@ -101,7 +112,7 @@ function AdminConsole() {
               <dd className="hash">{result.current}</dd>
             </dl>
             <p className="note">
-              <Link href={`/evidence/${EVIDENCE_ID}`}>
+              <Link href={`/evidence/${evidenceId}`}>
                 See the same check on the donor-facing evidence page →
               </Link>
             </p>

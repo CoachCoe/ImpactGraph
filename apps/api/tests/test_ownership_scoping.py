@@ -250,3 +250,36 @@ def test_creating_a_program_is_idempotent_on_the_key():
     # A second key for the same identifier is a different request, and the name is taken.
     conflict = client.post("/programs", headers={"Idempotency-Key": "prog-twice"}, json=body)
     assert conflict.status_code == 409
+
+
+def test_an_operator_is_offered_only_its_own_organisations_programs():
+    """The workspace named one project in its source. Replacing that with every tenant's
+    projects would be a worse answer than the constant was."""
+    make_outsider()
+    owner = TestClient(app)
+    sign_in(owner, OPERATOR)
+    mine = owner.get("/operator/programs")
+    assert mine.status_code == 200
+    slugs = {item["id"] for item in mine.json()}
+    assert PROGRAM_ID in slugs
+    assert "program-outsider-wells" not in slugs
+
+    outsider = TestClient(app)
+    sign_in(outsider, OUTSIDER)
+    theirs = {item["id"] for item in outsider.get("/operator/programs").json()}
+    assert PROGRAM_ID not in theirs
+
+    # An administrator is not scoped to one tenant, which is the point of the role.
+    admin = TestClient(app)
+    sign_in(admin, ADMIN)
+    assert PROGRAM_ID in {item["id"] for item in admin.get("/operator/programs").json()}
+
+
+def test_the_programs_offered_carry_the_projects_evidence_is_filed_under():
+    owner = TestClient(app)
+    sign_in(owner, OPERATOR)
+    showcase = next(
+        item for item in owner.get("/operator/programs").json() if item["id"] == PROGRAM_ID
+    )
+    assert showcase["chainStatus"] == "CONFIRMED"
+    assert any(project["id"] == "project-water-12" for project in showcase["projects"])

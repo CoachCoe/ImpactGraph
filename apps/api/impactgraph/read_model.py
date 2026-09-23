@@ -481,6 +481,29 @@ class TransparencyReadRepository:
             "actions": ["IMPORT_FINANCIAL_STATEMENT", "RECORD_DELIVERY", "UPLOAD_EVIDENCE"],
         }
 
+    def claims(self, status: str | None = None, program_id: str | None = None) -> list[dict[str, Any]]:
+        """The claims themselves, so a workspace can show a queue rather than one constant.
+
+        Summaries: a verifier picking work needs to know which claim and how far along it
+        is, and the bundle they are about to sign is read separately once they choose it.
+        """
+        query = select(ClaimRecord).order_by(ClaimRecord.created_at)
+        if status:
+            query = query.where(ClaimRecord.status == status)
+        if program_id:
+            query = query.where(ClaimRecord.program_ref == program_id)
+        return [
+            {
+                "id": record.external_id,
+                "programId": record.program_ref,
+                "projectId": record.project_ref,
+                "statement": record.statement,
+                "status": record.status,
+                "verifiedAt": record.verified_at.isoformat() if record.verified_at else None,
+            }
+            for record in self.session.scalars(query)
+        ]
+
     def claim(self, claim_id: str) -> dict[str, Any]:
         record = self._claim(claim_id)
         attestations = list(

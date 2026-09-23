@@ -908,6 +908,18 @@ def project(project_id: str):
     return store.project()
 
 
+@app.get("/claims")
+def claims(status: str | None = None, program: str | None = None):
+    """Claims, optionally by status and program.
+
+    The verifier workspace named one claim in its source, so a second organisation's work
+    was unreachable and the queue its own comment described did not exist.
+    """
+    if session_factory is None:
+        raise HTTPException(503, "Listing claims requires PERSISTENCE_MODE=postgres")
+    return database_read("claims", status, program)
+
+
 @app.get("/claims/{claim_id}")
 def claim(claim_id: str):
     if session_factory:
@@ -958,6 +970,49 @@ def _tenant_write(operation):
         raise HTTPException(409, str(exc)) from exc
     except (ValueError, DomainConflictError) as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/operator/programs")
+def operator_programs(user: CurrentUser = None):
+    """The programs this operator may file evidence under, with their projects.
+
+    Scoped to the caller's organisation rather than returning everything: the operator
+    workspace had one project named in its source, and listing every tenant's projects to
+    replace that would be a worse answer than the constant was.
+    """
+    authenticated = require_user(user, {Role.OPERATOR, Role.ADMIN})
+    if session_factory is None:
+        raise HTTPException(503, "Listing programs requires PERSISTENCE_MODE=postgres")
+    with session_factory() as session:
+        query = select(ProgramRecord).order_by(ProgramRecord.name)
+        if authenticated.role != Role.ADMIN:
+            query = query.where(
+                ProgramRecord.operator_org_ref == authenticated.organization_external_id
+            )
+        programs = list(session.scalars(query))
+        projects = {
+            program.id: [
+                {"id": entity.external_id, "name": (entity.data or {}).get("name", entity.external_id)}
+                for entity in session.scalars(
+                    select(DomainEntityRecord).where(
+                        DomainEntityRecord.entity_type == "PROJECT",
+                        DomainEntityRecord.program_id == program.id,
+                    )
+                )
+            ]
+            for program in programs
+        }
+        return [
+            {
+                "id": program.slug,
+                "name": program.name,
+                "region": program.region,
+                "operator": program.operator_name,
+                "chainStatus": program.chain_status,
+                "projects": projects.get(program.id, []),
+            }
+            for program in programs
+        ]
 
 
 @app.post("/programs", status_code=201)
