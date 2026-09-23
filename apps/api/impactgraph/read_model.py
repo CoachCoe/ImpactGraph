@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
@@ -219,6 +220,16 @@ def seed_read_model(session: Session, storage: EvidenceStorage | None = None) ->
             value=200,
             unit="households",
             region="Kisumu County",
+            # The programme is fictional, so the method says so. A line reading like a
+            # real survey instrument would make the demonstration assert something nobody
+            # measured, which is the failure every other fixture here is careful to avoid.
+            method=(
+                "Not measured. This programme is a demonstration fixture and the figure "
+                "is illustrative; a real outcome would name its instrument, its sample "
+                "and its window here."
+            ),
+            source="Seeded demonstration data",
+            confidence_percent=None,
         )
     )
     session.flush()
@@ -350,6 +361,29 @@ def reset_read_model(session: Session, storage: EvidenceStorage | None = None) -
         session.execute(delete(model))
     session.flush()
     seed_read_model(session, storage)
+
+
+def public_evidence_reference(external_id: str, visibility: str) -> str:
+    """What to call a piece of evidence on a graph anyone can read.
+
+    Provenance is public on purpose: a reader has to see that the chain is complete. The
+    identifier is not neutral, though. The seeded record is `ev-inv-8291`, so the naming
+    convention this system establishes puts the document's own number inside its id, and
+    publishing that discloses the thing a restricted document is restricted for.
+
+    The same opaque reference is used for the node, for both ends of every edge, and for
+    the claim's evidence list, because a redaction applied to one surface and not the
+    others is not a redaction.
+    """
+    if visibility == "PUBLIC":
+        return external_id
+    return "evidence-" + hashlib.sha256(external_id.encode("utf-8")).hexdigest()[:12]
+
+
+def _evidence_title(item: EvidenceRecord, reference: str) -> str:
+    if item.visibility != "PUBLIC":
+        return "Restricted evidence"
+    return str((item.extraction or {}).get("invoiceNumber") or reference)
 
 
 class TransparencyReadRepository:
@@ -512,7 +546,9 @@ class TransparencyReadRepository:
         The showcase evidence id was returned for every claim; the same query the
         verification policy uses is the one that belongs here.
         """
-        return list(
+        # Redacted like the graph is. This list is the third public surface the
+        # identifier reached, and a redaction that misses one of them is not one.
+        supporting = list(
             self.session.scalars(
                 select(ProvenanceEdgeRecord.source_id).where(
                     ProvenanceEdgeRecord.source_type == "EVIDENCE",
@@ -522,6 +558,18 @@ class TransparencyReadRepository:
                 )
             )
         )
+        if not supporting:
+            return []
+        visibilities = {
+            item.external_id: item.visibility
+            for item in self.session.scalars(
+                select(EvidenceRecord).where(EvidenceRecord.external_id.in_(supporting))
+            )
+        }
+        return [
+            public_evidence_reference(item, visibilities.get(item, "RESTRICTED"))
+            for item in supporting
+        ]
 
     def _financial_nodes(self, entity_ids: set[str]) -> list[dict[str, Any]]:
         """Provenance nodes for the given entities, built from the typed records.
@@ -589,6 +637,9 @@ class TransparencyReadRepository:
                     "type": "OUTCOME",
                     "title": f"{row.value} {row.unit} served",
                     "detail": row.region,
+                    "method": row.method,
+                    "source": row.source,
+                    "confidencePercent": row.confidence_percent,
                 }
             )
         return nodes
@@ -603,16 +654,19 @@ class TransparencyReadRepository:
                 select(EvidenceRecord).where(EvidenceRecord.external_id.in_(entity_ids))
             )
         )
+        # One mapping, applied to the nodes and to both ends of every edge below.
+        references = {
+            item.external_id: public_evidence_reference(item.external_id, item.visibility)
+            for item in evidence_records
+        }
         nodes.extend(
             {
-                "id": item.external_id,
+                "id": references[item.external_id],
                 "type": "EVIDENCE",
                 # The real status, not a fixed "Integrity confirmed" label that would
                 # keep reassuring a reader after the evidence stopped matching.
                 "detail": _INTEGRITY_DETAIL.get(item.integrity_status, _UNKNOWN_INTEGRITY),
-                "title": str(
-                    (item.extraction or {}).get("invoiceNumber") or item.external_id
-                ),
+                "title": _evidence_title(item, references[item.external_id]),
             }
             for item in evidence_records
         )
@@ -629,9 +683,9 @@ class TransparencyReadRepository:
             "nodes": nodes,
             "edges": [
                 {
-                    "source": edge.source_id,
+                    "source": references.get(edge.source_id, edge.source_id),
                     "relationship": edge.relationship,
-                    "target": edge.target_id,
+                    "target": references.get(edge.target_id, edge.target_id),
                     "confirmedOnchain": edge.confirmed_onchain,
                 }
                 for edge in edges

@@ -124,3 +124,38 @@ def test_an_administrator_may_still_read_internal_evidence():
         assert session.get(f"/evidence/{EVIDENCE_ID}").status_code == 200
     finally:
         set_visibility("PUBLIC")
+
+
+def test_public_provenance_does_not_publish_a_restricted_document_field():
+    """The graph is public so a reader can see the chain is complete. The contents of a
+    document they would be refused directly are a different matter.
+
+    Latent rather than live today, because nothing yet links operator-uploaded evidence to
+    a claim. The operator screen already uploads as RESTRICTED, so the moment that linkage
+    is automated this becomes a live disclosure.
+    """
+    from sqlalchemy import select
+
+    from impactgraph.main import session_factory
+    from impactgraph.persistence import EvidenceRecord
+    from impactgraph.read_model import public_evidence_reference
+
+    assert session_factory is not None
+    with session_factory() as db:
+        seeded = db.scalar(
+            select(EvidenceRecord).where(EvidenceRecord.external_id == "ev-inv-8291")
+        )
+        assert seeded is not None
+        # The showcase evidence is public, so its invoice number is fair game.
+        assert seeded.visibility == "PUBLIC"
+        assert public_evidence_reference(seeded.external_id, "PUBLIC") == "ev-inv-8291"
+
+    # The seeded identifier carries the invoice number inside it, which is the convention
+    # this system establishes, so redacting the label and publishing the id would hide
+    # nothing at all.
+    redacted = public_evidence_reference("ev-inv-8291", "RESTRICTED")
+    assert "8291" not in redacted
+    assert redacted.startswith("evidence-")
+    assert public_evidence_reference("ev-inv-8291", "RESTRICTED") == redacted, (
+        "the reference has to be stable, or the same record looks like several"
+    )

@@ -204,6 +204,11 @@ def funding_attribution(session: Session, funding_ref: str) -> dict[str, Any]:
                             "value": outcome.value,
                             "unit": outcome.unit,
                             "region": outcome.region,
+                            # Carried through, so a figure reached by following one
+                            # contribution is qualified exactly as it is on the claim.
+                            "method": outcome.method,
+                            "source": outcome.source,
+                            "confidencePercent": outcome.confidence_percent,
                             "claims": [
                                 {
                                     "id": claim.external_id,

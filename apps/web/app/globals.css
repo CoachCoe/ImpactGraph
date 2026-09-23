@@ -193,6 +193,10 @@ h1,h2,h3,p{margin-top:0}
 .button:disabled{opacity:.65;cursor:default}
 .secondary,.danger{font-family:var(--font-display);font-weight:700;font-size:15px;border:1.5px solid var(--ghost-line);background:transparent;color:var(--ink);border-radius:var(--radius-pill);padding:12px 24px;cursor:pointer}
 .secondary:hover,.danger:hover{border-color:var(--ink)}
+/* The secondary control is styled for a button. An anchor has to be told to lay out like one, or a download link renders as inline text with padding. */
+a.secondary{display:inline-block;text-align:center;text-decoration:none}
+a.secondary+a.secondary{margin-top:10px}
+
 .danger{color:var(--fail);border-color:var(--fail)}
 .full{width:100%;margin-top:16px}
 
@@ -305,7 +309,8 @@ summary{font-size:13px;font-weight:700;cursor:pointer}
 .chainStep[data-attested=false]::before{border-left:1px dashed var(--warn)}
 .chainDot{position:absolute;left:0;top:9px;width:11px;height:11px;border-radius:50%;border:1px solid var(--ok);background:var(--card)}
 .chainRecord{display:flex;flex-direction:column;gap:2px;padding:2px 0}
-.chainRecord small{font-family:var(--font-mono);color:var(--ok);font-weight:600;font-size:9px;letter-spacing:var(--track-label-sm);text-transform:uppercase}
+.chainRecord small{font-family:var(--font-mono);color:var(--ok);font-weight:600;font-size:9px;letter-spacing:var(--track-label-sm);text-transform:uppercase}/* The label above it is an uppercase mono tag; this is a sentence, so it has to undo that rather than inherit it. */
+.chainRecord small.method{display:block;margin-top:6px;color:var(--ink-soft);font-family:var(--font-sans);font-size:10px;line-height:1.45;letter-spacing:normal;text-transform:none;font-weight:400}
 .chainRecord strong{font-size:14px;line-height:1.35}
 .chainRecord span{font-size:11px;color:var(--muted)}
 .chainLink{margin:0;padding:9px 0 15px;font-size:11px;color:var(--muted)}
