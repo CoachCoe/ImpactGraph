@@ -150,6 +150,7 @@ class EvidenceApplicationService:
         mime_type: str,
         visibility: str,
         personal_data: bool = False,
+        perceptual_hash: str | None = None,
         correlation_id: str,
         idempotency_key: str,
     ) -> dict[str, Any]:
@@ -181,6 +182,7 @@ class EvidenceApplicationService:
             mime_type=mime_type,
             visibility=visibility,
             personal_data=personal_data,
+            perceptual_hash=perceptual_hash,
             workflow_status=EvidenceWorkflowStatus.UPLOADED,
             analysis_status="NOT_STARTED",
             integrity_status="NOT_CHECKED",

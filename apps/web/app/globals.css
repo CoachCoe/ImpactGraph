@@ -507,3 +507,12 @@ footer{margin-top:24px;padding:36px var(--gutter) 56px;background:var(--ink-deep
 .captureList li.failed em{color:var(--fail)}
 .captureList li.uploading em{color:var(--warn)}
 .captureStatus.filed{color:var(--ok-ink)}
+
+/* --- risk review queue --- */
+.riskFacts{margin:22px 0;display:grid;gap:0}
+.riskFacts>div{display:flex;gap:16px;padding:11px 0;border-top:1px solid var(--line)}
+.riskFacts dt{flex:0 0 140px;font-family:var(--font-mono);font-size:10px;letter-spacing:var(--track-label-sm);text-transform:uppercase;color:var(--muted);margin:0}
+.riskFacts dd{margin:0;font-size:13px;word-break:break-word}
+.riskNote{width:100%;margin-top:6px;padding:11px 12px;border:1px solid var(--ghost-line);border-radius:8px;background:var(--field);color:var(--ink);font-family:var(--font-sans);font-size:15px;line-height:1.5;min-height:76px;resize:vertical}
+.riskActions{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
+.riskActions button{flex:1 1 auto;min-width:150px}
