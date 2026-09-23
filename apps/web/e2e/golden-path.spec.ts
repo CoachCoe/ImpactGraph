@@ -10,6 +10,19 @@ import { expect, test, type Page } from "@playwright/test";
  */
 
 const OPERATOR = "operator@globalwater.example";
+
+/** What the demo invoice says, for any field the model did not read off it. */
+const DOCUMENT: Record<string, string> = {
+  "Document type": "invoice",
+  "Invoice number": "INV-8291",
+  Vendor: "Aqua Systems Ltd.",
+  "Amount (minor units)": "420000",
+  Currency: "USD",
+  Date: "2026-08-17",
+  Equipment: "AquaPure X200",
+  Quantity: "2",
+  Project: "Water Project #12",
+};
 const PASSWORD = "impactgraph-demo";
 
 async function signIn(page: Page, email: string): Promise<void> {
@@ -39,6 +52,22 @@ async function navigateByHeader(page: Page, name: RegExp): Promise<void> {
     .click();
 }
 
+/**
+ * Open a program from the landing page.
+ *
+ * A deployment with one program shows its record directly; one with several asks which,
+ * because a donor arriving at the front door of a multi-tenant system has to say whose
+ * money they are following. Both are real deployments and the journey must work on either.
+ */
+async function openProgram(page: Page): Promise<void> {
+  await page.goto("/");
+  const chooser = page.getByRole("heading", { name: "Choose a program" });
+  if (await chooser.isVisible().catch(() => false)) {
+    await page.locator(".programRow").first().click();
+  }
+  await expect(page.getByText(/Recorded funding/i).first()).toBeVisible();
+}
+
 async function expectNoHorizontalScroll(page: Page): Promise<void> {
   const fits = await page
     .locator("body")
@@ -49,11 +78,11 @@ async function expectNoHorizontalScroll(page: Page): Promise<void> {
 test("a donor can follow the money to what it reached, without an account", async ({
   page,
 }) => {
-  await page.goto("/");
-  await expect(page.getByText(/Recorded funding/i).first()).toBeVisible();
+  await openProgram(page);
   await expectNoHorizontalScroll(page);
 
-  await navigateByHeader(page, /^Money trail$/);
+  // From a program's record, "see where the money went" carries which program with it.
+  await page.getByRole("link", { name: /See where the money went/i }).click();
   await expect(page).toHaveURL(/\/financial/);
 
   await page.getByRole("link", { name: /Jane Smith/ }).first().click();
@@ -95,18 +124,26 @@ test("operator evidence reaches confirmed state through the durable worker", asy
   await page.getByRole("button", { name: "Load demo INV-8291" }).click();
   await page.getByRole("button", { name: "Upload & analyze" }).click();
 
-  await expect(page.getByText("Invoice INV-8291")).toBeVisible({ timeout: 20_000 });
-  // Reconciliation names the payment it resolved from the ledger. It does not assert that
-  // a vendor is approved, which is a judgement this system never makes.
-  await expect(page.getByText(/Vendor matches the payee of/)).toBeVisible();
+  // Not asserted against the model's output. A model reads the document afresh each time
+  // and has been observed returning seven of the nine fields for these same bytes, so a
+  // test that pinned the invoice number would be testing the model rather than the
+  // product. What must hold is the product's guarantee: whatever was read, a person
+  // confirms every flagged field, filling in anything the model could not read, and only
+  // then can it be registered.
+  const register = page.getByRole("button", {
+    name: /Accept & register evidence|Confirm \d+ field/,
+  });
+  await expect(register).toBeVisible({ timeout: 30_000 });
+  await expect(register, "registration is open before anyone confirmed anything").toBeDisabled();
 
-  // Registration is blocked until a person has confirmed the fields a payment is resolved
-  // against. The model reports its own confidence and these are flagged regardless of it.
-  const register = page.getByRole("button", { name: /Accept & register evidence|Confirm \d+ field/ });
-  await expect(register).toBeDisabled();
-  for (const field of ["Invoice number", "Amount (minor units)", "Currency"]) {
-    await page.getByRole("checkbox", { name: `Confirm ${field}` }).check();
+  for (const [label, value] of Object.entries(DOCUMENT)) {
+    const confirm = page.getByRole("checkbox", { name: `Confirm ${label}` });
+    if ((await confirm.count()) === 0) continue;
+    const field = page.getByLabel(label, { exact: true });
+    if ((await field.inputValue()) === "") await field.fill(value);
+    await confirm.check();
   }
+
   await expect(register).toBeEnabled();
   await register.click();
   // Not complete until the backend has independently observed the expected registry event.

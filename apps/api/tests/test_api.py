@@ -645,3 +645,20 @@ def test_evidence_cannot_be_registered_on_a_model_nobody_checked(sign_in):
     )
     assert accepted.status_code == 200
     assert accepted.json()["workflowStatus"] == "REVIEWED"
+
+
+def test_claims_can_be_listed_for_a_queue_rather_than_named_in_source(sign_in):
+    """The verifier workspace named one claim, so a second organisation's work could not
+    be reached and the queue its own comment described did not exist."""
+    client_ = client()
+    everything = client_.get("/claims")
+    assert everything.status_code == 200
+    assert any(item["id"] == "claim-water-12-200" for item in everything.json())
+
+    pending = client_.get("/claims", params={"status": "VERIFICATION_PENDING"})
+    assert pending.status_code == 200
+    assert all(item["status"] == "VERIFICATION_PENDING" for item in pending.json())
+
+    scoped = client_.get("/claims", params={"program": "program-clean-water-kenya-2026"})
+    assert all(item["programId"] == "program-clean-water-kenya-2026" for item in scoped.json())
+    assert client_.get("/claims", params={"program": "program-nope"}).json() == []

@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
+from .evidence import MOCK_INVOICE_EXTRACTION
 from .hashing import claim_hash, sha256_bytes, verification_bundle_hash
 from .verification import EvidenceScoreService
 
@@ -44,18 +45,10 @@ class DemoStore:
                 "source": "Operator upload",
                 "storageUri": "",
                 "tampered": False,
-                "extraction": {
-                    "documentType": "invoice",
-                    "invoiceNumber": "INV-8291",
-                    "vendor": "Aqua Systems Ltd.",
-                    "amountMinor": 420000,
-                    "currency": "USD",
-                    "date": "2026-08-17",
-                    "equipment": "AquaPure X200",
-                    "quantity": 2,
-                    "projectReference": "Water Project #12",
-                    "confidence": 0.97,
-                },
+                # The provider's fixture, not a second copy of it. This one drifted: it
+                # still carried a single `confidence` float after the extraction shape
+                # became per-field, so /review refused the extraction this store served.
+                "extraction": deepcopy(MOCK_INVOICE_EXTRACTION),
                 "reconciliation": {
                     "status": "MATCHED",
                     "checks": [

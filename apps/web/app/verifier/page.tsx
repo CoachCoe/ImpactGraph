@@ -60,7 +60,7 @@ const attestationAbi = [{
   outputs: [],
 }] as const;
 
-const CLAIM_ID = "claim-water-12-200";
+type QueueItem = { id: string; statement: string; status: string; projectId: string };
 const sleep = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 export default function VerifierPage() {
@@ -69,6 +69,10 @@ export default function VerifierPage() {
 
 function Verifier() {
   const { session, refresh } = useSession();
+  // Which claim is under review, and what else is waiting. Both used to be one constant,
+  // so a verifier could only ever review the seeded claim of the seeded program.
+  const [queue, setQueue] = useState<QueueItem[] | null>(null);
+  const [claimId, setClaimId] = useState<string | null>(null);
   const [claim, setClaim] = useState<Claim | null>(null);
   const [verification, setVerification] = useState<Verification | null>(null);
   const [evidence, setEvidence] = useState<Evidence | null>(null);
@@ -82,14 +86,25 @@ function Verifier() {
   // same state they are about to sign rather than a separate copy that could disagree.
   useEffect(() => {
     void (async () => {
-      const next = await api<Claim>(`/claims/${CLAIM_ID}`).catch(() => null);
+      const waiting =
+        (await api<QueueItem[]>("/claims?status=VERIFICATION_PENDING").catch(() => null)) ?? [];
+      setQueue(waiting);
+      const requested = new URLSearchParams(window.location.search).get("claim");
+      setClaimId(requested ?? waiting[0]?.id ?? null);
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!claimId) return;
+    void (async () => {
+      const next = await api<Claim>(`/claims/${claimId}`).catch(() => null);
       setClaim(next);
       if (!next) return;
-      setVerification(await api<Verification>(`/claims/${CLAIM_ID}/verification`).catch(() => null));
+      setVerification(await api<Verification>(`/claims/${claimId}/verification`).catch(() => null));
       const first = next.evidenceIds[0];
       if (first) setEvidence(await api<Evidence>(`/evidence/${first}`).catch(() => null));
     })();
-  }, []);
+  }, [claimId]);
 
   /** Prove control of the wallet before it can be used to attest. */
   const proveWallet = async (account: Address) => {
@@ -159,7 +174,7 @@ function Verifier() {
       }
       setState("connecting");
 
-      const intent = await api<Intent>(`/verification-requests/${CLAIM_ID}/intent`, {
+      const intent = await api<Intent>(`/verification-requests/${claimId}/intent`, {
         method: "POST",
         headers: { "Idempotency-Key": crypto.randomUUID() },
       });
@@ -223,7 +238,7 @@ function Verifier() {
     if (!reason) return;
     setError(null);
     try {
-      await api(`/verification-requests/${CLAIM_ID}/reject`, {
+      await api(`/verification-requests/${claimId}/reject`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
         body: JSON.stringify({ reason }),
@@ -236,7 +251,9 @@ function Verifier() {
   };
 
   return <div className="workspace">
-    <div className="workspaceHead"><div><span className="eyebrow">INDEPENDENT VERIFIER</span><h1>Verification review</h1><p>{session?.organization.name} · {claim && claim.status === "VERIFICATION_PENDING" ? "1 pending request" : "no pending requests"}</p></div><Status kind={state === "confirmed" ? "verified" : state === "failed" ? "failed" : "pending"}>{state === "confirmed" ? `Confirmed on ${network.name}` : state === "failed" ? "Action required" : "Review required"}</Status></div>
+    <div className="workspaceHead"><div><span className="eyebrow">INDEPENDENT VERIFIER</span><h1>Verification review</h1><p>{session?.organization.name} · {queue === null ? "loading…" : queue.length === 1 ? "1 pending request" : `${queue.length} pending requests`}</p></div><Status kind={state === "confirmed" ? "verified" : state === "failed" ? "failed" : "pending"}>{state === "confirmed" ? `Confirmed on ${network.name}` : state === "failed" ? "Action required" : "Review required"}</Status></div>
+    {queue !== null && queue.length === 0 && !claim ? <section className="panel"><h2>Nothing is waiting for you</h2><p className="subtle">A claim appears here once its operator has filed the evidence and asked for independent verification.</p></section> : null}
+    {queue !== null && queue.length > 1 ? <section className="panel queuePanel"><span className="eyebrow">PENDING REQUESTS</span><ul className="queue">{queue.map((item) => <li key={item.id}><button className={item.id === claimId ? "queueItem current" : "queueItem"} aria-current={item.id === claimId} onClick={() => setClaimId(item.id)}><b>{item.statement}</b><small>{item.projectId}</small></button></li>)}</ul></section> : null}
     <div className="reviewGrid"><section className="panel"><span className="eyebrow">{claim?.projectId ?? "CLAIM"}</span><h2>“{claim?.statement ?? "Loading…"}”</h2>
       <p className="subtle">Verification bundle <span className="hash">{claim?.verificationBundleHash ?? "…"}</span></p>
       <p className="note">This is the bundle hash your signature will commit to. The backend rejects the attestation if it does not match the claim&apos;s current bundle at confirmation time.</p>
@@ -251,7 +268,7 @@ function Verifier() {
         {state === "connecting" && <div className="txState"><div className="spinner"/><b>Connecting wallet…</b><span>ImpactGraph will request the current verification bundle next.</span></div>}
         {state === "awaiting" && <div className="txState"><div className="spinner"/><b>Awaiting wallet signature…</b><span>No attestation exists until you approve.</span></div>}
         {state === "submitted" && <div className="txState"><div className="spinner"/><b>Attestation submitted</b><span className="hash">{transactionHash}</span><span>Waiting for receipt, expected event, and confirmation depth…</span></div>}
-        {state === "confirmed" && <div className="txState success"><b>✓ Attestation confirmed</b><span>The expected event was validated and verification policy passed.</span><a href={`/claims/${CLAIM_ID}`}>Return to claim →</a></div>}
+        {state === "confirmed" && <div className="txState success"><b>✓ Attestation confirmed</b><span>The expected event was validated and verification policy passed.</span><a href={`/claims/${claimId}`}>Return to claim →</a></div>}
         {state === "rejected" && <div className="txState failure"><b>Claim rejected</b><span>The decision and reason were recorded in the application audit trail. No verifier attestation was created.</span></div>}
         {state === "failed" && <div className="txState failure"><b>Verification did not complete</b><span>{error}</span>{wrongAccount ? <><button className="button full" onClick={chooseAnotherAccount}>Choose a different account</button><span className="note">Switching accounts inside the extension is not enough — a site only sees the accounts it was granted. This reopens the picker.</span></> : <button className="secondary full" onClick={() => setState("idle")}>Try again</button>}</div>}
         <DemoWalletHelp />

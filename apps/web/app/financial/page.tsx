@@ -3,9 +3,8 @@ import { ImportStatement } from "@/components/ImportStatement";
 import { Status } from "@/components/Status";
 import { readFromApi } from "@/lib/api";
 import { formatMoney } from "@/lib/money";
+import { resolveProgram } from "@/lib/programs";
 import type { FinancialSummary } from "@/lib/types";
-
-const PROGRAM_ID = "program-clean-water-kenya-2026";
 
 const MATCH_LABEL: Record<string, string> = {
   MATCHED: "Evidenced",
@@ -21,8 +20,15 @@ function matchKind(status: string) {
   return "pending" as const;
 }
 
-export default async function FinancialPage() {
-  const summary = await readFromApi<FinancialSummary>(`/financial/programs/${PROGRAM_ID}`);
+export default async function FinancialPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ program?: string }>;
+}) {
+  const chosen = await resolveProgram((await searchParams).program);
+  if (chosen.state !== "resolved") return <ChooseProgramFirst state={chosen.state} />;
+  const { id: programId, featuredClaimId } = chosen.program;
+  const summary = await readFromApi<FinancialSummary>(`/financial/programs/${programId}`);
   if (!summary) {
     return (
       <div className="inspector">
@@ -113,7 +119,7 @@ export default async function FinancialPage() {
             </p>
           </section>
 
-          <ImportStatement programId={PROGRAM_ID} />
+          <ImportStatement programId={programId} />
         </div>
 
         <aside>
@@ -173,7 +179,7 @@ export default async function FinancialPage() {
               Each payment supports a delivery, which supports an outcome, which supports
               the claim.
             </p>
-            <Link className="button full" href="/claims/claim-water-12-200">
+            <Link className="button full" href={`/claims/${featuredClaimId}`}>
               Follow it to the claim <span aria-hidden>→</span>
             </Link>
           </section>
@@ -188,15 +194,39 @@ export default async function FinancialPage() {
             </p>
             {/* Plain links rather than fetches: the browser saves the file, and the
                 endpoints are public, so no session is involved. */}
-            <a className="secondary full" href={`/api/export/programs/${PROGRAM_ID}/money-trail.csv`}>
+            <a className="secondary full" href={`/api/export/programs/${programId}/money-trail.csv`}>
               Money trail (CSV)
             </a>
-            <a className="secondary full" href={`/api/export/programs/${PROGRAM_ID}/outcomes.csv`}>
+            <a className="secondary full" href={`/api/export/programs/${programId}/outcomes.csv`}>
               Outcomes and their methods (CSV)
             </a>
           </section>
         </aside>
       </div>
+    </div>
+  );
+}
+
+function ChooseProgramFirst({ state }: { state: "choose" | "none" | "unavailable" }) {
+  return (
+    <div className="inspector">
+      <section className="panel">
+        <h2>
+          {state === "unavailable"
+            ? "The financial ledger is unavailable"
+            : state === "none"
+              ? "No programs yet"
+              : "Choose a program"}
+        </h2>
+        <p className="subtle">
+          {state === "choose"
+            ? "A money trail belongs to one program. Pick the one you want to follow."
+            : "There is nothing to total until a program exists and its ledger has been imported."}
+        </p>
+        <Link className="button" href="/">
+          {state === "choose" ? "See the programs" : "Back to the record"}
+        </Link>
+      </section>
     </div>
   );
 }

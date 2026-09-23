@@ -9,17 +9,20 @@ from sqlalchemy.orm import Session
 
 from .blockchain import digest_bytes, entity_id_bytes
 from .domain import BlockchainStatus, EvidenceWorkflowStatus, Role
-from .hashing import hash_fields
+from .hashing import claim_hash, hash_fields, program_hash
 from .notifications import enqueue_claim_status_change
 from .persistence import (
     AttestationRecord,
     AuditLogRecord,
     BlockchainOperationRecord,
     ClaimRecord,
+    DomainEntityRecord,
     EvidenceRecord,
     IdempotencyRecord,
+    OrganizationRecord,
     OutboxRecord,
     ProgramRecord,
+    UserRecord,
 )
 
 
@@ -234,10 +237,24 @@ class EvidenceApplicationService:
         # is nothing to commit it to, and the previous default silently bound it to the
         # showcase program. Refuse here so the operator gets an actionable error rather
         # than a worker failure.
-        if not (evidence.metadata_json or {}).get("programId"):
+        program_id = (evidence.metadata_json or {}).get("programId")
+        if not program_id:
             raise DomainConflictError(
                 "Evidence has no program to register against; re-upload it under a project "
                 "that belongs to a program"
+            )
+        # registerEvidence reverts with UnknownProgram against a registry that has never
+        # heard of the program. Before programs could be created through the API every
+        # program was on chain by the time anything referenced it; now one can exist in
+        # PostgreSQL while its receipt is still pending, and the operator should be told
+        # that here rather than have the worker fail the registration later.
+        program = session.scalar(select(ProgramRecord).where(ProgramRecord.slug == program_id))
+        if program is None:
+            raise DomainConflictError(f"Program {program_id!r} does not exist")
+        if program.chain_status != "CONFIRMED":
+            raise DomainConflictError(
+                f"Program {program_id!r} is {program.chain_status} on chain; evidence cannot "
+                "be registered until its program is confirmed"
             )
 
         operation_id = uuid4()
@@ -508,3 +525,565 @@ class VerificationApplicationService:
             "status": BlockchainStatus.SUBMITTED,
             "transactionHash": transaction_hash.lower(),
         }
+
+
+#: A program is not a registry entity until its receipt is observed, and the chain is what
+#: `registerEvidence` consults. Evidence filed before then would fail in the worker.
+PROGRAM_CHAIN_STATUSES = ("NOT_STARTED", "PENDING", "CONFIRMED", "FAILED")
+
+
+class TenantApplicationService:
+    """Creating the things an organisation operates, and the registry entities behind them.
+
+    Programs and claims are registry entities: the contract reverts with UnknownProgram or
+    UnknownEntity if they are absent, so a row in PostgreSQL is not enough to make either
+    usable. Both are created through the outbox rather than a synchronous transaction, for
+    the reason ADR-002 gives -- the domain write and the intent to touch the chain commit
+    together or not at all.
+
+    Projects are not registry entities. Nothing in `ImpactRegistry` takes a project, so
+    creating one is a database write and says so rather than queueing a no-op.
+    """
+
+    def __init__(self, chain_id: int) -> None:
+        self.chain_id = chain_id
+        self.idempotency = IdempotencyService()
+        self.audit = AuditService()
+
+    @staticmethod
+    def _operator(actor: ApplicationActor) -> None:
+        if actor.role not in {Role.OPERATOR, Role.ADMIN}:
+            raise AuthorizationError("Only an operator or administrator may create programs")
+
+    @staticmethod
+    def _owned(program: ProgramRecord | None, actor: ApplicationActor) -> ProgramRecord:
+        if program is None:
+            raise LookupError("Program not found")
+        if actor.role != Role.ADMIN and program.operator_org_ref != actor.id:
+            raise AuthorizationError("Program belongs to another operating organisation")
+        return program
+
+    def create_program(
+        self,
+        session: Session,
+        *,
+        actor: ApplicationActor,
+        program_id: str,
+        name: str,
+        region: str,
+        verification_threshold: int,
+        correlation_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        self._operator(actor)
+        request_hash = hash_fields(
+            "create_program_request",
+            (("program_id", program_id), ("name", name), ("region", region)),
+        )
+        replay = self.idempotency.replay_or_validate(
+            session,
+            key=idempotency_key,
+            operation="CREATE_PROGRAM",
+            request_hash=request_hash,
+        )
+        if replay is not None:
+            return replay
+        if session.scalar(select(ProgramRecord).where(ProgramRecord.slug == program_id)):
+            raise DomainConflictError(f"A program with the identifier {program_id!r} already exists")
+
+        program = ProgramRecord(
+            slug=program_id,
+            name=name,
+            operator_name=actor.id,
+            # From the session, never the request body: an operator who could name the
+            # owning organisation could create a program inside someone else's tenancy.
+            operator_org_ref=actor.id,
+            region=region,
+            status="ACTIVE",
+            chain_status="PENDING",
+            verification_threshold=verification_threshold,
+        )
+        session.add(program)
+        operation_id = uuid4()
+        session.add(
+            BlockchainOperationRecord(
+                id=operation_id,
+                entity_id=program_id,
+                operation_type="CREATE_PROGRAM_ENTITY",
+                status=BlockchainStatus.CREATED,
+                expected_event="ProgramCreated",
+                chain_id=self.chain_id,
+                confirmations=0,
+                correlation_id=correlation_id,
+            )
+        )
+        session.add(
+            OutboxRecord(
+                topic="blockchain.create_program",
+                payload={
+                    "operationId": str(operation_id),
+                    "programId": program_id,
+                    "commitment": program_hash(program_id),
+                },
+                correlation_id=correlation_id,
+            )
+        )
+        response = {
+            "id": program_id,
+            "name": name,
+            "region": region,
+            "operatorOrgRef": actor.id,
+            "chainStatus": "PENDING",
+            "operationId": str(operation_id),
+        }
+        self.audit.record(
+            session,
+            actor=actor,
+            action="PROGRAM_CREATED",
+            entity_type="PROGRAM",
+            entity_id=program_id,
+            metadata={"operationId": str(operation_id)},
+            correlation_id=correlation_id,
+        )
+        self.idempotency.remember(
+            session,
+            key=idempotency_key,
+            operation="CREATE_PROGRAM",
+            request_hash=request_hash,
+            response_status=201,
+            response_body=response,
+        )
+        return response
+
+    def create_project(
+        self,
+        session: Session,
+        *,
+        actor: ApplicationActor,
+        program_id: str,
+        project_id: str,
+        name: str,
+        correlation_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        self._operator(actor)
+        request_hash = hash_fields(
+            "create_project_request",
+            (("program_id", program_id), ("project_id", project_id), ("name", name)),
+        )
+        replay = self.idempotency.replay_or_validate(
+            session,
+            key=idempotency_key,
+            operation="CREATE_PROJECT",
+            request_hash=request_hash,
+        )
+        if replay is not None:
+            return replay
+        program = self._owned(
+            session.scalar(select(ProgramRecord).where(ProgramRecord.slug == program_id)), actor
+        )
+        if session.scalar(
+            select(DomainEntityRecord).where(DomainEntityRecord.external_id == project_id)
+        ):
+            raise DomainConflictError(f"An entity with the identifier {project_id!r} already exists")
+
+        session.add(
+            DomainEntityRecord(
+                external_id=project_id,
+                entity_type="PROJECT",
+                program_id=program.id,
+                data={"name": name},
+            )
+        )
+        response = {"id": project_id, "name": name, "programId": program_id}
+        self.audit.record(
+            session,
+            actor=actor,
+            action="PROJECT_CREATED",
+            entity_type="PROJECT",
+            entity_id=project_id,
+            metadata={"programId": program_id},
+            correlation_id=correlation_id,
+        )
+        self.idempotency.remember(
+            session,
+            key=idempotency_key,
+            operation="CREATE_PROJECT",
+            request_hash=request_hash,
+            response_status=201,
+            response_body=response,
+        )
+        return response
+
+    def retry_registry_entity(
+        self,
+        session: Session,
+        *,
+        actor: ApplicationActor,
+        program_id: str,
+        correlation_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Queue the registry entity again for a program whose submission failed.
+
+        A failed submission is not a failed program. The chain call fails for transient
+        reasons -- a timeout, a nonce collision, a node restart -- and without this the
+        program is a tombstone: claims refuse it, evidence refuses it, and the identifier
+        is taken so it cannot be created again. Evidence has had this from the start, in
+        `request_registration` accepting REGISTRATION_FAILED.
+        """
+        self._operator(actor)
+        request_hash = hash_fields("retry_program_entity_request", (("program_id", program_id),))
+        replay = self.idempotency.replay_or_validate(
+            session,
+            key=idempotency_key,
+            operation="RETRY_PROGRAM_ENTITY",
+            request_hash=request_hash,
+        )
+        if replay is not None:
+            return replay
+        program = self._owned(
+            session.scalar(select(ProgramRecord).where(ProgramRecord.slug == program_id)), actor
+        )
+        if program.chain_status != "FAILED":
+            raise DomainConflictError(
+                f"Program {program_id!r} is {program.chain_status} on chain; only a failed "
+                "registry entity can be retried"
+            )
+
+        operation_id = uuid4()
+        program.chain_status = "PENDING"
+        session.add(
+            BlockchainOperationRecord(
+                id=operation_id,
+                entity_id=program_id,
+                operation_type="CREATE_PROGRAM_ENTITY",
+                status=BlockchainStatus.CREATED,
+                expected_event="ProgramCreated",
+                chain_id=self.chain_id,
+                confirmations=0,
+                correlation_id=correlation_id,
+            )
+        )
+        session.add(
+            OutboxRecord(
+                topic="blockchain.create_program",
+                payload={
+                    "operationId": str(operation_id),
+                    "programId": program_id,
+                    "commitment": program_hash(program_id),
+                },
+                correlation_id=correlation_id,
+            )
+        )
+        response = {"id": program_id, "chainStatus": "PENDING", "operationId": str(operation_id)}
+        self.audit.record(
+            session,
+            actor=actor,
+            action="PROGRAM_ENTITY_RETRIED",
+            entity_type="PROGRAM",
+            entity_id=program_id,
+            correlation_id=correlation_id,
+            metadata={"operationId": str(operation_id)},
+        )
+        self.idempotency.remember(
+            session,
+            key=idempotency_key,
+            operation="RETRY_PROGRAM_ENTITY",
+            request_hash=request_hash,
+            response_status=202,
+            response_body=response,
+        )
+        return response
+
+    def create_claim(
+        self,
+        session: Session,
+        *,
+        actor: ApplicationActor,
+        claim_id: str,
+        program_id: str,
+        project_id: str,
+        statement: str,
+        outcome_id: str,
+        correlation_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        self._operator(actor)
+        request_hash = hash_fields(
+            "create_claim_request",
+            (("claim_id", claim_id), ("program_id", program_id), ("statement", statement)),
+        )
+        replay = self.idempotency.replay_or_validate(
+            session,
+            key=idempotency_key,
+            operation="CREATE_CLAIM",
+            request_hash=request_hash,
+        )
+        if replay is not None:
+            return replay
+        program = self._owned(
+            session.scalar(select(ProgramRecord).where(ProgramRecord.slug == program_id)), actor
+        )
+        # createClaim reverts with UnknownProgram against a registry that has never heard
+        # of the program, so a claim queued before its program is confirmed would be
+        # submitted only to fail.
+        if program.chain_status != "CONFIRMED":
+            raise DomainConflictError(
+                f"Program {program_id!r} is {program.chain_status} on chain; "
+                "a claim cannot be created until its program is confirmed"
+            )
+        if session.scalar(select(ClaimRecord).where(ClaimRecord.external_id == claim_id)):
+            raise DomainConflictError(f"A claim with the identifier {claim_id!r} already exists")
+
+        payload_hash = claim_hash(claim_id, statement, outcome_id)
+        session.add(
+            ClaimRecord(
+                external_id=claim_id,
+                program_ref=program_id,
+                project_ref=project_id,
+                statement=statement,
+                payload_hash=payload_hash,
+                status="EVIDENCE_PENDING",
+                verification_policy_version="1.0",
+            )
+        )
+        operation_id = uuid4()
+        session.add(
+            BlockchainOperationRecord(
+                id=operation_id,
+                entity_id=claim_id,
+                operation_type="CREATE_CLAIM_ENTITY",
+                status=BlockchainStatus.CREATED,
+                expected_event="ClaimCreated",
+                chain_id=self.chain_id,
+                confirmations=0,
+                correlation_id=correlation_id,
+            )
+        )
+        session.add(
+            OutboxRecord(
+                topic="blockchain.create_claim",
+                payload={
+                    "operationId": str(operation_id),
+                    "claimId": claim_id,
+                    "programId": program_id,
+                    "commitment": payload_hash,
+                },
+                correlation_id=correlation_id,
+            )
+        )
+        response = {
+            "id": claim_id,
+            "programId": program_id,
+            "projectId": project_id,
+            "statement": statement,
+            "status": "EVIDENCE_PENDING",
+            "payloadHash": payload_hash,
+            "operationId": str(operation_id),
+        }
+        self.audit.record(
+            session,
+            actor=actor,
+            action="CLAIM_CREATED",
+            entity_type="CLAIM",
+            entity_id=claim_id,
+            metadata={"programId": program_id, "operationId": str(operation_id)},
+            correlation_id=correlation_id,
+        )
+        self.idempotency.remember(
+            session,
+            key=idempotency_key,
+            operation="CREATE_CLAIM",
+            request_hash=request_hash,
+            response_status=201,
+            response_body=response,
+        )
+        return response
+
+
+class OnboardingApplicationService:
+    """Bringing an organisation onto the platform, and its first person with it.
+
+    Organisations and users existed only in the seed, so a second one needed a code change
+    and a database session. Admin-invited rather than self-service: there is no public
+    signup, and who may act as an operator or a verifier is not a thing to leave open.
+
+    An operator organisation needs nothing on chain. Every registry write is submitted by
+    the backend sender, which already holds OPERATOR_ROLE -- the operator signs nothing. A
+    verifier is different: `createAttestation` checks the role of `msg.sender`, and the
+    verifier's own wallet is what signs, so that wallet needs VERIFIER_ROLE on the registry
+    before it can attest to anything.
+    """
+
+    def __init__(self, chain_id: int) -> None:
+        self.chain_id = chain_id
+        self.idempotency = IdempotencyService()
+        self.audit = AuditService()
+
+    @staticmethod
+    def _administrator(actor: ApplicationActor) -> None:
+        if actor.role != Role.ADMIN:
+            raise AuthorizationError("Only an administrator may onboard an organisation")
+
+    def create_organization(
+        self,
+        session: Session,
+        *,
+        actor: ApplicationActor,
+        organization_id: str,
+        name: str,
+        kind: str,
+        user_email: str,
+        user_name: str,
+        password_hash: str,
+        correlation_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        self._administrator(actor)
+        request_hash = hash_fields(
+            "create_organization_request",
+            (("organization_id", organization_id), ("kind", kind), ("user_email", user_email)),
+        )
+        replay = self.idempotency.replay_or_validate(
+            session,
+            key=idempotency_key,
+            operation="CREATE_ORGANIZATION",
+            request_hash=request_hash,
+        )
+        if replay is not None:
+            return replay
+        if kind not in {Role.OPERATOR, Role.VERIFIER}:
+            raise DomainConflictError("An organisation is onboarded as OPERATOR or VERIFIER")
+        email = user_email.strip().lower()
+        if session.scalar(
+            select(OrganizationRecord).where(OrganizationRecord.external_id == organization_id)
+        ):
+            raise DomainConflictError(f"Organisation {organization_id!r} already exists")
+        if session.scalar(select(UserRecord).where(UserRecord.email == email)):
+            raise DomainConflictError(f"A user with the email {email!r} already exists")
+
+        organization = OrganizationRecord(external_id=organization_id, name=name, kind=kind)
+        session.add(organization)
+        session.flush()
+        session.add(
+            UserRecord(
+                email=email,
+                display_name=user_name,
+                password_hash=password_hash,
+                organization_id=organization.id,
+                # The organisation's kind decides it. A client that could name the role
+                # could invite itself an administrator.
+                role=kind,
+                disabled=False,
+            )
+        )
+        response = {
+            "id": organization_id,
+            "name": name,
+            "kind": kind,
+            "firstUser": {"email": email, "role": kind},
+            # A verifier cannot attest until an administrator grants its proven wallet
+            # VERIFIER_ROLE, which cannot happen until that wallet has been proven.
+            "chainRoleRequired": kind == Role.VERIFIER,
+        }
+        self.audit.record(
+            session,
+            actor=actor,
+            action="ORGANIZATION_CREATED",
+            entity_type="ORGANIZATION",
+            entity_id=organization_id,
+            correlation_id=correlation_id,
+            metadata={"kind": kind, "firstUser": email},
+        )
+        self.idempotency.remember(
+            session,
+            key=idempotency_key,
+            operation="CREATE_ORGANIZATION",
+            request_hash=request_hash,
+            response_status=201,
+            response_body=response,
+        )
+        return response
+
+    def grant_verifier_role(
+        self,
+        session: Session,
+        *,
+        actor: ApplicationActor,
+        user_email: str,
+        correlation_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Queue the registry grant that lets a verifier's wallet attest.
+
+        The address is read from the user record, where it arrives only after the verifier
+        has signed a server-issued nonce. Taking it from the request instead would let an
+        administrator grant the role to an address nobody has proven control of.
+        """
+        self._administrator(actor)
+        email = user_email.strip().lower()
+        request_hash = hash_fields("grant_verifier_role_request", (("user_email", email),))
+        replay = self.idempotency.replay_or_validate(
+            session,
+            key=idempotency_key,
+            operation="GRANT_VERIFIER_ROLE",
+            request_hash=request_hash,
+        )
+        if replay is not None:
+            return replay
+        user = session.scalar(select(UserRecord).where(UserRecord.email == email))
+        if user is None:
+            raise LookupError("User not found")
+        if user.role != Role.VERIFIER:
+            raise DomainConflictError("Only a verifier's wallet may be granted VERIFIER_ROLE")
+        if not user.wallet_address:
+            raise DomainConflictError(
+                "This verifier has not proven a wallet yet, and an unproven address must "
+                "not be granted a role"
+            )
+
+        operation_id = uuid4()
+        session.add(
+            BlockchainOperationRecord(
+                id=operation_id,
+                entity_id=user.wallet_address,
+                operation_type="GRANT_VERIFIER_ROLE",
+                status=BlockchainStatus.CREATED,
+                expected_event="RoleGranted",
+                chain_id=self.chain_id,
+                confirmations=0,
+                correlation_id=correlation_id,
+            )
+        )
+        session.add(
+            OutboxRecord(
+                topic="blockchain.grant_verifier_role",
+                payload={"operationId": str(operation_id), "address": user.wallet_address},
+                correlation_id=correlation_id,
+            )
+        )
+        response = {
+            "email": email,
+            "wallet": user.wallet_address,
+            "operationId": str(operation_id),
+            "status": BlockchainStatus.CREATED,
+        }
+        self.audit.record(
+            session,
+            actor=actor,
+            action="VERIFIER_ROLE_REQUESTED",
+            entity_type="USER",
+            entity_id=email,
+            correlation_id=correlation_id,
+            metadata={"wallet": user.wallet_address, "operationId": str(operation_id)},
+        )
+        self.idempotency.remember(
+            session,
+            key=idempotency_key,
+            operation="GRANT_VERIFIER_ROLE",
+            request_hash=request_hash,
+            response_status=202,
+            response_body=response,
+        )
+        return response

@@ -115,23 +115,19 @@ def test_an_operation_awaiting_confirmations_is_not_counted_on_every_poll():
     An operation stays SUBMITTED until it reaches the required confirmation depth, and
     `observe_submitted` re-reads it on every tick. Only the transition counts.
     """
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
 
     from impactgraph.blockchain import MockBlockchainService
     from impactgraph.domain import Role
     from impactgraph.metrics import chain_operations
-    from impactgraph.persistence import Base
     from impactgraph.services import (
         ApplicationActor,
         EvidenceApplicationService,
         mark_evidence_reviewed,
     )
     from impactgraph.worker import BlockchainOutboxWorker
+    from tests.support import memory_factory
 
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    factory = sessionmaker(engine, expire_on_commit=False)
+    factory = memory_factory()
 
     service = EvidenceApplicationService(chain_id=31337)
     actor = ApplicationActor("operator-1", Role.OPERATOR)

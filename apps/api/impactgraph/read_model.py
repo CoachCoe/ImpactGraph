@@ -4,7 +4,7 @@ import hashlib
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from .config import Settings
@@ -16,6 +16,7 @@ from .evidence import (
     FileEvidenceStorage,
     ReconciliationService,
 )
+from .extraction import review_required_fields
 from .financial import (
     EvidenceReconciliationService,
     FinancialIngestionService,
@@ -44,6 +45,10 @@ from .persistence import (
     ProvenanceEdgeRecord,
 )
 from .verification import EvidenceScoreService, claim_subgraph, evaluate_persisted_claim
+
+#: Not yet put forward by the operator who wrote them, so not listed to everyone. A claim
+#: is still readable by identifier in any state; this governs enumeration only.
+DRAFT_CLAIM_STATUSES = ("DRAFT", "EVIDENCE_PENDING", "CREATION_FAILED")
 
 PROGRAM_ID = "program-clean-water-kenya-2026"
 PROJECT_ID = "project-water-12"
@@ -87,6 +92,10 @@ def seed_read_model(session: Session, storage: EvidenceStorage | None = None) ->
             operator_org_ref=OPERATOR_ORG_REF,
             region="Kisumu County, Kenya",
             status="ACTIVE",
+            # `bootstrap-chain` creates this program's registry entity and waits for the
+            # receipt, so by the time anything can reference it the chain has it. A program
+            # created through the API starts PENDING and is confirmed by the worker.
+            chain_status="CONFIRMED",
         )
     )
     # The models intentionally avoid broad ORM relationships; establish the FK parent
@@ -476,6 +485,54 @@ class TransparencyReadRepository:
             "actions": ["IMPORT_FINANCIAL_STATEMENT", "RECORD_DELIVERY", "UPLOAD_EVIDENCE"],
         }
 
+    def claims(
+        self,
+        status: str | None = None,
+        program_id: str | None = None,
+        operator_org_ref: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """The claims themselves, so a workspace can show a queue rather than one constant.
+
+        Summaries: a verifier picking work needs to know which claim and how far along it
+        is, and the bundle they are about to sign is read separately once they choose it.
+
+        `operator_org_ref` is the organisation whose drafts may be included. Anyone may
+        read a claim by its identifier, which is the transparency this product exists for,
+        but enumeration is not addressability: listing every claim would publish an
+        organisation's unfinished statements the moment they were written, before any
+        evidence supports them and before anyone chose to put them forward. So a claim
+        appears to everyone only once it has been submitted for verification, and its own
+        operator sees its drafts as well.
+        """
+        query = select(ClaimRecord).order_by(ClaimRecord.created_at)
+        if operator_org_ref is None:
+            query = query.where(ClaimRecord.status.notin_(DRAFT_CLAIM_STATUSES))
+        else:
+            owned = select(ProgramRecord.slug).where(
+                ProgramRecord.operator_org_ref == operator_org_ref
+            )
+            query = query.where(
+                or_(
+                    ClaimRecord.status.notin_(DRAFT_CLAIM_STATUSES),
+                    ClaimRecord.program_ref.in_(owned),
+                )
+            )
+        if status:
+            query = query.where(ClaimRecord.status == status)
+        if program_id:
+            query = query.where(ClaimRecord.program_ref == program_id)
+        return [
+            {
+                "id": record.external_id,
+                "programId": record.program_ref,
+                "projectId": record.project_ref,
+                "statement": record.statement,
+                "status": record.status,
+                "verifiedAt": record.verified_at.isoformat() if record.verified_at else None,
+            }
+            for record in self.session.scalars(query)
+        ]
+
     def claim(self, claim_id: str) -> dict[str, Any]:
         record = self._claim(claim_id)
         attestations = list(
@@ -536,6 +593,12 @@ class TransparencyReadRepository:
             "integrityStatus": record.integrity_status,
             "blockchainStatus": record.blockchain_status,
             "extraction": record.extraction,
+            # The same list the analysis response carries. Without it a client that
+            # reloaded the page could no longer tell which fields /review will demand,
+            # and would be refused with no way to know what to confirm.
+            "reviewRequired": (
+                review_required_fields(record.extraction) if record.extraction else []
+            ),
             "reconciliation": record.reconciliation,
             **record.metadata_json,
         }

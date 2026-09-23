@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, useState } from "react";
+import { ChangeEvent, useEffect, useState } from "react";
 import { RequireRole } from "@/components/RequireRole";
 import { Status } from "@/components/Status";
 import { api } from "@/lib/api";
@@ -15,6 +15,9 @@ type EvidenceResponse = { id: string; workflowStatus: string; contentHash: strin
 
 // Every field the API can put in reviewRequired is editable here. One that is flagged and
 // not rendered would leave registration permanently blocked on a field nobody can reach.
+type Project = { id: string; name: string };
+type OperatorProgram = { id: string; name: string; region: string; operator: string; chainStatus: string; projects: Project[] };
+
 type Field = Exclude<keyof Extraction, "selfReportedConfidence">;
 const FIELDS: [Field, string][] = [
   ["documentType", "Document type"],
@@ -49,22 +52,37 @@ function Operator() {
   const [file, setFile] = useState<File | null>(null);
   const [evidenceId, setEvidenceId] = useState("");
   const [evidence, setEvidence] = useState<EvidenceResponse | null>(null);
+  // Which project the evidence is filed under. This was "project-water-12" in the source,
+  // so an operator at any other organisation filed against a project they do not own.
+  const [programs, setPrograms] = useState<OperatorProgram[] | null>(null);
+  const [projectId, setProjectId] = useState("");
   const [draft, setDraft] = useState<Extraction | null>(null);
   const [confirmed, setConfirmed] = useState<Record<string, boolean>>({});
   const [operation, setOperation] = useState<RegistrationResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    void (async () => {
+      const mine = (await api<OperatorProgram[]>("/operator/programs").catch(() => null)) ?? [];
+      setPrograms(mine);
+      // A program still waiting for its registry entity cannot accept evidence, so it is
+      // not offered as somewhere to file it.
+      const ready = mine.filter((program) => program.chainStatus === "CONFIRMED");
+      setProjectId(ready.flatMap((program) => program.projects)[0]?.id ?? "");
+    })();
+  }, []);
+
   const selectFile = (event: ChangeEvent<HTMLInputElement>) => { setFile(event.target.files?.[0] ?? null); setError(null); };
   const loadDemoInvoice = () => { setFile(new File([`${invoiceText}Demo upload: ${crypto.randomUUID()}\n`], "INV-8291.txt", { type: "text/plain" })); setError(null); };
 
   const processEvidence = async () => {
-    if (!file) return;
-    const id = `ev-inv-8291-${crypto.randomUUID()}`;
+    if (!file || !projectId) return;
+    const id = `ev-${crypto.randomUUID()}`;
     setEvidenceId(id); setError(null);
     try {
       setState("uploading");
       const form = new FormData();
-      form.set("evidence_id", id); form.set("project_id", "project-water-12"); form.set("evidence_type", "INVOICE"); form.set("visibility", "RESTRICTED"); form.set("file", file);
+      form.set("evidence_id", id); form.set("project_id", projectId); form.set("evidence_type", "INVOICE"); form.set("visibility", "RESTRICTED"); form.set("file", file);
       await api<EvidenceResponse>("/evidence", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: form });
       setState("analyzing");
       const analyzed = await api<EvidenceResponse>(`/evidence/${id}/analyze`, { method: "POST" });
@@ -94,12 +112,18 @@ function Operator() {
   const findings = evidence?.reconciliation?.checks ?? [];
   const busy = ["uploading", "analyzing", "registering", "submitted"].includes(state);
   const reviewRequired = evidence?.reviewRequired ?? [];
+  const filing = (programs ?? [])
+    .filter((program) => program.chainStatus === "CONFIRMED")
+    .flatMap((program) => program.projects.map((project) => ({ program, project })));
+  const selected = filing.find((entry) => entry.project.id === projectId);
+  const selectedProgram = selected?.program;
+  const selectedProject = selected?.project;
   const outstanding = state === "confirmed" ? [] : reviewRequired.filter((field) => !confirmed[field]);
   const editField = (field: Field, value: string) => setDraft((current) => current && { ...current, [field]: NUMERIC.has(field) ? Number(value) : value });
   return <div className="workspace">
-    <div className="workspaceHead"><div><span className="eyebrow">PROGRAM OPERATOR</span><h1>Water Project #12</h1><p>Global Water Initiative · Kisumu County</p></div><Status kind={state === "confirmed" ? "verified" : state === "failed" ? "failed" : "pending"}>{state === "confirmed" ? "Evidence registered" : state === "failed" ? "Action required" : "Verification pending"}</Status></div>
-    <section className="metrics compact"><article><span>Budget</span><strong>$8,500</strong></article><article><span>Spent</span><strong>$4,200</strong></article><article><span>Deliveries</span><strong>1</strong></article><article><span>Evidence objects</span><strong>{state === "confirmed" ? 6 : 5}</strong></article></section>
-    {state === "idle" || (state === "failed" && !draft) ? <section className="panel uploadPanel"><span className="eyebrow">UPLOAD EVIDENCE</span><h2>Process an original document</h2><p className="subtle">ImpactGraph hashes the exact selected bytes before analysis or transformation.</p><label className="filePicker"><span>{file?.name ?? "Choose invoice or report"}</span><input aria-label="Choose evidence file" type="file" accept="text/plain,application/pdf,image/jpeg,image/png" onChange={selectFile} /></label><div className="uploadActions"><button className="secondary" onClick={loadDemoInvoice}>Load demo INV-8291</button><button className="button" disabled={!file || busy} onClick={processEvidence}>Upload & analyze</button></div>{error && <div className="errorMessage" role="alert"><b>Evidence processing failed</b><span>{error}</span><button className="secondary" onClick={processEvidence} disabled={!file}>Try again</button></div>}</section> : null}
+    <div className="workspaceHead"><div><span className="eyebrow">PROGRAM OPERATOR</span><h1>{selectedProject?.name ?? "Evidence"}</h1><p>{selectedProgram ? `${selectedProgram.operator} · ${selectedProgram.region}` : "Choose where this document belongs"}</p></div><Status kind={state === "confirmed" ? "verified" : state === "failed" ? "failed" : "pending"}>{state === "confirmed" ? "Evidence registered" : state === "failed" ? "Action required" : "Verification pending"}</Status></div>
+    {programs !== null && filing.length === 0 ? <section className="panel"><h2>No project is ready for evidence</h2><p className="subtle">{programs.length === 0 ? "Your organisation has no programs yet." : "A program cannot accept evidence until its registry entity is confirmed on chain, and none of yours has a project under a confirmed program."}</p></section> : null}
+    {state === "idle" || (state === "failed" && !draft) ? <section className="panel uploadPanel"><span className="eyebrow">UPLOAD EVIDENCE</span><h2>Process an original document</h2><p className="subtle">ImpactGraph hashes the exact selected bytes before analysis or transformation.</p><label className="filePicker"><span>{file?.name ?? "Choose invoice or report"}</span><input aria-label="Choose evidence file" type="file" accept="text/plain,application/pdf,image/jpeg,image/png" onChange={selectFile} /></label>{filing.length > 1 ? <label className="projectPicker">File under<select aria-label="Project" value={projectId} onChange={(event) => setProjectId(event.target.value)}>{filing.map(({ program, project }) => <option key={project.id} value={project.id}>{program.name} — {project.name}</option>)}</select></label> : null}<div className="uploadActions"><button className="secondary" onClick={loadDemoInvoice}>Load demo INV-8291</button><button className="button" disabled={!file || busy || !projectId} onClick={processEvidence}>Upload & analyze</button></div>{error && <div className="errorMessage" role="alert"><b>Evidence processing failed</b><span>{error}</span><button className="secondary" onClick={processEvidence} disabled={!file}>Try again</button></div>}</section> : null}
     {busy && !draft ? <section className="panel txState"><div className="spinner"/><b>{state === "uploading" ? "Storing and hashing original bytes…" : "Analyzing evidence…"}</b><span>AI output proposes facts; it does not verify the claim.</span></section> : null}
     {draft ? <div className="contentGrid operatorGrid"><section className="panel"><span className="eyebrow">EVIDENCE ANALYSIS</span><div className="documentTitle"><div>DOC</div><span><b>Invoice {draft.invoiceNumber}</b><small>Original bytes hashed before processing</small></span><Status kind="verified">Analyzed</Status></div>
       {outstanding.length ? <p className="reviewNote" role="status"><b>{outstanding.length} field{outstanding.length === 1 ? "" : "s"} need your confirmation.</b> The invoice number, amount and currency are always checked by a person: reconciliation resolves a payment against them, and one misread digit turns a matched payment into an unmatched one.</p> : null}

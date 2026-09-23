@@ -4,7 +4,7 @@ import asyncio
 import os
 from datetime import UTC, datetime
 from functools import lru_cache
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import (
@@ -32,6 +32,7 @@ from .auth import (
     AuthenticationError,
     authenticate,
     challenge_message,
+    hash_password,
     issue_wallet_challenge,
     resolve_session,
     revoke_session,
@@ -95,6 +96,9 @@ from .services import (
     AuthorizationError,
     DomainConflictError,
     EvidenceApplicationService,
+    IdempotencyConflictError,
+    OnboardingApplicationService,
+    TenantApplicationService,
     VerificationApplicationService,
 )
 from .verification import restate_claims_for
@@ -283,6 +287,53 @@ class InvoiceExtraction(BaseModel):
     # Self-reported by the model and per field, so the operator screen can mark the ones
     # worth looking at rather than presenting one number for the whole document.
     selfReportedConfidence: dict[str, Annotated[float, Field(ge=0, le=1)]]
+
+
+class OrganizationCreateRequest(BaseModel):
+    """The first user's role is not here: it follows from the organisation's kind."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=3, max_length=160, pattern=r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
+    name: str = Field(min_length=1, max_length=200)
+    kind: Literal["OPERATOR", "VERIFIER"]
+    userEmail: str = Field(min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    userName: str = Field(min_length=1, max_length=200)
+    userPassword: str = Field(min_length=12, max_length=200)
+
+
+class ProgramCreateRequest(BaseModel):
+    """The owning organisation is deliberately absent: it comes from the session."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=3, max_length=120, pattern=r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
+    name: str = Field(min_length=1, max_length=240)
+    region: str = Field(min_length=1, max_length=240)
+    verificationThreshold: int = Field(default=1, ge=1, le=10)
+
+
+class VerifierRoleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    userEmail: str = Field(min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class ProjectCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=3, max_length=160, pattern=r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
+    name: str = Field(min_length=1, max_length=240)
+
+
+class ClaimCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=3, max_length=160, pattern=r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
+    programId: str = Field(min_length=1, max_length=160)
+    projectId: str = Field(min_length=1, max_length=160)
+    statement: str = Field(min_length=1, max_length=1000)
+    outcomeId: str = Field(min_length=1, max_length=160)
 
 
 class EvidenceReviewRequest(BaseModel):
@@ -878,6 +929,28 @@ def project(project_id: str):
     return store.project()
 
 
+@app.get("/claims")
+def claims(status: str | None = None, program: str | None = None, user: CurrentUser = None):
+    """Claims, optionally by status and program.
+
+    The verifier workspace named one claim in its source, so a second organisation's work
+    was unreachable and the queue its own comment described did not exist.
+
+    Drafts are left out for anyone but the organisation that wrote them. Any claim can
+    still be read by its identifier -- that is the transparency this product is for -- but
+    enumerating them would publish an organisation's unfinished statements the moment they
+    were written, which is a different thing from making the finished ones inspectable.
+    """
+    if session_factory is None:
+        raise HTTPException(503, "Listing claims requires PERSISTENCE_MODE=postgres")
+    own_drafts = (
+        user.organization_external_id
+        if user and user.role in {Role.OPERATOR, Role.ADMIN}
+        else None
+    )
+    return database_read("claims", status, program, own_drafts)
+
+
 @app.get("/claims/{claim_id}")
 def claim(claim_id: str):
     if session_factory:
@@ -913,6 +986,257 @@ def evidence(evidence_id: str, user: CurrentUser = None):
     if evidence_id not in store.evidence:
         raise HTTPException(404, "Evidence not found")
     return store.evidence[evidence_id]
+
+
+def _tenant_write(operation):
+    """Run a tenant creation and map its domain errors onto the HTTP contract."""
+    try:
+        with session_factory.begin() as session:
+            return operation(session)
+    except AuthorizationError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except IdempotencyConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (ValueError, DomainConflictError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/organizations", status_code=201)
+def create_organization(
+    request: Request,
+    body: OrganizationCreateRequest,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    """Onboard an organisation and its first person. Administrators only.
+
+    There is no public signup: who may act as an operator or a verifier is not something
+    to leave open. A verifier still cannot attest until its wallet has been proven and
+    granted VERIFIER_ROLE, which the response says.
+    """
+    actor = actor_for(require_user(user, {Role.ADMIN}))
+    key = require_idempotency(idempotency_key)
+    if session_factory is None:
+        raise HTTPException(503, "Onboarding requires PERSISTENCE_MODE=postgres")
+    service = OnboardingApplicationService(settings.chain_id)
+    return _tenant_write(
+        lambda session: service.create_organization(
+            session,
+            actor=actor,
+            organization_id=body.id,
+            name=body.name,
+            kind=body.kind,
+            user_email=body.userEmail,
+            user_name=body.userName,
+            password_hash=hash_password(body.userPassword),
+            correlation_id=request.state.correlation_id,
+            idempotency_key=key,
+        )
+    )
+
+
+@app.post("/organizations/verifier-role", status_code=202)
+def grant_verifier_role(
+    request: Request,
+    body: VerifierRoleRequest,
+    background_tasks: BackgroundTasks,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    """Grant a verifier's proven wallet VERIFIER_ROLE on the registry.
+
+    `createAttestation` checks the role of the address that signed it, and a verifier signs
+    with their own wallet, so without this a newly onboarded verifier can sign nothing.
+    """
+    actor = actor_for(require_user(user, {Role.ADMIN}))
+    key = require_idempotency(idempotency_key)
+    if session_factory is None:
+        raise HTTPException(503, "Granting a role requires PERSISTENCE_MODE=postgres")
+    service = OnboardingApplicationService(settings.chain_id)
+    response = _tenant_write(
+        lambda session: service.grant_verifier_role(
+            session,
+            actor=actor,
+            user_email=body.userEmail,
+            correlation_id=request.state.correlation_id,
+            idempotency_key=key,
+        )
+    )
+    if response.get("operationId"):
+        background_tasks.add_task(process_backend_operation, UUID(response["operationId"]))
+    return response
+
+
+@app.get("/operator/programs")
+def operator_programs(user: CurrentUser = None):
+    """The programs this operator may file evidence under, with their projects.
+
+    Scoped to the caller's organisation rather than returning everything: the operator
+    workspace had one project named in its source, and listing every tenant's projects to
+    replace that would be a worse answer than the constant was.
+    """
+    authenticated = require_user(user, {Role.OPERATOR, Role.ADMIN})
+    if session_factory is None:
+        raise HTTPException(503, "Listing programs requires PERSISTENCE_MODE=postgres")
+    with session_factory() as session:
+        query = select(ProgramRecord).order_by(ProgramRecord.name)
+        if authenticated.role != Role.ADMIN:
+            query = query.where(
+                ProgramRecord.operator_org_ref == authenticated.organization_external_id
+            )
+        programs = list(session.scalars(query))
+        projects = {
+            program.id: [
+                {"id": entity.external_id, "name": (entity.data or {}).get("name", entity.external_id)}
+                for entity in session.scalars(
+                    select(DomainEntityRecord).where(
+                        DomainEntityRecord.entity_type == "PROJECT",
+                        DomainEntityRecord.program_id == program.id,
+                    )
+                )
+            ]
+            for program in programs
+        }
+        return [
+            {
+                "id": program.slug,
+                "name": program.name,
+                "region": program.region,
+                "operator": program.operator_name,
+                "chainStatus": program.chain_status,
+                "projects": projects.get(program.id, []),
+            }
+            for program in programs
+        ]
+
+
+@app.post("/programs", status_code=201)
+def create_program(
+    request: Request,
+    body: ProgramCreateRequest,
+    background_tasks: BackgroundTasks,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    """Create a program and queue the registry entity it needs to be usable.
+
+    The program is returned PENDING. It cannot accept evidence until the worker has
+    observed the ProgramCreated event, because `registerEvidence` reverts with
+    UnknownProgram against a registry that has never heard of it.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    key = require_idempotency(idempotency_key)
+    if session_factory is None:
+        raise HTTPException(503, "Creating a program requires PERSISTENCE_MODE=postgres")
+    service = TenantApplicationService(settings.chain_id)
+    response = _tenant_write(
+        lambda session: service.create_program(
+            session,
+            actor=actor,
+            program_id=body.id,
+            name=body.name,
+            region=body.region,
+            verification_threshold=body.verificationThreshold,
+            correlation_id=request.state.correlation_id,
+            idempotency_key=key,
+        )
+    )
+    if response.get("operationId"):
+        background_tasks.add_task(process_backend_operation, UUID(response["operationId"]))
+    return response
+
+
+@app.post("/programs/{program_id}/projects", status_code=201)
+def create_project(
+    request: Request,
+    program_id: str,
+    body: ProjectCreateRequest,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    """A project is not a registry entity, so this is a database write and nothing else."""
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    key = require_idempotency(idempotency_key)
+    if session_factory is None:
+        raise HTTPException(503, "Creating a project requires PERSISTENCE_MODE=postgres")
+    service = TenantApplicationService(settings.chain_id)
+    return _tenant_write(
+        lambda session: service.create_project(
+            session,
+            actor=actor,
+            program_id=program_id,
+            project_id=body.id,
+            name=body.name,
+            correlation_id=request.state.correlation_id,
+            idempotency_key=key,
+        )
+    )
+
+
+@app.post("/programs/{program_id}/registry-entity", status_code=202)
+def retry_program_entity(
+    request: Request,
+    program_id: str,
+    background_tasks: BackgroundTasks,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    """Queue the registry entity again after a failed submission.
+
+    Without this a program whose chain call failed for a transient reason is a tombstone:
+    claims refuse it, evidence refuses it, and its identifier is taken so it cannot be
+    created again. Evidence has always been able to retry; a program could not.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    key = require_idempotency(idempotency_key)
+    if session_factory is None:
+        raise HTTPException(503, "Retrying a registry entity requires PERSISTENCE_MODE=postgres")
+    service = TenantApplicationService(settings.chain_id)
+    response = _tenant_write(
+        lambda session: service.retry_registry_entity(
+            session,
+            actor=actor,
+            program_id=program_id,
+            correlation_id=request.state.correlation_id,
+            idempotency_key=key,
+        )
+    )
+    if response.get("operationId"):
+        background_tasks.add_task(process_backend_operation, UUID(response["operationId"]))
+    return response
+
+
+@app.post("/claims", status_code=201)
+def create_claim(
+    request: Request,
+    body: ClaimCreateRequest,
+    background_tasks: BackgroundTasks,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    key = require_idempotency(idempotency_key)
+    if session_factory is None:
+        raise HTTPException(503, "Creating a claim requires PERSISTENCE_MODE=postgres")
+    service = TenantApplicationService(settings.chain_id)
+    response = _tenant_write(
+        lambda session: service.create_claim(
+            session,
+            actor=actor,
+            claim_id=body.id,
+            program_id=body.programId,
+            project_id=body.projectId,
+            statement=body.statement,
+            outcome_id=body.outcomeId,
+            correlation_id=request.state.correlation_id,
+            idempotency_key=key,
+        )
+    )
+    if response.get("operationId"):
+        background_tasks.add_task(process_backend_operation, UUID(response["operationId"]))
+    return response
 
 
 @app.post("/evidence", status_code=201)
