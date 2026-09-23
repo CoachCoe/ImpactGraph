@@ -114,6 +114,8 @@ def operator_client() -> TestClient:
 
 
 def upload(client: TestClient, evidence_id: str, *, personal: bool) -> None:
+    # Distinct bytes per object: identical content is the same evidence, and the schema
+    # says so with a unique constraint on the commitment.
     response = client.post(
         "/evidence",
         headers={"Idempotency-Key": f"upload-{evidence_id}"},
@@ -124,7 +126,7 @@ def upload(client: TestClient, evidence_id: str, *, personal: bool) -> None:
             "visibility": "RESTRICTED",
             "personal_data": str(personal).lower(),
         },
-        files={"file": ("INV-8291.txt", b"Invoice INV-8291", "text/plain")},
+        files={"file": ("INV-8291.txt", f"Invoice INV-8291 for {evidence_id}".encode(), "text/plain")},
     )
     assert response.status_code == 201, response.text
 
@@ -249,3 +251,83 @@ def test_an_erasure_record_does_not_quote_what_was_erased():
         recorded = str(entry.metadata_json)
         assert "subject-household-14" not in recorded
         assert "INV-8291" not in recorded
+
+
+# --- Answering a subject access request ---
+
+
+def declare_for(client: TestClient, evidence_id: str, subject: str, **overrides) -> None:
+    body = {**BASIS, "subjectReference": subject, **overrides}
+    assert client.post(f"/evidence/{evidence_id}/data-protection", json=body).status_code == 201
+
+
+def test_a_subject_access_request_is_one_query_not_a_tour_of_the_codebase():
+    """A DSAR has a deadline and no allowance for a search that misses something."""
+    client = operator_client()
+    upload(client, "ev-subject-a", personal=True)
+    upload(client, "ev-subject-b", personal=True)
+    upload(client, "ev-someone-else", personal=True)
+    declare_for(client, "ev-subject-a", "subject-amina")
+    declare_for(client, "ev-subject-b", "subject-amina")
+    declare_for(client, "ev-someone-else", "subject-other")
+
+    answer = client.get("/data-subjects/subject-amina")
+    assert answer.status_code == 200, answer.text
+    body = answer.json()
+    held = {entry["evidenceId"] for entry in body["held"]}
+    assert held == {"ev-subject-a", "ev-subject-b"}
+    assert set(body["erasable"]) == held
+    # What is held, with the basis and the controller, because those are what a subject is
+    # entitled to be told.
+    assert all(entry["lawfulBasis"] == "LEGITIMATE_INTEREST" for entry in body["held"])
+    assert all(entry["controller"] == "org-global-water" for entry in body["held"])
+    # And the honest note about what objecting can and cannot undo.
+    assert "cannot be withdrawn" in body["note"]
+
+
+def test_the_subject_record_reports_what_is_held_and_not_its_contents():
+    """Otherwise this is a way to read every restricted object by guessing a reference."""
+    client = operator_client()
+    upload(client, "ev-subject-contents", personal=True)
+    declare_for(client, "ev-subject-contents", "subject-contents")
+
+    body = client.get("/data-subjects/subject-contents").json()
+    serialised = str(body)
+    assert "INV-8291" not in serialised
+    assert "extraction" not in serialised
+
+
+def test_an_operator_sees_only_the_subjects_it_is_answerable_for():
+    """Controllership decides this. An operator is not entitled to another organisation's
+    subjects merely because it can name one."""
+    from tests.test_ownership_scoping import make_outsider
+
+    client = operator_client()
+    upload(client, "ev-subject-scoped", personal=True)
+    declare_for(client, "ev-subject-scoped", "subject-scoped")
+
+    make_outsider()
+    outsider = TestClient(app)
+    assert outsider.post(
+        "/auth/login",
+        json={"email": "operator@otherwater.example", "password": DEMO_PASSWORD},
+    ).status_code == 200
+    assert outsider.get("/data-subjects/subject-scoped").json()["held"] == []
+
+    admin = TestClient(app)
+    admin.post("/auth/login", json={"email": "admin@impactgraph.example", "password": DEMO_PASSWORD})
+    assert len(admin.get("/data-subjects/subject-scoped").json()["held"]) == 1
+
+
+def test_an_erased_object_still_appears_with_what_became_of_it():
+    """A subject is owed an account of what was held, including what has gone, or an
+    erasure looks indistinguishable from never having been told about it."""
+    client = operator_client()
+    upload(client, "ev-subject-erased", personal=True)
+    declare_for(client, "ev-subject-erased", "subject-erased")
+    client.post("/evidence/ev-subject-erased/erase", json={"reason": "They objected."})
+
+    entry = client.get("/data-subjects/subject-erased").json()["held"][0]
+    assert entry["erasedAt"] is not None
+    assert entry["objectedAt"] is not None
+    assert entry["evidenceId"] not in client.get("/data-subjects/subject-erased").json()["erasable"]

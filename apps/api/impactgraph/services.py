@@ -1222,6 +1222,74 @@ class DataProtectionApplicationService:
             "retainUntil": retain_until,
         }
 
+    def subject_record(
+        self,
+        session: Session,
+        *,
+        actor: ApplicationActor,
+        subject_reference: str,
+    ) -> dict[str, Any]:
+        """Everything this system holds about one person.
+
+        A subject access request has a deadline and no allowance for a search that misses
+        something, so this is one query against the column the subject is recorded in
+        rather than a tour of the codebase performed by hand under time pressure.
+
+        It reports what is held, not the contents. Returning the documents themselves
+        would make this endpoint a way to read every restricted object in the system by
+        guessing a reference, and a subject is entitled to their data through a verified
+        channel rather than through whoever asked first.
+        """
+        self._operator(actor)
+        records = list(
+            session.scalars(
+                select(DataProtectionRecord)
+                .where(DataProtectionRecord.subject_reference == subject_reference)
+                .order_by(DataProtectionRecord.created_at)
+            )
+        )
+        if actor.role != Role.ADMIN:
+            records = [
+                record
+                for record in records
+                if actor.id in {record.controller_org_ref, record.joint_controller_org_ref}
+            ]
+        evidence_ids = [record.evidence_ref for record in records]
+        evidence = {
+            item.external_id: item
+            for item in session.scalars(
+                select(EvidenceRecord).where(EvidenceRecord.external_id.in_(evidence_ids))
+            )
+        }
+        held = []
+        for record in records:
+            item = evidence.get(record.evidence_ref)
+            held.append(
+                {
+                    "evidenceId": record.evidence_ref,
+                    "lawfulBasis": record.lawful_basis,
+                    "specialCategory": record.special_category,
+                    "controller": record.controller_org_ref,
+                    "jointController": record.joint_controller_org_ref,
+                    "purpose": record.purpose,
+                    "collectedAt": record.created_at.isoformat() if record.created_at else None,
+                    "retainUntil": record.retain_until,
+                    "objectedAt": record.withdrawn_at.isoformat() if record.withdrawn_at else None,
+                    "erasedAt": record.erased_at.isoformat() if record.erased_at else None,
+                    # Named so a subject can be told what happens if they object: the
+                    # bytes go, the commitment stays and says only that they once existed.
+                    "onchainCommitment": item.content_hash if item else None,
+                    "type": item.evidence_type if item else None,
+                }
+            )
+        return {
+            "subjectReference": subject_reference,
+            "held": held,
+            "erasable": [entry["evidenceId"] for entry in held if entry["erasedAt"] is None],
+            "note": "Objecting erases the stored object. The onchain commitment cannot be "
+            "withdrawn and continues to record only that those bytes were once committed.",
+        }
+
     def erase(
         self,
         session: Session,

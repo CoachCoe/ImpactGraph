@@ -1474,6 +1474,25 @@ def _require_confirmation(analyzed: dict[str, Any] | None, confirmed: list[str])
     return sorted(set(confirmed) & set(SCHEMA_FIELDS))
 
 
+@app.get("/data-subjects/{subject_reference}")
+def data_subject_record(subject_reference: str, user: CurrentUser = None):
+    """Everything held about one person, for answering a subject access request.
+
+    Scoped to the controller: an operator sees the subjects of programmes its own
+    organisation is answerable for, and an administrator sees all of them. It reports what
+    is held rather than the contents, so this cannot become a way to read every restricted
+    object in the system by guessing a reference.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    if session_factory is None:
+        raise HTTPException(503, "This requires PERSISTENCE_MODE=postgres")
+    service = DataProtectionApplicationService(evidence_storage)
+    with session_factory() as session:
+        return service.subject_record(
+            session, actor=actor, subject_reference=subject_reference
+        )
+
+
 @app.post("/evidence/{evidence_id}/data-protection", status_code=201)
 def declare_data_protection(
     request: Request,
