@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -20,11 +22,13 @@ from .persistence import (
     DataProtectionRecord,
     DomainEntityRecord,
     EvidenceRecord,
+    FundingRecord,
     IdempotencyRecord,
     OrganizationRecord,
     OutboxRecord,
     ProgramRecord,
     UserRecord,
+    public_funder_name,
 )
 from .verification import restate_claims_for
 
@@ -1377,4 +1381,91 @@ class DataProtectionApplicationService:
             # The commitment is not withdrawn, and saying so is the honest part.
             "commitment": "The onchain commitment remains; it records that these bytes were "
             "once committed, which is still true.",
+        }
+
+
+class FunderNameService:
+    """Whether a funder is named in public, decided by the funder.
+
+    An operator knows the name already and has no endpoint that publishes it. They can
+    ask for a consent link and pass it to the person, and the person decides. The link is
+    the whole authority, so it is stored hashed and the plaintext is returned once.
+
+    Withdrawable, unlike the publication of a claim. A claim published and then withdrawn
+    would make the record editable; a person changing their mind about being named is the
+    thing this exists to respect.
+    """
+
+    def __init__(self) -> None:
+        self.audit = AuditService()
+
+    def issue_consent_link(
+        self,
+        session: Session,
+        *,
+        actor: ApplicationActor,
+        funding_id: str,
+        correlation_id: str,
+    ) -> dict[str, Any]:
+        if actor.role not in {Role.OPERATOR, Role.ADMIN}:
+            raise AuthorizationError("Only an operator or administrator may request this")
+        funding = session.scalar(
+            select(FundingRecord).where(FundingRecord.external_id == funding_id)
+        )
+        if funding is None:
+            raise LookupError("Funding not found")
+        token = secrets.token_urlsafe(48)
+        funding.name_consent_token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        self.audit.record(
+            session,
+            actor=actor,
+            action="FUNDER_NAME_CONSENT_REQUESTED",
+            entity_type="FUNDING",
+            entity_id=funding_id,
+            correlation_id=correlation_id,
+            metadata={},
+        )
+        return {
+            "fundingId": funding_id,
+            "token": token,
+            "note": "Send this to the funder. Requesting it does not publish anything, and "
+            "there is no way for anyone else to decide this on their behalf.",
+        }
+
+    @staticmethod
+    def _by_token(session: Session, token: str) -> FundingRecord:
+        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        funding = session.scalar(
+            select(FundingRecord).where(FundingRecord.name_consent_token_hash == digest)
+        )
+        if funding is None:
+            raise LookupError("That link is not valid")
+        return funding
+
+    def set_publication(
+        self,
+        session: Session,
+        *,
+        token: str,
+        publish: bool,
+        correlation_id: str,
+    ) -> dict[str, Any]:
+        funding = self._by_token(session, token)
+        funding.publish_funder_name = publish
+        session.add(
+            AuditLogRecord(
+                actor_id="funder",
+                action="FUNDER_NAME_PUBLISHED" if publish else "FUNDER_NAME_WITHDRAWN",
+                entity_type="FUNDING",
+                entity_id=funding.external_id,
+                # Never the name: an entry recording a choice about a name should not be
+                # a second place the name is written down.
+                metadata_json={},
+                correlation_id=correlation_id,
+            )
+        )
+        return {
+            "fundingId": funding.external_id,
+            "published": publish,
+            "shownAs": public_funder_name(funding),
         }

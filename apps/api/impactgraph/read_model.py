@@ -44,6 +44,7 @@ from .persistence import (
     ProcessedChainEventRecord,
     ProgramRecord,
     ProvenanceEdgeRecord,
+    public_funder_name,
 )
 from .verification import EvidenceScoreService, claim_subgraph, evaluate_persisted_claim
 
@@ -152,6 +153,7 @@ def seed_read_model(session: Session, storage: EvidenceStorage | None = None) ->
             external_id="funding-institutional-90000",
             program_ref=PROGRAM_ID,
             funder_name="Institutional funding pool",
+            funder_is_organisation=True,
             amount_minor=9000000,
             currency="USD",
             received_on="2026-07-01",
@@ -662,7 +664,7 @@ class TransparencyReadRepository:
                 {
                     "id": row.external_id,
                     "type": "FUNDING",
-                    "title": row.funder_name,
+                    "title": public_funder_name(row),
                     "detail": f"{amount(row)} contributed",
                 }
             )

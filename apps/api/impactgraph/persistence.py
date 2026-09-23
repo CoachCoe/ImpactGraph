@@ -85,6 +85,10 @@ class EvidenceRecord(EntityMixin, Base):
 
 class ClaimRecord(EntityMixin, Base):
     __tablename__ = "claims"
+    #: When this claim was published as a public proof. Opt in, and once set it stays
+    #: set: a page that can be withdrawn when the verdict turns inconvenient is not a
+    #: record of anything.
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     external_id: Mapped[str] = mapped_column(String(160), unique=True)
     program_ref: Mapped[str] = mapped_column(String(160))
     project_ref: Mapped[str] = mapped_column(String(160))
@@ -350,6 +354,17 @@ class FundingRecord(MoneyMixin, EntityMixin, Base):
     external_id: Mapped[str] = mapped_column(String(160), unique=True, index=True)
     program_ref: Mapped[str] = mapped_column(String(160), index=True)
     funder_name: Mapped[str] = mapped_column(String(240))
+    #: An organisation that funded a programme is a public fact. A private individual is
+    #: a person whose giving is their own business, so the default is the careful one.
+    funder_is_organisation: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
+    #: Set only by someone holding the funder's own consent link. An operator knows the
+    #: name and cannot publish it; that choice belongs to the person it names.
+    publish_funder_name: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
+    name_consent_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     received_on: Mapped[str] = mapped_column(String(10))
     source_ref: Mapped[str] = mapped_column(String(160))
 
@@ -425,3 +440,23 @@ class OutcomeRecord(EntityMixin, Base):
     # Percent, or NULL where the method does not produce one. Nought and unknown are
     # different answers and a column that cannot hold the difference invents one.
     confidence_percent: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+#: What a private individual is called on a surface they did not ask to appear on.
+REDACTED_FUNDER = "An individual donor"
+
+
+def public_funder_name(funding: FundingRecord, *, privileged: bool = False) -> str:
+    """The name to show for whoever gave the money.
+
+    An organisation that funded a programme is a public fact and stays named. A private
+    individual is a person whose giving is their own business, and they can choose to be
+    named -- nobody else can choose for them, which is why an operator has no way to set
+    this and a consent link does.
+
+    The amount, the date and the hashes are unchanged either way, so the money is still
+    followable; what is withheld is which person it came from.
+    """
+    if privileged or funding.funder_is_organisation or funding.publish_funder_name:
+        return funding.funder_name
+    return REDACTED_FUNDER

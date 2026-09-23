@@ -85,9 +85,12 @@ test("a donor can follow the money to what it reached, without an account", asyn
   await page.getByRole("link", { name: /See where the money went/i }).click();
   await expect(page).toHaveURL(/\/financial/);
 
-  await page.getByRole("link", { name: /Jane Smith/ }).first().click();
+  // Not by the donor's name. A private individual is not named to a stranger, so the
+  // trail is followed by the contribution rather than by who made it.
+  await expect(page.getByText("Jane Smith")).toHaveCount(0);
+  await page.getByRole("link", { name: /An individual donor/ }).first().click();
   await expect(page).toHaveURL(/\/funding\//);
-  await expect(page.getByRole("heading", { name: /Jane Smith gave/i })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /An individual donor gave/i })).toBeVisible();
   // Money that never moved is part of the answer, so it has to be on the page.
   await expect(
     page.getByText(/Not yet committed|Committed beyond funding/).first(),

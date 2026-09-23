@@ -98,6 +98,7 @@ from .services import (
     DataProtectionApplicationService,
     DomainConflictError,
     EvidenceApplicationService,
+    FunderNameService,
     IdempotencyConflictError,
     OnboardingApplicationService,
     TenantApplicationService,
@@ -1104,6 +1105,55 @@ def grant_verifier_role(
     if response.get("operationId"):
         background_tasks.add_task(process_backend_operation, UUID(response["operationId"]))
     return response
+
+
+class FunderNameChoice(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    publish: bool
+
+
+@app.post("/funding/{funding_id}/name-consent", status_code=201)
+def request_funder_name_consent(request: Request, funding_id: str, user: CurrentUser = None):
+    """Issue a link the funder can use to decide whether they are named.
+
+    Requesting it publishes nothing. There is deliberately no endpoint by which an
+    operator, who knows the name already, can publish it: that choice belongs to the
+    person it names.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    if session_factory is None:
+        raise HTTPException(503, "This requires PERSISTENCE_MODE=postgres")
+    service = FunderNameService()
+    return _tenant_write(
+        lambda session: service.issue_consent_link(
+            session,
+            actor=actor,
+            funding_id=funding_id,
+            correlation_id=request.state.correlation_id,
+        )
+    )
+
+
+@app.post("/funding/name-consent/{token}")
+def choose_funder_name_publication(request: Request, token: str, body: FunderNameChoice):
+    """The funder's own decision, made with their own link.
+
+    Unauthenticated because the link is the authority, in the same way the notification
+    confirmation link is. Withdrawable, because a person changing their mind about being
+    named is exactly what this exists to respect.
+    """
+    if session_factory is None:
+        raise HTTPException(503, "This requires PERSISTENCE_MODE=postgres")
+    service = FunderNameService()
+    return _tenant_write(
+        lambda session: service.set_publication(
+            session,
+            token=token,
+            publish=body.publish,
+            correlation_id=request.state.correlation_id,
+        )
+    )
 
 
 @app.get("/operator/programs")
