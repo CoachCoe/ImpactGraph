@@ -64,3 +64,14 @@ describe("preparing a photograph for a metered connection", () => {
     expect(result.bytes.byteLength).toBe(4);
   });
 });
+
+describe("the budget this is tuned to", () => {
+  it("states the edge and quality the numbers were measured at", async () => {
+    const { MAX_EDGE, QUALITY, BUDGET_SECONDS_PER_PHOTOGRAPH } = await import("./compress");
+    // Pinned so a change to either is a deliberate act that re-opens the measurement
+    // rather than a tweak that quietly doubles an operator's wait.
+    expect(MAX_EDGE).toBe(1600);
+    expect(QUALITY).toBeCloseTo(0.72);
+    expect(BUDGET_SECONDS_PER_PHOTOGRAPH).toBeLessThanOrEqual(15);
+  });
+});

@@ -13,8 +13,27 @@ import { hasLocation, readApp1, withApp1 } from "@/lib/exif";
  * a hash: the client's job is delivery.
  */
 
+/**
+ * The budget this is tuned to.
+ *
+ * A "Regular 3G" profile is about 400 kbit/s up, so every 50 KB is a second of an
+ * operator standing still. A 12-megapixel phone photograph is 3-5 MB, which is a minute
+ * or more each and several minutes for one delivery -- long enough that people stop
+ * bothering, which is the actual failure.
+ *
+ * 1600px on the long edge at quality 0.72 lands a typical delivery photograph at roughly
+ * 200-350 KB: legible enough to read a meter or a serial number, and around five to nine
+ * seconds on that profile. The whole capture-to-filed round trip for one photograph
+ * should sit inside fifteen seconds, and a delivery of four inside a minute.
+ *
+ * These are the numbers to re-measure if either is changed. Raising the edge to 2048
+ * roughly doubles the bytes and therefore the wait.
+ */
 export const MAX_EDGE = 1600;
 export const QUALITY = 0.72;
+
+/** What the round trip is expected to cost on a Regular 3G profile, per photograph. */
+export const BUDGET_SECONDS_PER_PHOTOGRAPH = 15;
 
 export type Compressed = {
   bytes: ArrayBuffer;
