@@ -21,6 +21,11 @@ dependencies = [
   "web3>=7.7,<8",
   "structlog>=25.1,<26",
   "prometheus-client>=0.21,<1",
+  # Document extraction. tml-renderers is required rather than optional for the
+  # Inkling models, which refuse get_tokenizer, and it imports torch at module load.
+  "tinker>=0.30,<1",
+  "tml-renderers>=0.1,<1",
+  "pillow>=11,<12",
 ]
 
 [project.optional-dependencies]

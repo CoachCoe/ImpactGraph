@@ -11,8 +11,12 @@ WORKDIR /app
 FROM base AS build
 COPY apps/api/pyproject.toml ./
 COPY apps/api/impactgraph ./impactgraph
+# torch arrives as a transitive dependency of tml-renderers, which the Inkling models
+# require. Installed from the CPU index first: the default wheel carries CUDA and several
+# gigabytes of it, for a container that will never see a GPU.
 RUN python -m venv /opt/venv \
  && /opt/venv/bin/pip install --upgrade pip \
+ && /opt/venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch \
  && /opt/venv/bin/pip install .
 
 FROM base AS runtime

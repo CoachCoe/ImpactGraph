@@ -44,6 +44,7 @@ from .database import create_session_factory
 from .demo import INVOICE_BYTES, TAMPERED_INVOICE_BYTES, store
 from .domain import BlockchainStatus, Role, Visibility
 from .evidence import (
+    EvidenceAnalysisProvider,
     FileEvidenceStorage,
     MockEvidenceAnalysisProvider,
     ReconciliationService,
@@ -56,6 +57,7 @@ from .export import (
     outcomes_csv,
     provenance_csv,
 )
+from .extraction import TinkerEvidenceAnalysisProvider, review_required_fields
 from .financial import (
     EvidenceReconciliationService,
     FinancialIngestionService,
@@ -105,15 +107,14 @@ session_factory = (
     else None
 )
 evidence_storage = FileEvidenceStorage(settings.evidence_storage_path)
-if settings.ai_provider != "mock":
-    # Accepting a provider name and then using the mock anyway is the same silent-fallback
-    # failure the specification forbids for chains. No real provider is implemented yet.
-    raise RuntimeError(
-        f"AI_PROVIDER={settings.ai_provider!r} is configured but no such provider is "
-        "implemented. Set AI_PROVIDER=mock, or implement the provider behind "
-        "EvidenceAnalysisProvider before selecting it."
-    )
-analysis_provider = MockEvidenceAnalysisProvider()
+# Accepting a provider name and then using the mock anyway would be the silent fallback
+# the specification forbids for chains, so an unknown name is refused at startup by
+# Settings rather than degraded here.
+analysis_provider: EvidenceAnalysisProvider = (
+    TinkerEvidenceAnalysisProvider(model=settings.extraction_model)
+    if settings.ai_provider == "tinker"
+    else MockEvidenceAnalysisProvider()
+)
 reconciliation_service = ReconciliationService()
 evidence_reconciliation = EvidenceReconciliationService(reconciliation_service)
 financial_provider = MockFinancialDataProvider()
@@ -351,6 +352,13 @@ def evidence_record_response(record: EvidenceRecord) -> dict[str, Any]:
         "visibility": record.visibility,
         "workflowStatus": record.workflow_status,
         "analysisStatus": record.analysis_status,
+        # Which fields a person has to confirm. Always includes the ones reconciliation
+        # resolves a payment against, whatever the model reported about its own certainty:
+        # a misread digit in an invoice number turns a matched payment into an unmatched
+        # one, and the model has been observed misreading exactly that field.
+        "reviewRequired": (
+            review_required_fields(record.extraction) if record.extraction else []
+        ),
         "integrityStatus": record.integrity_status,
         "blockchainStatus": record.blockchain_status,
         "extraction": record.extraction,
