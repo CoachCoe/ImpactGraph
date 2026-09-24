@@ -148,6 +148,10 @@ h1,h2,h3,p{margin-top:0}
 .hero h1{color:var(--paper);font-size:clamp(38px,5.6vw,64px);line-height:1.08;letter-spacing:var(--track-display-lg);margin:17px 0}
 .hero h1 em{color:var(--brand);font-style:normal;font-weight:500}
 .hero p{font-size:18px;color:var(--dkmut);max-width:600px}
+.hero p strong{color:var(--paper)}
+.hero>.button{margin-top:12px}
+.contributionHero h1{max-width:1080px;font-size:clamp(34px,4.7vw,58px)}
+.contributionHero h1>a{color:var(--brand)}
 .section,.workspace,.inspector{max-width:1160px;margin:0 auto;padding:64px 24px}
 .sectionHead,.workspaceHead,.panelHead,.claimHero{display:flex;align-items:flex-start;justify-content:space-between;gap:24px}
 .sectionHead h2,.workspaceHead h1{font-size:clamp(26px,3.2vw,36px);line-height:1.12;margin:8px 0}

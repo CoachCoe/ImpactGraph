@@ -66,7 +66,8 @@ leave commentary about the edit itself — that belongs in the commit message.
 
 **Working documents stay out of the repository.** Plans, status reports, findings and
 session notes belong in the issue or pull request that owns the conversation. Committed
-Markdown is limited to what someone cloning the repository needs.
+Markdown is limited to what someone cloning the repository needs. The maintained product
+roadmap is part of that documentation; temporary delivery plans are not.
 
 ## Commits and pull requests
 

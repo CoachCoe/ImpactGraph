@@ -82,17 +82,13 @@ test("a donor can follow the money to what it reached, without an account", asyn
   await openProgram(page);
   await expectNoHorizontalScroll(page);
 
-  // From a program's record, "see where the money went" carries which program with it.
-  await page.getByRole("link", { name: /See where the money went/i }).click();
-  await expect(page).toHaveURL(/\/financial/);
-
-  // Not by the donor's name. A private individual is not named to a stranger, so the
-  // trail is followed by the contribution rather than by who made it.
+  // The contribution is the front door: one click opens its own allocation trail rather
+  // than making a donor find it in a program-wide ledger first.
+  await expect(
+    page.getByRole("heading", { name: /received.*committed.*households/i }),
+  ).toBeVisible();
   await expect(page.getByText("Jane Smith")).toHaveCount(0);
-  await page
-    .getByRole("link", { name: /An individual donor/ })
-    .first()
-    .click();
+  await page.getByRole("link", { name: /Inspect every record/i }).click();
   await expect(page).toHaveURL(/\/funding\//);
   await expect(
     page.getByRole("heading", { name: /An individual donor gave/i }),

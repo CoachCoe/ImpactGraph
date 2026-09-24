@@ -8,6 +8,9 @@ Ethereum is used for immutable commitments, provenance, and identified attestati
 for moving the program's fiat money or storing documents. AI extracts and correlates; it
 cannot establish verification.
 
+Product sequencing and the boundary between what this POC de-risks and what must happen
+next are in the [product roadmap](docs/product-roadmap.md).
+
 ```text
 Donor / Operator / Verifier UI
               ↓
