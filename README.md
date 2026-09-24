@@ -225,6 +225,17 @@ on Sepolia, when `CHAIN_ID` is wrong, the registry address is missing, or
 `NEXT_PUBLIC_*` values are inlined into the web bundle at build time, so changing them
 requires a rebuild rather than a restart.
 
+Production seeding deliberately omits the local showcase accounts because their password
+is published in this repository. A hosted POC can provision the operator, verifier and
+administrator personas once with a private password:
+
+```bash
+./scripts/create-demo-users.sh
+```
+
+The script prompts without echoing the password, rejects the published local password,
+and leaves existing accounts unchanged when rerun.
+
 Not included, and required before this faces real users: TLS termination, a managed database
 with backups, production secret management, MFA/SSO, and identity proofing. The POC does
 have Argon2 password authentication, revocable server-side sessions, role checks, wallet

@@ -16,6 +16,7 @@ from .auth import (
     DEMO_PASSWORD,
     DEMO_USERS,
     demo_accounts_permitted,
+    provision_hosted_demo_accounts,
     seed_demo_accounts,
 )
 from .blockchain import (
@@ -806,6 +807,22 @@ def new_demo_run(network: str) -> None:
     )
 
 
+def provision_demo_users() -> None:
+    """Provision hosted showcase users without accepting the published local password."""
+    password = os.environ.get("IMPACTGRAPH_PROVISIONING_PASSWORD", "")
+    if not password:
+        raise RuntimeError(
+            "IMPACTGRAPH_PROVISIONING_PASSWORD is required; use scripts/create-demo-users.sh"
+        )
+    settings = Settings.from_env()
+    if settings.persistence_mode != "postgres":
+        raise RuntimeError("Hosted demo users require PostgreSQL persistence")
+    factory = create_session_factory(settings.database_url)
+    with factory.begin() as session:
+        created = provision_hosted_demo_accounts(session, password)
+    print(json.dumps({"created": created, "existingAccountsWereUnchanged": True}, indent=2))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="impactgraph")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -838,6 +855,7 @@ def main() -> None:
     record.add_argument("--transaction-hash", required=True)
     run = sub.add_parser("new-demo-run")
     run.add_argument("--network", choices=("local", "sepolia"), required=True)
+    sub.add_parser("provision-demo-users")
     args = parser.parse_args()
     if args.command == "seed":
         seed()
@@ -871,6 +889,8 @@ def main() -> None:
         record_evidence_registration(args.transaction_hash)
     elif args.command == "new-demo-run":
         new_demo_run(args.network)
+    elif args.command == "provision-demo-users":
+        provision_demo_users()
 
 
 if __name__ == "__main__":
