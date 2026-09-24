@@ -487,11 +487,27 @@ class MoneyMixin:
 
 
 class FundingRecord(MoneyMixin, EntityMixin, Base):
-    """Money received into a program from a funder."""
+    """Money received by an organisation, and the programme it was assigned to if any.
+
+    Receipt and assignment are separate events because they are separate in the operating
+    model this serves: contributions arrive unrestricted and the organisation decides
+    later what they fund. A record that could not hold money between those two moments
+    forced every contribution to name a programme at the instant it was received, which
+    is right for a grant and wrong for a standing order.
+    """
 
     __tablename__ = "funding"
     external_id: Mapped[str] = mapped_column(String(160), unique=True, index=True)
-    program_ref: Mapped[str] = mapped_column(String(160), index=True)
+    #: Who received it. Always known, which is what makes "held" answerable.
+    organization_ref: Mapped[str] = mapped_column(String(160), index=True, default="")
+    #: NULL until it is assigned. Held money is money with no programme, not a programme
+    #: whose identifier happens to be missing.
+    program_ref: Mapped[str | None] = mapped_column(String(160), index=True, nullable=True)
+    assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: How many people this row stands for. One for a grant or a donor who asked to be
+    #: named; more for a roll-up, which is how a daily total of small contributions is
+    #: held without a row per contribution. See ADR-018.
+    contributor_count: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     funder_name: Mapped[str] = mapped_column(String(240))
     #: An organisation that funded a programme is a public fact. A private individual is
     #: a person whose giving is their own business, so the default is the careful one.
@@ -607,9 +623,14 @@ def public_funder_name(funding: FundingRecord, *, privileged: bool = False) -> s
     named -- nobody else can choose for them, which is why an operator has no way to set
     this and a consent link does.
 
+    A roll-up stands for many people and names none of them, so it is described by its
+    size. Privilege does not unlock a name there because the row never held one.
+
     The amount, the date and the hashes are unchanged either way, so the money is still
     followable; what is withheld is which person it came from.
     """
+    if funding.contributor_count > 1:
+        return f"{funding.contributor_count:,} individual donors"
     if privileged or funding.funder_is_organisation or funding.publish_funder_name:
         return funding.funder_name
     return REDACTED_FUNDER

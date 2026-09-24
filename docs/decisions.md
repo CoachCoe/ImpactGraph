@@ -403,3 +403,45 @@ the HTTP scan refuses above a ceiling rather than running past a gateway timeout
 rolling back. Large tenants scan out of band with `impactgraph risk-scan`.
 
 Date: 2026-09-23
+
+## ADR-018 — Receipt and assignment are separate events, and a roll-up may stand for many people
+
+Decision: a funding record names the organisation that received it and, separately, the
+programme it was assigned to if it has been. Unassigned money is money with no programme.
+A record may also stand for many contributions at once, carrying a contributor count
+rather than a name.
+
+Why: the previous model required every contribution to name a programme at the instant it
+was recorded. That is correct for a restricted grant, which arrives already earmarked, and
+wrong for the operating model this serves — unrestricted contributions that the
+organisation allocates afterwards, following its own selection process. There was nowhere
+to put money between arriving and being assigned, which also made "funds held vs deployed"
+answerable only within a programme, and that is the one place it cannot be answered.
+
+The obvious change was a nullable programme reference on its own, and it would have been
+worse than the problem: every existing query would silently include or exclude held money
+depending on how its filter happened to be written. Naming the receiving organisation
+makes held money a state the model asserts rather than a null each reader has to remember.
+
+The roll-up is the concession to volume. One row per contribution is right for fifty
+grants a year and impossible for a daily standing order at scale; the consent machinery
+from ADR-011 is per donor and a roll-up destroys it. So: aggregate by default, and an
+individual row wherever somebody has asked to be named against what they funded. A
+roll-up therefore has no name to publish or withhold, and reports its size instead —
+privilege does not unlock a name there, because the row never held one.
+
+Consequence: assignment is one directional. Money that has been allocated cannot be moved
+to another programme, because a published attribution has already told somebody what their
+contribution paid for, and changing it afterwards is the edit this system exists to make
+impossible. A mistake is corrected by recording the correction, not by rewriting the
+assignment.
+
+The per-programme figures are unchanged for restricted grants, and the migration backfills
+every existing row from the programme it already names, so nothing that was true before is
+different after.
+
+What this does not do: it does not let ImpactGraph take a payment. ADR-014 is unchanged —
+contributions arrive through the organisation's own accounts and appear here as observed
+inbound activity, whether or not they have been assigned yet.
+
+Date: 2026-09-24

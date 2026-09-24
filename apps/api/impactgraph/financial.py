@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .domain import Money
@@ -272,50 +272,107 @@ class FinancialIngestionService:
         return ImportResult(imported, skipped, rejected)
 
 
+#: How many rows of each ledger a summary carries. The totals above them are computed
+#: over everything; this bounds the response, not the arithmetic. A programme funded by a
+#: standing order has more contributions than anybody reads in one page, and this route is
+#: public and unauthenticated.
+LEDGER_PAGE = 100
+
+
+def _totals(session: Session, model, program_ref: str, **extra) -> Money:
+    """Sum a ledger in the database, grouped by currency.
+
+    Grouped rather than blended: adding across currencies is refused here exactly as
+    `Money` refuses it, and at most a handful of rows come back instead of the table.
+    """
+    query = (
+        select(model.currency, func.sum(model.amount_minor))
+        .where(model.program_ref == program_ref)
+        .group_by(model.currency)
+    )
+    for column, value in extra.items():
+        query = query.where(getattr(model, column) != value)
+    rows = [(currency, int(total or 0)) for currency, total in session.execute(query)]
+    if not rows:
+        return Money.zero("USD")
+    total = Money(rows[0][1], rows[0][0])
+    for currency, amount in rows[1:]:
+        total = total + Money(amount, currency)
+    return total
+
+
 def financial_summary(session: Session, program_ref: str) -> dict[str, Any]:
-    """Where the money came from, what it was committed to, and where it went."""
+    """Where the money came from, what it was committed to, and where it went.
+
+    Held money is not here. A contribution this programme has not been assigned has no
+    place in its figures, and `program_ref == program_ref` excludes a NULL without anybody
+    having to remember to.
+    """
+    received = _totals(session, FundingRecord, program_ref)
+    committed = _totals(session, AllocationRecord, program_ref)
+    spent = _totals(session, FinancialTransactionRecord, program_ref)
+    currency = received.currency if received.amount_minor else committed.currency
+
+    counts = {
+        status: int(total)
+        for status, total in session.execute(
+            select(FinancialTransactionRecord.match_status, func.count())
+            .where(FinancialTransactionRecord.program_ref == program_ref)
+            .group_by(FinancialTransactionRecord.match_status)
+        )
+    }
+
+    funding_total = session.scalar(
+        select(func.count()).select_from(FundingRecord).where(
+            FundingRecord.program_ref == program_ref
+        )
+    )
     funding = list(
-        session.scalars(select(FundingRecord).where(FundingRecord.program_ref == program_ref))
+        session.scalars(
+            select(FundingRecord)
+            .where(FundingRecord.program_ref == program_ref)
+            .order_by(FundingRecord.received_on, FundingRecord.external_id)
+            .limit(LEDGER_PAGE)
+        )
     )
     allocations = list(
-        session.scalars(select(AllocationRecord).where(AllocationRecord.program_ref == program_ref))
+        session.scalars(
+            select(AllocationRecord).where(AllocationRecord.program_ref == program_ref)
+        )
+    )
+    transaction_total = session.scalar(
+        select(func.count()).select_from(FinancialTransactionRecord).where(
+            FinancialTransactionRecord.program_ref == program_ref
+        )
     )
     transactions = list(
         session.scalars(
             select(FinancialTransactionRecord)
             .where(FinancialTransactionRecord.program_ref == program_ref)
             .order_by(FinancialTransactionRecord.occurred_on)
+            .limit(LEDGER_PAGE)
         )
     )
-    rows = funding or allocations or transactions
-    currency = rows[0].currency if rows else "USD"
-
-    received = Money.zero(currency)
-    for row in funding:
-        received = received + Money(row.amount_minor, row.currency)
-    committed = Money.zero(currency)
-    for row in allocations:
-        committed = committed + Money(row.amount_minor, row.currency)
-    spent = Money.zero(currency)
-    for row in transactions:
-        spent = spent + Money(row.amount_minor, row.currency)
-
-    counts: dict[str, int] = {}
-    for row in transactions:
-        counts[row.match_status] = counts.get(row.match_status, 0) + 1
 
     return {
         "programId": program_ref,
         "received": received.as_dict(),
         "committed": committed.as_dict(),
         "spent": spent.as_dict(),
-        "uncommitted": (received - committed).as_dict(),
-        "unspent": (committed - spent).as_dict(),
+        "uncommitted": (received - committed).as_dict()
+        if received.currency == committed.currency
+        else Money.zero(currency).as_dict(),
+        "unspent": (committed - spent).as_dict()
+        if committed.currency == spent.currency
+        else Money.zero(currency).as_dict(),
         "matchCounts": counts,
+        "fundingCount": int(funding_total or 0),
+        "transactionCount": int(transaction_total or 0),
         "funding": [
             {
                 "id": row.external_id,
                 "funder": public_funder_name(row),
+                "contributors": row.contributor_count,
                 "amount": Money(row.amount_minor, row.currency).as_dict(),
                 "receivedOn": row.received_on,
                 "sourceRef": row.source_ref,

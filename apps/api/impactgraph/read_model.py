@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
@@ -141,7 +142,9 @@ def seed_read_model(session: Session, storage: EvidenceStorage | None = None) ->
     session.add(
         FundingRecord(
             external_id=FUNDING_ID,
+            organization_ref=OPERATOR_ORG_REF,
             program_ref=PROGRAM_ID,
+            assigned_at=datetime.now(UTC),
             funder_name="Jane Smith",
             amount_minor=1000000,
             currency="USD",
@@ -152,7 +155,9 @@ def seed_read_model(session: Session, storage: EvidenceStorage | None = None) ->
     session.add(
         FundingRecord(
             external_id="funding-institutional-90000",
+            organization_ref=OPERATOR_ORG_REF,
             program_ref=PROGRAM_ID,
+            assigned_at=datetime.now(UTC),
             funder_name="Institutional funding pool",
             funder_is_organisation=True,
             amount_minor=9000000,
@@ -450,6 +455,10 @@ class TransparencyReadRepository:
             "id": record.slug,
             "name": record.name,
             "operator": record.operator_name,
+            # Which organisation operates a programme is already public -- separation of
+            # duties is decided against it -- and the money trail needs it to ask what
+            # that organisation is still holding.
+            "operatorOrgRef": record.operator_org_ref,
             "region": record.region,
             "status": record.status,
             "funding": ledger["received"],

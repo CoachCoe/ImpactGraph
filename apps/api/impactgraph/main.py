@@ -17,6 +17,7 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Query,
     Request,
     Response,
     UploadFile,
@@ -91,6 +92,8 @@ from .persistence import (
     ProgramRecord,
     RiskFindingRecord,
     UserRecord,
+    as_utc_iso,
+    public_funder_name,
 )
 from .public_api import client_address, enforce_rate_limit
 from .read_model import (
@@ -117,6 +120,10 @@ from .services import (
     TenantApplicationService,
     VerificationApplicationService,
 )
+from .treasury import AssignmentRefused  # noqa: F401  (mapped by _tenant_write)
+from .treasury import assign as treasury_assign
+from .treasury import held as treasury_held
+from .treasury import position_response as treasury_position
 from .verification import restate_claims_for
 from .worker import BlockchainOutboxWorker
 
@@ -758,6 +765,109 @@ def program_financials(program_id: str):
     _require_database("Financial records")
     with session_factory() as session:
         return financial_summary(session, program_id)
+
+
+class ContributionAssignment(BaseModel):
+    """Which programme a held contribution is to fund."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    programId: str = Field(min_length=1, max_length=160)
+
+
+@app.get("/financial/organizations/{organization_ref}/position")
+def organization_position(organization_ref: str, request: Request, response: Response):
+    """What this organisation has been given, and how much is still unassigned.
+
+    Public, and one of the four things the operating organisation commits to publishing.
+    An answer only its own staff can see is not the commitment.
+    """
+    _require_database("Financial records")
+    enforce_rate_limit(request, response)
+    with session_factory() as session:
+        return treasury_position(session, organization_ref)
+
+
+@app.get("/financial/organizations/{organization_ref}/held")
+def organization_held(
+    organization_ref: str,
+    request: Request,
+    response: Response,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    user: CurrentUser = None,
+):
+    """Contributions received and not yet assigned to a programme.
+
+    Operator-facing rather than public: the totals are the commitment, and a paginated
+    walk of individual contributions is a different thing from publishing a position.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    if actor.role != Role.ADMIN and actor.id != organization_ref:
+        raise HTTPException(403, "Held money is only listed for your own organisation")
+    _require_database("Financial records")
+    enforce_rate_limit(request, response)
+    with session_factory() as session:
+        rows = treasury_held(session, organization_ref, limit=limit, offset=offset)
+        return {
+            "organizationRef": organization_ref,
+            "contributions": [
+                {
+                    "id": row.external_id,
+                    "funder": public_funder_name(row),
+                    "contributors": row.contributor_count,
+                    "amount": {"amountMinor": row.amount_minor, "currency": row.currency},
+                    "receivedOn": row.received_on,
+                }
+                for row in rows
+            ],
+        }
+
+
+@app.post("/financial/funding/{funding_id}/assignment", status_code=201)
+def assign_contribution(
+    request: Request,
+    funding_id: str,
+    body: ContributionAssignment,
+    user: CurrentUser = None,
+):
+    """Decide what a held contribution funds. One direction only.
+
+    Reassigning allocated money would change what a published attribution says a
+    contribution paid for, after somebody has read it.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    _require_database("Assigning a contribution")
+    return _tenant_write(
+        lambda session: _assignment_response(
+            treasury_assign(
+                session,
+                funding_ref=funding_id,
+                program_ref=body.programId,
+                organization_ref=actor.id,
+            ),
+            actor=actor,
+            session=session,
+            correlation_id=request.state.correlation_id,
+        )
+    )
+
+
+def _assignment_response(funding, *, actor, session, correlation_id: str) -> dict[str, Any]:
+    AuditService().record(
+        session,
+        actor=actor,
+        action="FUNDING_ASSIGNED",
+        entity_type="FUNDING",
+        entity_id=funding.external_id,
+        correlation_id=correlation_id,
+        metadata={"programRef": funding.program_ref},
+    )
+    return {
+        "fundingId": funding.external_id,
+        "programId": funding.program_ref,
+        "assignedAt": as_utc_iso(funding.assigned_at),
+    }
 
 
 @app.get("/financial/funding/{funding_id}/attribution")

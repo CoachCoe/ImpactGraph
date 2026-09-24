@@ -302,6 +302,25 @@ See [architecture](docs/architecture.md), [trust model](docs/trust-model.md),
 [hashing](docs/hashing.md), the [demo script](docs/demo-script.md), the
 [security notes](docs/security.md), and the [decision record](docs/decisions.md).
 
+## Money before it has a programme
+
+Contributions arrive against an organisation and are assigned to a programme afterwards,
+or not yet. `GET /financial/organizations/{ref}/position` publishes what has been given
+and how much of it is still unassigned, per currency — one of the four things the
+operating organisation commits to publishing, and not answerable per programme, because
+unrestricted money has no programme.
+
+A funding row may stand for many small contributions at once, carrying a contributor count
+instead of a name, so a daily total does not need a row per payment. An individual row is
+kept wherever somebody has asked to be named against what they funded. See ADR-018.
+
+Assignment is one directional: money that has been allocated cannot be moved, because a
+published attribution has already told somebody what their contribution paid for.
+
+```bash
+curl -s localhost:8000/financial/organizations/org-global-water/position
+```
+
 ## Reviewing what looks wrong
 
 Verification examines one document at a time, so the patterns that indicate fraud —

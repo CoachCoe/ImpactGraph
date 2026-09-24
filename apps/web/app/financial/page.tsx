@@ -5,7 +5,7 @@ import { Status } from "@/components/Status";
 import { readFromApi } from "@/lib/api";
 import { formatMoney } from "@/lib/money";
 import { resolveProgram } from "@/lib/programs";
-import type { FinancialSummary } from "@/lib/types";
+import type { FinancialSummary, OrganizationPosition } from "@/lib/types";
 
 export const metadata: Metadata = {
   title: "The money trail — ImpactGraph",
@@ -36,6 +36,13 @@ export default async function FinancialPage({
   if (chosen.state !== "resolved") return <ChooseProgramFirst state={chosen.state} />;
   const { id: programId, featuredClaimId } = chosen.program;
   const summary = await readFromApi<FinancialSummary>(`/financial/programs/${programId}`);
+  // Scoped to the organisation rather than the programme: unrestricted money has no
+  // programme yet, which is the whole reason it is worth publishing.
+  const position = chosen.program.operatorOrgRef
+    ? await readFromApi<OrganizationPosition>(
+        `/financial/organizations/${chosen.program.operatorOrgRef}/position`,
+      )
+    : null;
   if (!summary) {
     return (
       <div className="inspector">
@@ -83,7 +90,7 @@ export default async function FinancialPage({
           <span>Evidenced spend</span>
           <strong>
             {(summary.matchCounts.MATCHED ?? 0) + (summary.matchCounts.PARTIAL_MATCH ?? 0)}/
-            {summary.transactions.length}
+            {summary.transactionCount}
           </strong>
           <small>Payments with matching evidence</small>
         </article>
@@ -136,12 +143,45 @@ export default async function FinancialPage({
               <Link className="scoreRow" href={`/funding/${item.id}`} key={item.id}>
                 <span>
                   {item.funder}
-                  <small>{item.receivedOn} · follow this contribution →</small>
+                  <small>
+                    {item.receivedOn}
+                    {item.contributors > 1 ? " · a day's contributions" : ""} · follow this
+                    contribution →
+                  </small>
                 </span>
                 <b>{formatMoney(item.amount, { maximumFractionDigits: 0 })}</b>
               </Link>
             ))}
+            {summary.fundingCount > summary.funding.length ? (
+              <p className="note">
+                Showing {summary.funding.length} of {summary.fundingCount} contributions.
+                The totals above cover every one of them.
+              </p>
+            ) : null}
           </section>
+
+          {position && position.byCurrency.length > 0 ? (
+            <section className="panel">
+              <span className="eyebrow">HELD BY THE ORGANISATION</span>
+              <p className="subtle">
+                Contributions received and not yet assigned to a programme. Published
+                because money sitting still is as much a fact as money spent.
+              </p>
+              {position.byCurrency.map((item) => (
+                <div className="scoreRow" key={item.currency}>
+                  <span>
+                    Not yet assigned
+                    <small>
+                      {formatMoney(item.received, { maximumFractionDigits: 0 })} received from{" "}
+                      {item.contributors.toLocaleString()}{" "}
+                      {item.contributors === 1 ? "contribution" : "contributions"}
+                    </small>
+                  </span>
+                  <b>{formatMoney(item.held, { maximumFractionDigits: 0 })}</b>
+                </div>
+              ))}
+            </section>
+          ) : null}
 
           <section className="panel">
             <span className="eyebrow">ALLOCATIONS</span>
