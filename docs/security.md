@@ -43,6 +43,41 @@ queried registered commitment rather than trusting a mutable evidence-row hash o
 
 The API requires idempotency keys for important operations. Upload adapters enforce the configured MIME allowlist and size cap before storage; the cap is `MAX_UPLOAD_BYTES`, checked by reading one byte past the limit. The allowlist trusts the client-declared `Content-Type` and does no content sniffing.
 
+## Browser headers
+
+Every response carries a Content-Security-Policy, `X-Content-Type-Options: nosniff`,
+`Referrer-Policy: strict-origin-when-cross-origin`, a Permissions-Policy, HSTS, and
+`X-Frame-Options: DENY` with `frame-ancestors 'none'`. None of these were set before.
+
+Framing is refused rather than restricted because the operator and verifier workspaces
+carry irreversible single-click actions — attest to this bundle, confirm this finding —
+and a framed page is how one of those gets clicked by somebody who thought they were
+clicking something else.
+
+The script policy allows `'unsafe-inline'` and `'unsafe-eval'`. That is the honest
+ceiling for an app rendered this way: Next inlines a hydration bootstrap and its runtime
+evaluates chunks, so a nonce-only policy would require every page to be dynamic. It is
+written down rather than left to look stricter than it is.
+
+## What answers an anonymous caller
+
+Reading the record without an account is the product, so most `GET` routes are public by
+design. Two kinds of public route are limited to the same per-client allowance as the
+public API, because public and expensive and unbounded is a different thing from public:
+
+- `POST /evidence/{id}/verify-integrity`, which reads an object out of storage and hashes
+  it on every call
+- the four `/export/**.csv` routes, each serialising a whole programme or claim
+
+`/metrics` is not public. It answers a scraper on the deployment's own network, or one
+presenting `METRICS_TOKEN`. Prometheus output is not a record, but it is an operational
+map: backlog depth and per-route latency say which part of this is struggling and when a
+queue is worth flooding.
+
+Notification confirm and unsubscribe take their token in the request body, not the query
+string, for the same reason the funder consent token does — a URL is written to access
+logs, kept in browser history and handed onward in a `Referer`.
+
 ## Demo affordances that fabricate chain state
 
 The PostgreSQL seed also writes an OPERATOR attestation with a placeholder wallet and transaction hash, marked CONFIRMED. It is served by the claim API exactly as a real attestation would be and satisfies the `OPERATOR_ATTESTATION` requirement. Only the verifier attestation path is real end to end.

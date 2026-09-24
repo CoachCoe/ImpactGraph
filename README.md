@@ -263,8 +263,10 @@ it. `/health/live` is dependency-free and is what the container probes; `/health
 checks PostgreSQL, the RPC and the evidence store, answers 503 with a per-component
 verdict, and is what the compose dependency gates and the smoke tests use.
 
-`/metrics` exposes the API's counters, and the worker runs its own exporter on port 9100
-because it is a separate process. The two numbers worth watching are the outbox depth and
+`/metrics` serves the API's counters to a scraper on the deployment's own network, or to
+one presenting `METRICS_TOKEN` as a bearer token; setting that token replaces the network
+check rather than adding to it. The worker runs its own exporter on port 9100 because it
+is a separate process. The two numbers worth watching are the outbox depth and
 the age of its oldest unsubmitted row: a stalled outbox is the one failure this system
 would otherwise hide, since every read model keeps answering exactly as before.
 
@@ -299,6 +301,35 @@ See [architecture](docs/architecture.md), [trust model](docs/trust-model.md),
 [provenance](docs/provenance-model.md), [state machines](docs/state-machines.md),
 [hashing](docs/hashing.md), the [demo script](docs/demo-script.md), the
 [security notes](docs/security.md), and the [decision record](docs/decisions.md).
+
+## Reviewing what looks wrong
+
+Verification examines one document at a time, so the patterns that indicate fraud —
+one invoice billed to two funders, one photograph standing in for three deliveries — are
+invisible to it. `POST /risk/scan` runs three deterministic detectors across one
+organisation's own records and posts what it finds to a queue a person decides in.
+
+Nothing it finds changes a claim, notifies anyone outside the organisation, or becomes
+public. Closing a finding requires a reason, and those reasons are the only measure of
+how often the checks were right; `GET /risk/precision` reports it. See ADR-015 to ADR-017.
+
+Near-duplicate image comparison grows faster than a portfolio does, so the HTTP scan
+refuses above a ceiling and large tenants run it out of band:
+
+```bash
+cd apps/api && .venv/bin/python -m impactgraph.cli risk-scan --organization org-global-water
+```
+
+## Asking the people a claim describes
+
+A claim that nobody named in it has been asked about rests on the operating
+organisation's own account. `BENEFICIARY_CONFIRMATION` is a policy requirement that warns
+when nobody has been asked and fails when somebody disputes the delivery.
+
+The channel is **disabled** until the safeguarding review in
+[docs/beneficiary-safeguarding.md](docs/beneficiary-safeguarding.md) is signed off, and
+there is no SMS or USSD transport. Enrolment is deliberately separate in time from
+delivery, because an operator controlling both at once controls who gets asked.
 
 ## Limitations
 
@@ -350,10 +381,11 @@ What is not:
   `GET /blockchain/transactions/{hash}`. The middle two fabricate onchain confirmation and
   the first fabricates a transaction hash. All are listed in
   [security](docs/security.md) rather than left to be discovered.
-- **CI coverage is narrower than the trust boundary.** CI runs Foundry, backend unit/API,
-  frontend unit/type, and production build gates, but not PostgreSQL migrations, Anvil-backed
-  integration, or Playwright. Run `make test-local-e2e` and `make test-browser-e2e` locally
-  before changing anything on the chain path. Receipt observation is the exception: the
+- **CI coverage is narrower than the trust boundary.** CI runs Foundry, backend unit/API
+  against a PostgreSQL service — so the migrations are applied where they are deployed
+  rather than only against SQLite — frontend unit/type, and production build gates. It
+  does not run Anvil-backed integration or Playwright. Run `make test-local-e2e` and
+  `make test-browser-e2e` locally before changing anything on the chain path. Receipt observation is the exception: the
   check that an event came from the configured registry, and not from any contract that
   emits the same signature, is covered against stub RPC objects and needs no chain.
 

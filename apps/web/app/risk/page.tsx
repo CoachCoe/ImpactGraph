@@ -28,6 +28,20 @@ const KIND_LABELS: Record<string, string> = {
   VENDOR_CONCENTRATION: "Vendor concentration",
 };
 
+/** What the check actually looked at, for a reviewer who did not write it. */
+const KIND_METHOD: Record<string, string> = {
+  DUPLICATE_INVOICE:
+    "Matched on supplier and invoice number, ignoring case and punctuation. It does not "
+    + "match similar company names, so “Acme Ltd” and “Acme Limited” are treated as two.",
+  REUSED_IMAGE:
+    "Compares what photographs look like rather than their bytes, so a re-saved or "
+    + "resized copy is still found. A mirrored, rotated or heavily cropped one is not.",
+  VENDOR_CONCENTRATION:
+    "The share of one programme’s spend, in one currency, going to a single payee. "
+    + "Reversed payments are excluded. A specialised supplier taking most of a budget is "
+    + "often ordinary.",
+};
+
 function subjectLines(subjects: Record<string, unknown>): [string, string][] {
   return Object.entries(subjects).map(([key, value]) => [
     key.replace(/([A-Z])/g, " $1").toLowerCase(),
@@ -182,6 +196,12 @@ function RiskQueue() {
             <div>
               <span className="eyebrow">{KIND_LABELS[finding.kind] ?? finding.kind}</span>
               <h2>{finding.explanation}</h2>
+              {KIND_METHOD[finding.kind] ? (
+                <details className="riskMethod">
+                  <summary>How this check works</summary>
+                  <p>{KIND_METHOD[finding.kind]}</p>
+                </details>
+              ) : null}
             </div>
             <Status kind={finding.state === "INVESTIGATING" ? "pending" : "warning"}>
               {finding.state === "INVESTIGATING" ? "Being looked at" : "Not yet reviewed"}

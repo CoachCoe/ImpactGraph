@@ -525,3 +525,6 @@ footer{margin-top:24px;padding:36px var(--gutter) 56px;background:var(--ink-deep
    went, and the motion budget does not stretch to an affordance that exists to be fast. */
 .skipLink{position:absolute;left:16px;top:-56px;z-index:20;padding:11px 18px;border-radius:var(--radius-pill);background:var(--brand);color:var(--paper);font-family:var(--font-mono);font-size:11px;letter-spacing:var(--track-label-sm);text-transform:uppercase;text-decoration:none}
 .skipLink:focus{top:12px}
+.riskMethod{margin-top:10px;font-size:13px;color:var(--muted)}
+.riskMethod summary{cursor:pointer;font-family:var(--font-mono);font-size:10px;letter-spacing:var(--track-label-sm);text-transform:uppercase}
+.riskMethod p{margin:8px 0 0;max-width:62ch;line-height:1.55}

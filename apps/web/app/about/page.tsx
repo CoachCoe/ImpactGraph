@@ -47,7 +47,14 @@ async function example() {
   return { claimId, evidenceId: claim?.evidenceIds[0] ?? null };
 }
 
-/** The policy in verification.py. A claim is verified only when every one passes. */
+/**
+ * The policy in verification.py.
+ *
+ * A claim is blocked by a failure, not by anything short of one. The last of these warns
+ * when nobody has been asked and fails only on a dispute, because a delivery nobody has
+ * been able to ask about is a weaker claim rather than a false one -- and a requirement
+ * that blocked on it would stop every claim until a channel exists that does not yet.
+ */
 const POLICY = [
   ["Provenance is complete", "There is an unbroken path from funding to outcome."],
   ["Evidence is committed onchain", "Its commitment was registered and confirmed."],
@@ -57,6 +64,7 @@ const POLICY = [
   ["An independent verifier has confirmed", "A second organisation signed it onchain."],
   ["The attestation covers current evidence", "The signature is bound to this bundle, not an earlier one."],
   ["The verifier is not the operator", "Resolved from the program's operator, not from a request header."],
+  ["The people it describes were asked", "Warns when nobody has been; fails when somebody disputes it."],
 ];
 
 export default async function About() {
