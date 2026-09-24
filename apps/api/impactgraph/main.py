@@ -5,6 +5,7 @@ import os
 from datetime import UTC, datetime
 from functools import lru_cache
 from hmac import compare_digest
+from ipaddress import ip_address
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
@@ -920,11 +921,20 @@ def _outbox_backlog() -> tuple[int, float]:
 REGISTRY.register(OutboxCollector(_outbox_backlog))
 
 
-#: Loopback and the RFC1918 ranges a scraper shares a network with. A metrics endpoint
-#: is reconnaissance: backlog depth, error rates and per-route latency tell an attacker
-#: which part of this is struggling and when a queue is worth flooding.
-_PRIVATE_PREFIXES = ("127.", "::1", "10.", "192.168.", "172.16.", "172.17.", "172.18.",
-                     "172.19.", "172.2", "172.30.", "172.31.", "localhost")
+def _reachable_from_the_internet(address: str) -> bool:
+    """Whether this caller could have come from outside the deployment.
+
+    Parsed rather than prefix-matched. The prefix list this replaced accepted 172.2.x.x
+    as private -- it is not, the RFC1918 block starts at 172.16 -- so a public address
+    one typo away from the intended range could read the metrics.
+
+    An address that does not parse is treated as external. A scraper has an IP; something
+    arriving without one is not a case to hold the door open for.
+    """
+    try:
+        return ip_address(address).is_global
+    except ValueError:
+        return True
 
 
 @app.get("/metrics")
@@ -941,7 +951,7 @@ def metrics(request: Request):
         presented = header[7:] if header.lower().startswith("bearer ") else ""
         if not compare_digest(presented, token):
             raise HTTPException(401, "Metrics require the configured bearer token")
-    elif not client_address(request).startswith(_PRIVATE_PREFIXES):
+    elif _reachable_from_the_internet(client_address(request)):
         raise HTTPException(
             403,
             "Metrics are served to a scraper on this network. Set METRICS_TOKEN to "

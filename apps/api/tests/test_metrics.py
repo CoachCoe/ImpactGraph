@@ -115,9 +115,23 @@ def test_metrics_are_not_served_to_the_open_internet(client):
     assert "impactgraph_outbox_pending" not in refused.text
 
 
+def test_a_public_address_near_the_private_range_is_still_public():
+    """172.2.x.x is not RFC1918 -- the block starts at 172.16 -- and the prefix list this
+    replaced accepted it. One typo away from the intended range and the metrics were
+    readable from the internet."""
+    assert TestClient(app, client=("172.2.3.4", 5555)).get("/metrics").status_code == 403
+    assert TestClient(app, client=("172.20.1.1", 5555)).get("/metrics").status_code == 200
+
+
+def test_a_caller_without_an_address_is_treated_as_external():
+    """A scraper has an IP. Something arriving without one is not a case to hold the door
+    open for -- and the default TestClient host is exactly that shape."""
+    assert TestClient(app).get("/metrics").status_code == 403
+
+
 def test_a_configured_token_lets_a_scraper_in_from_anywhere(monkeypatch):
     monkeypatch.setenv("METRICS_TOKEN", "scrape-me-6f2b")
-    remote = TestClient(app, client=("203.0.113.9", 4444))
+    remote = TestClient(app, client=("8.8.8.8", 4444))
 
     assert remote.get("/metrics").status_code == 401
     assert remote.get("/metrics", headers={"Authorization": "Bearer wrong"}).status_code == 401
