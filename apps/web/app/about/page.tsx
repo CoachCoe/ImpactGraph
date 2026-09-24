@@ -186,7 +186,10 @@ export default async function About() {
             <ul>
               <li>The NGO, the programme, the payments and every document</li>
               <li>The banking provider — the system observes money, it never moves it</li>
-              <li>The document extractor, which returns a fixed result</li>
+              <li>
+                The offline document extractor, which returns a fixture result; the demo
+                can instead use a hosted model, but its output still requires human review
+              </li>
               <li>Outcome measurement, which is asserted rather than surveyed</li>
             </ul>
           </div>

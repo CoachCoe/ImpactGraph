@@ -95,7 +95,7 @@ from .persistence import (
     as_utc_iso,
     public_funder_name,
 )
-from .public_api import client_address, enforce_rate_limit
+from .public_api import RateLimiter, client_address, enforce_rate_limit
 from .read_model import (
     CLAIM_ID as SEEDED_CLAIM_ID,
 )
@@ -153,6 +153,7 @@ configure_logging()
 log = logger("impactgraph.api")
 
 app = FastAPI(title="ImpactGraph Transparency API", version="0.1.0")
+login_limiter = RateLimiter(requests=5, window=300)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -541,7 +542,20 @@ def _session_payload(user: AuthenticatedUser) -> dict[str, Any]:
 
 
 @app.post("/auth/login")
-def login(body: LoginRequest, response: Response):
+def login(body: LoginRequest, request: Request, response: Response):
+    client = client_address(request)
+    allowed, remaining = login_limiter.check(client)
+    response.headers["X-RateLimit-Limit"] = str(login_limiter.requests)
+    response.headers["X-RateLimit-Remaining"] = str(remaining)
+    if not allowed:
+        raise HTTPException(
+            429,
+            detail={
+                "code": "LOGIN_RATE_LIMITED",
+                "message": "Too many sign-in attempts. Try again in five minutes.",
+            },
+            headers={"Retry-After": str(int(login_limiter.window))},
+        )
     _require_database("Authentication")
     with session_factory.begin() as session:
         try:
@@ -555,6 +569,7 @@ def login(body: LoginRequest, response: Response):
             raise HTTPException(
                 401, detail={"code": "INVALID_CREDENTIALS", "message": str(exc)}
             ) from exc
+        login_limiter.forget(client)
         log.info("auth.login_succeeded", user_id=str(user.user_id), role=user.role)
         payload = _session_payload(user)
     response.set_cookie(

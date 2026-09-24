@@ -26,8 +26,8 @@ Every change must pass all three suites. CI runs exactly these:
 
 ```bash
 cd contracts && forge fmt --check && forge test
-cd apps/api  && ruff check impactgraph tests && pytest -q
-cd apps/web  && npm test -- --run && npm run typecheck && npm run build
+cd apps/api  && ruff check impactgraph tests scripts && pytest -q
+cd apps/web  && npm run lint && npm test -- --run && npm run typecheck && npm run build
 ```
 
 `make test` runs the three test suites but not the formatter, the linter or the

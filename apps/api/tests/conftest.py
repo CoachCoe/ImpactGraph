@@ -43,6 +43,7 @@ import pytest
 from impactgraph.auth import DEMO_PASSWORD, seed_demo_accounts
 from impactgraph.database import create_session_factory
 from impactgraph.evidence import FileEvidenceStorage
+from impactgraph.main import login_limiter
 from impactgraph.persistence import Base
 from impactgraph.public_api import limiter
 from impactgraph.read_model import reset_read_model, seed_read_model
@@ -76,8 +77,10 @@ def _fresh_rate_limit():
     order, which is the least useful kind of flake.
     """
     limiter.forget()
+    login_limiter.forget()
     yield
     limiter.forget()
+    login_limiter.forget()
 
 
 @pytest.fixture

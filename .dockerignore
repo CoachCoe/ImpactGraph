@@ -1,0 +1,9 @@
+.git
+.claude
+**/.DS_Store
+**/.next
+**/.pytest_cache
+**/.venv
+**/__pycache__
+**/node_modules
+**/test-results

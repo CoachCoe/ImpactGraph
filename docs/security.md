@@ -10,7 +10,9 @@ web app proxies the API under its own origin so the cookie is first-party rather
 requiring SameSite=None.
 
 Login answers identically for an unknown account and a wrong password, and hashes in both
-cases, so it cannot be used to enumerate accounts.
+cases, so it cannot be used to enumerate accounts. Sign-in is limited to five attempts per
+client in five minutes. This in-process limit slows ordinary guessing; production ingress
+must enforce a distributed limit as well because each API worker has its own counter.
 
 Reads are deliberately public: programs, claims, provenance, verification status, public
 evidence and integrity verification all work without an account, because public
@@ -26,7 +28,7 @@ against the program's operator recorded in the database.
 The seeded demo accounts share a published password and exist only for a local database, in
 the same spirit as Anvil's published keys. Never create them against a real deployment.
 
-Not included: SSO, MFA, password reset, account lockout, rate limiting, CSRF tokens
+Not included: SSO, MFA, password reset, account lockout, distributed rate limiting, CSRF tokens
 (mitigated by SameSite), and any password policy beyond what the operator chooses.
 
 ## Evidence and transport
@@ -94,6 +96,6 @@ keys and must never hold value. Sepolia deployment is explicit; browser code nev
 a backend signing key.
 
 This POC does not include identity proofing, malware scanning, hardened object storage IAM, encryption key management, rate
-limiting, CSRF/session protection, KYC/AML, HSM signing, high-availability workers, or a
+distributed rate limiting, CSRF/session protection, KYC/AML, HSM signing, high-availability workers, or a
 security audit. Add these before processing
 real users or sensitive evidence.

@@ -2,7 +2,7 @@ import Link from "next/link";
 import { Status } from "@/components/Status";
 import { readFromApi } from "@/lib/api";
 import { resolveProgram } from "@/lib/programs";
-import type { Claim, Program, Verification } from "@/lib/types";
+import type { Claim, Program } from "@/lib/types";
 import { attestationCount, claimStanding, programSentence } from "@/lib/sentences";
 
 const money = (minor: number, currency: string) =>
@@ -24,9 +24,6 @@ export default async function DonorDashboard({
   const program = chosen.program;
 
   const claim = await readFromApi<Claim>(`/claims/${program.featuredClaimId}`);
-  const verification = claim
-    ? await readFromApi<Verification>(`/claims/${claim.id}/verification`)
-    : null;
   const standing = claimStanding(claim?.status ?? "");
   const verified = standing.verified;
   // The read model exposes one featured claim per program, so this counts what is

@@ -74,9 +74,12 @@ class RateLimiter:
         for client in stale:
             del self._seen[client]
 
-    def forget(self) -> None:
+    def forget(self, client: str | None = None) -> None:
         with self._lock:
-            self._seen.clear()
+            if client is None:
+                self._seen.clear()
+            else:
+                self._seen.pop(client, None)
 
 
 limiter = RateLimiter()

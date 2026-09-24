@@ -53,6 +53,36 @@ def test_login_rejects_a_wrong_password_and_an_unknown_account():
     assert wrong.json()["detail"]["message"] == unknown.json()["detail"]["message"]
 
 
+def test_login_rate_limits_repeated_guesses():
+    session = client()
+    for _ in range(5):
+        response = session.post(
+            "/auth/login", json={"email": OPERATOR, "password": "wrong"}
+        )
+        assert response.status_code == 401
+    refused = session.post(
+        "/auth/login", json={"email": OPERATOR, "password": "still-wrong"}
+    )
+    assert refused.status_code == 429
+    assert refused.json()["detail"]["code"] == "LOGIN_RATE_LIMITED"
+    assert refused.headers["retry-after"] == "300"
+
+
+def test_successful_login_clears_the_client_failure_budget():
+    session = client()
+    for _ in range(4):
+        assert session.post(
+            "/auth/login", json={"email": OPERATOR, "password": "wrong"}
+        ).status_code == 401
+    assert session.post(
+        "/auth/login", json={"email": OPERATOR, "password": "impactgraph-demo"}
+    ).status_code == 200
+    for _ in range(5):
+        assert session.post(
+            "/auth/login", json={"email": OPERATOR, "password": "wrong-again"}
+        ).status_code == 401
+
+
 def test_logout_revokes_the_session(sign_in):
     session = client()
     sign_in(session, OPERATOR)

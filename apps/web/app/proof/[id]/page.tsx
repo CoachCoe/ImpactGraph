@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import Image from "next/image";
 import { Status } from "@/components/Status";
 import { networkInfo } from "@/lib/network";
 import { readProof, requirementLabel } from "@/lib/proof";
@@ -220,11 +221,13 @@ function EmbedBadge({
       <pre className="embedSnippet">
         <code>{snippet}</code>
       </pre>
-      <img
+      <Image
         className="embedPreview"
         src={`/api/claims/${claimId}/badge.svg`}
         alt=""
+        width={220}
         height={44}
+        unoptimized
       />
     </section>
   );
