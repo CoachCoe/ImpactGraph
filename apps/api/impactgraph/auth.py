@@ -209,6 +209,49 @@ DEMO_USERS = (
 )
 
 
+def provision_hosted_demo_accounts(session: Session, password: str) -> list[str]:
+    """Create the three showcase personas with an operator-supplied secret.
+
+    Hosted demos need the same roles as the local walkthrough, but must never inherit its
+    published password. Existing users are deliberately left alone: rerunning deployment
+    tooling must not silently rotate credentials or take ownership of a real account.
+    """
+    if len(password) < 12:
+        raise ValueError("The hosted demo password must contain at least 12 characters")
+    if password == DEMO_PASSWORD:
+        raise ValueError("The published local demo password is forbidden on a hosted demo")
+
+    created: list[str] = []
+    organizations: dict[str, OrganizationRecord] = {}
+    for external_id, name, kind in DEMO_ORGANIZATIONS:
+        organization = session.scalar(
+            select(OrganizationRecord).where(OrganizationRecord.external_id == external_id)
+        )
+        if organization is None:
+            organization = OrganizationRecord(external_id=external_id, name=name, kind=kind)
+            session.add(organization)
+            session.flush()
+            created.append(external_id)
+        organizations[external_id] = organization
+
+    password_hash = hash_password(password)
+    for email, display_name, organization_ref, role, wallet in DEMO_USERS:
+        if session.scalar(select(UserRecord).where(UserRecord.email == email)) is not None:
+            continue
+        session.add(
+            UserRecord(
+                email=email,
+                display_name=display_name,
+                password_hash=password_hash,
+                organization_id=organizations[organization_ref].id,
+                role=role,
+                wallet_address=wallet,
+            )
+        )
+        created.append(email)
+    return created
+
+
 def demo_accounts_permitted(settings: Any) -> str | None:
     """Why demo accounts must not be created here, or None when they may be.
 

@@ -12,9 +12,19 @@ only in a deploy script that not every operator runs.
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import delete, select
 
-from impactgraph.auth import DEMO_PASSWORD, demo_accounts_permitted
+from impactgraph.auth import (
+    DEMO_PASSWORD,
+    DEMO_USERS,
+    demo_accounts_permitted,
+    hash_password,
+    provision_hosted_demo_accounts,
+    verify_password,
+)
 from impactgraph.config import PUBLIC_CHAIN_IDS, Settings
+from impactgraph.database import create_session_factory
+from impactgraph.persistence import OrganizationRecord, UserRecord
 
 
 def settings(**overrides) -> Settings:
@@ -57,3 +67,31 @@ def test_the_shared_password_is_still_a_published_constant():
     """If this ever becomes a secret, the guard above can be reconsidered. Until then the
     guard is the only thing standing between a published password and an ADMIN session."""
     assert DEMO_PASSWORD == "impactgraph-demo"
+
+
+@pytest.mark.parametrize("password", ["short", DEMO_PASSWORD])
+def test_hosted_provisioning_rejects_unsafe_passwords(password):
+    factory = create_session_factory()
+    with factory.begin() as session, pytest.raises(ValueError):
+        provision_hosted_demo_accounts(session, password)
+
+
+def test_hosted_provisioning_creates_private_idempotent_personas():
+    password = "private-hosted-demo-password"
+    factory = create_session_factory()
+    with factory.begin() as session:
+        session.execute(delete(UserRecord))
+        session.execute(delete(OrganizationRecord))
+        created = provision_hosted_demo_accounts(session, password)
+
+    assert {email for email, *_ in DEMO_USERS}.issubset(created)
+    with factory.begin() as session:
+        users = session.scalars(select(UserRecord)).all()
+        assert len(users) == len(DEMO_USERS)
+        assert all(verify_password(user.password_hash, password) for user in users)
+        assert provision_hosted_demo_accounts(session, "a-different-private-password") == []
+        assert all(verify_password(user.password_hash, password) for user in users)
+        # This module shares the suite database. Restore the local fixture credentials so
+        # the behavior under test cannot leak into later authentication tests.
+        for user in users:
+            user.password_hash = hash_password(DEMO_PASSWORD)
