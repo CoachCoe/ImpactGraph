@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect } from "react";
 
 export default function Error({
   error,
@@ -10,12 +9,6 @@ export default function Error({
   error: Error & { digest?: string };
   reset: () => void;
 }) {
-  useEffect(() => {
-    // The digest is the only handle on the server-side cause, and without it a report
-    // of this page is unactionable.
-    if (error.digest) document.title = `Error ${error.digest} — ImpactGraph`;
-  }, [error.digest]);
-
   return (
     <div className="workspace">
       <section className="panel">
@@ -31,7 +24,7 @@ export default function Error({
             Reference <span className="hash">{error.digest}</span>
           </p>
         ) : null}
-        <div className="riskActions">
+        <div className="actionRow">
           <button className="button" onClick={reset}>
             Try again
           </button>

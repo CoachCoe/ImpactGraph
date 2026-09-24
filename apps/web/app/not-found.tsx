@@ -17,7 +17,7 @@ export default function NotFound() {
           published. Nothing has been withdrawn — a claim that was published stays
           published, so a missing page is a bad link rather than a removed record.
         </p>
-        <div className="riskActions">
+        <div className="actionRow">
           <Link className="button" href="/">
             Back to the record
           </Link>

@@ -514,8 +514,10 @@ footer{margin-top:24px;padding:36px var(--gutter) 56px;background:var(--ink-deep
 .riskFacts dt{flex:0 0 140px;font-family:var(--font-mono);font-size:10px;letter-spacing:var(--track-label-sm);text-transform:uppercase;color:var(--muted);margin:0}
 .riskFacts dd{margin:0;font-size:13px;word-break:break-word}
 .riskNote{width:100%;margin-top:6px;padding:11px 12px;border:1px solid var(--ghost-line);border-radius:8px;background:var(--field);color:var(--ink);font-family:var(--font-sans);font-size:15px;line-height:1.5;min-height:76px;resize:vertical}
-.riskActions{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
-.riskActions button{flex:1 1 auto;min-width:150px}
+/* Used by the risk queue, the 404 and the error boundary, so it is named for its shape
+   rather than for the first page that needed it. Links and buttons both sit in it. */
+.actionRow{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
+.actionRow>*{flex:1 1 auto;min-width:150px;text-align:center}
 
 /* --- keyboard entry --- */
 /* Off-screen until focused rather than display:none, which would take it out of the tab

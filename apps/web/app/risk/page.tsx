@@ -230,7 +230,7 @@ function RiskQueue() {
             placeholder="Required to confirm or dismiss. This is what makes the checks measurable."
           />
 
-          <div className="riskActions">
+          <div className="actionRow">
             {finding.state === "OPEN" ? (
               <button
                 className="secondary"
