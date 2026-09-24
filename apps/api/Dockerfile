@@ -11,9 +11,13 @@ WORKDIR /app
 FROM base AS build
 COPY apps/api/pyproject.toml ./
 COPY apps/api/impactgraph ./impactgraph
+# torch arrives as a transitive dependency of tml-renderers, which the Inkling models
+# require. Installed from the CPU index first: the default wheel carries CUDA and several
+# gigabytes of it, for a container that will never see a GPU.
 RUN python -m venv /opt/venv \
  && /opt/venv/bin/pip install --upgrade pip \
- && /opt/venv/bin/pip install .
+ && /opt/venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch \
+ && /opt/venv/bin/pip install '.[tinker]'
 
 FROM base AS runtime
 COPY --from=build /opt/venv /opt/venv
@@ -26,10 +30,11 @@ COPY contracts/out/ImpactRegistry.sol/ImpactRegistry.json \
      /app/contracts/out/ImpactRegistry.sol/ImpactRegistry.json
 
 ENV CONTRACT_ARTIFACT_PATH=/app/contracts/out/ImpactRegistry.sol/ImpactRegistry.json \
-    EVIDENCE_STORAGE_PATH=/data/evidence
+    EVIDENCE_STORAGE_PATH=/data/evidence \
+    EVIDENCE_KEY_PATH=/data/evidence-keys
 
 RUN useradd --system --uid 10001 impactgraph \
- && mkdir -p /data/evidence \
+ && mkdir -p /data/evidence /data/evidence-keys \
  && chown -R impactgraph:impactgraph /data
 USER impactgraph
 

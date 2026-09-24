@@ -189,3 +189,259 @@ Tradeoff: a reader must trust the application for the count, having trusted the 
 the signatures. The trust model already says which is which.
 
 Date: 2026-09-22
+
+## ADR-011 — Commitments are to publishable bytes, and originals are erasable
+
+Decision: the content hash committed to the registry is taken over the bytes this system is
+willing to publish — after redaction, after any client-side compression — and never over a
+raw camera original. Where a raw original is retained at all, it is encrypted under a key
+held per object, so destroying that key renders it unrecoverable while leaving the
+commitment truthful about what was committed.
+
+Why: UK GDPR gives a data subject a right to erasure, and ADR-001 chose a registry whose
+records cannot be removed. The tension is only irreconcilable if the thing committed is the
+thing that must be erased. Commit the redacted bytes and it dissolves: the published object
+and its commitment are retained and remain checkable, and the erasable material — the
+unredacted face, the household name — was never what the chain attested to.
+
+The ordering follows from this and is not negotiable. `upload_evidence` hashes at
+`main.py:944`, immediately on receipt, which is the correct integrity behaviour and the
+wrong privacy behaviour if those bytes carry a face. Anything that changes bytes must
+therefore happen before the hash: redaction, and the client-side compression that
+offline field capture needs. Two features that look unrelated are sequenced by this.
+
+The client must not compute the hash. The server hashing what it actually received is what
+makes `verify_integrity` an independent check rather than a restatement of a client's
+claim, and an offline capture queue must not become a way to commit bytes the server never
+saw.
+
+Consequence: today nothing redacts, and the hash is over the raw upload — so this decision
+describes the boundary the upload path must be moved to, not where it currently sits. Until
+it is, operators must not be invited to upload photographs of people. After it is, an
+operator cannot prove the unredacted original once its key is destroyed. That is the
+intended effect and not a defect: what survives is what the system said it would keep.
+
+Alternatives considered: committing to the raw original and relying on access control,
+rejected because a hash of erased bytes is a permanent public record of something that no
+longer lawfully exists and cannot be shown to correspond to anything. Storing no original
+at all, rejected because redaction is a judgement and an operator who redacted the wrong
+region has no recourse. Keeping originals in an off-chain store deleted on request, which
+is where crypto-erasure lands anyway but without a defensible story about backups.
+
+Tradeoff: evidence becomes weaker than the camera made it, by design. A redacted
+photograph corroborates less than an unredacted one, and the product is choosing the
+corroboration it can lawfully keep over the corroboration it could briefly hold.
+
+Date: 2026-09-23
+
+## ADR-012 — Location metadata is kept, and is corroboration rather than proof
+
+Decision: EXIF GPS captured by the device is retained on evidence photographs and is not
+stripped by redaction. Faces and identifying content are what redaction removes; where a
+delivery happened is what makes the photograph worth anything as evidence.
+
+Why: ADR-011 requires commitments to cover publishable bytes, and #3 asks for personal
+data to be minimised before hashing, while field capture wants the coordinates kept as a
+corroborating signal. Those pull in opposite directions and the conflict has to be settled
+rather than decided by whichever feature is built first. A coordinate is about a place; a
+face is about a person. The first is the evidence, the second is the exposure.
+
+Consequence: compression must preserve the EXIF segment. Canvas-based compression discards
+it, so a naive "resize before upload" silently destroys the corroboration this decision
+keeps — the APP1 segment is carried across explicitly, and a test pins it.
+
+A coordinate is still only a claim about a device, not about the world. It says where a
+phone reported being, which a determined operator can falsify, so it corroborates and
+never proves. Nothing in verification policy may gate on it.
+
+Alternatives considered: stripping all EXIF, which is the safer default and throws away
+the reason to capture in the field at all; and keeping EXIF only for photographs with no
+person in them, rejected because that judgement cannot be made reliably and a rule nobody
+can apply consistently is worse than a rule stated plainly.
+
+Reversible: retention is a policy, not a commitment. Deciding later to strip coordinates
+affects photographs captured after that point and cannot un-commit the ones already
+registered, which is the usual asymmetry and is worth knowing before it is relied on.
+## ADR-013 — Open banking through TrueLayer, and the mock stays
+
+Decision: the real `FinancialDataProvider` is an open-banking adapter against TrueLayer.
+`MockFinancialDataProvider` is kept, not replaced, and remains what CI and the demo run on.
+
+Why TrueLayer: the first programmes are UK-registered organisations, and TrueLayer covers
+UK and EEA banks under FCA authorisation with a data API that returns settled and pending
+transactions separately — a distinction this system needs, because a pending payment is
+not yet a fact about the world and should not support a claim. Plaid is the stronger
+choice for US coverage and is the one to revisit if programmes move there; nothing outside
+the adapter would change, which is the point of ADR-007's seam.
+
+Why the mock stays: CI must run green with no bank credentials, and the demo must work for
+anyone who clones the repository. A mock that exists only until the real thing arrives
+becomes a mock nobody maintains; this one is the fixture the reconciliation states are
+tested against, including the UNMATCHED and CONFLICT cases a real feed produces rarely and
+a test needs every time.
+
+Consequence: two implementations of one Protocol, and the risk that only one is exercised.
+The adapter is therefore tested against recorded provider responses rather than a live
+connection, and this ADR records that **no live bank has been connected**. That is an
+honest gap, not a completed item.
+
+Date: 2026-09-23
+
+## ADR-014 — ImpactGraph observes money and will not move it
+
+Decision: payment initiation stays out of scope, including inbound donation processing.
+This system reads financial activity and never causes any.
+
+Why: ADR-007 made this choice for observation and the pressure now is to widen it, because
+a platform that takes donations directly is a better business. It is a worse witness. A
+system that both moves money and attests to where it went is its own witness, and the
+attestation is worth exactly as much as trusting the system that produced it — which is
+the thing this product exists not to ask for.
+
+The separation is what lets a reader check the claim against a bank record the platform
+did not create. Collapse it and there is one record, from one party, about its own
+behaviour.
+
+Consequence: donations arrive through the organisation's own accounts and appear here as
+observed inbound transactions like any other. ImpactGraph holds read-only credentials and
+no payment permissions, and an adapter requesting a payment scope is a defect rather than
+a feature.
+
+If this is ever reversed, it is reversed here and openly: a new ADR superseding this one,
+stating who then audits the system that both holds the money and reports on it. Widening
+it quietly inside a feature branch is how a trust model is lost.
+
+Date: 2026-09-23
+
+## ADR-015 — Detection raises questions for people; it never answers them
+
+Decision: a risk finding is an observation with an explanation attached, and nothing else.
+No finding changes a claim's status, notifies anyone outside the operating organisation,
+or is visible to the public. Closing one requires a reviewer to write down why.
+
+Why: a false accusation of fraud against an aid organisation is a serious harm, and one
+made automatically is a harm this system caused rather than surfaced. The detectors here
+find that two invoices carry the same number, or that two deliveries are evidenced by the
+same photograph. Those are facts about records. Whether either is fraud, a filing mistake,
+a deliberate split order or a vendor's duplicate billing is a judgement about people and
+circumstances that the records do not contain.
+
+The mandatory disposition note is the other half. Precision is the only quality measure
+available — nothing here can know about the fraud it never surfaced, so recall is not
+measurable and a figure implying otherwise would be invented — and precision is whatever
+the reviewers say it is. Without the notes there is no measure at all, and an unmeasured
+detector accumulates false positives until the queue is ignored.
+
+Consequence: the queue is operator-facing and tenant-scoped. Detection deliberately does
+not run across organisations, although that is where the value would be: the same vendor
+defrauding three charities is invisible inside any one of them. Making it visible is a
+data-sharing question with contractual and competition dimensions, and the engineering for
+it should not exist before that groundwork does.
+
+## ADR-016 — Deterministic detectors first, statistics only once there is a baseline
+
+Decision: ship exact and near-duplicate matching, perceptual image hashing and vendor
+concentration. Do not ship round-number clustering, threshold-proximity or Benford-style
+checks yet.
+
+Why: those checks need a baseline to be meaningful, and this platform does not have the
+volume to estimate one. Run against thin data they mostly report ordinary variation. A
+queue that is mostly noise teaches reviewers to clear it without reading, which costs more
+than having no queue: it spends their attention and then also hides the real findings
+among the noise.
+
+The deterministic checks have the opposite property. "These two invoices carry the same
+number from the same vendor" is either true or it is not, a reviewer can check it in a
+minute, and the rate at which it is wrong is small and knowable.
+
+Consequence: the statistical layer waits on the precision figures the disposition notes
+produce. When it arrives, it arrives measured against them rather than on the assumption
+that more detectors are better.
+
+The vendor and invoice matching is exact after normalising case and punctuation, and is
+therefore defeated by "Acme Ltd" against "Acme Limited". That is accepted: a reviewer can
+act on "the same invoice number from the same vendor" and cannot act on "these two names
+scored 0.8 similar", and a fuzzy matcher's false positives land in the queue the whole
+design depends on keeping clean.
+
+For the same reason there is no detector for one vendor issuing two invoices of equal
+value on one day. A supplier delivering identical goods to two projects does exactly that,
+and in this domain it is ordinary rather than suspicious.
+
+## ADR-017 — The perceptual hash is for carelessness, not for an adversary
+
+Decision: near-duplicate image detection uses a 64-bit difference hash over a 9x8
+downsample, matched at a Hamming distance of six. It is not hardened against deliberate
+evasion, and this ADR records what it does not catch rather than leaving that to be
+discovered.
+
+Measured against photograph-like content, a re-encode at another JPEG quality moves the
+hash by about one bit, a halving of the resolution by two, and a different photograph by
+roughly thirty-five. The threshold of six sits in a wide gap, so the check is decisive in
+both directions for the case it covers.
+
+It does not survive a horizontal flip (about thirty bits), a rotation of a few degrees
+(about fourteen), or a crop of a tenth of the frame (about twenty-five). A difference hash
+is not invariant under any of those, and nothing about the threshold can fix it.
+
+Why accept that: the case this is for is a photograph re-filed against a second delivery,
+usually as a shortcut or an honest mistake, and that is what the hash catches. Someone who
+mirrors an image to defeat a hash they know the system computes is a different problem,
+and one that would need a learned embedding, a vector index and an accuracy story of its
+own. Building that on the assumption it is needed, before a single confirmed finding
+suggests it is, is the thing ADR-016 argues against.
+
+Consequence: the near-duplicate check is a floor, not a guarantee, and the queue's
+explanations say "looks like the same photograph" rather than asserting reuse. If
+dispositions ever show deliberate evasion, that is the evidence for replacing this, and
+it will be replaced against measurements rather than on principle.
+
+Detection is also quadratic within each hash bucket, which grows faster than a portfolio
+does. Comparisons are restricted to images sharing one of eight 8-bit bands, which is
+lossless at this threshold — six differing bits leave at least two bands identical — and
+the HTTP scan refuses above a ceiling rather than running past a gateway timeout and
+rolling back. Large tenants scan out of band with `impactgraph risk-scan`.
+
+Date: 2026-09-23
+
+## ADR-018 — Receipt and assignment are separate events, and a roll-up may stand for many people
+
+Decision: a funding record names the organisation that received it and, separately, the
+programme it was assigned to if it has been. Unassigned money is money with no programme.
+A record may also stand for many contributions at once, carrying a contributor count
+rather than a name.
+
+Why: the previous model required every contribution to name a programme at the instant it
+was recorded. That is correct for a restricted grant, which arrives already earmarked, and
+wrong for the operating model this serves — unrestricted contributions that the
+organisation allocates afterwards, following its own selection process. There was nowhere
+to put money between arriving and being assigned, which also made "funds held vs deployed"
+answerable only within a programme, and that is the one place it cannot be answered.
+
+The obvious change was a nullable programme reference on its own, and it would have been
+worse than the problem: every existing query would silently include or exclude held money
+depending on how its filter happened to be written. Naming the receiving organisation
+makes held money a state the model asserts rather than a null each reader has to remember.
+
+The roll-up is the concession to volume. One row per contribution is right for fifty
+grants a year and impossible for a daily standing order at scale; the consent machinery
+from ADR-011 is per donor and a roll-up destroys it. So: aggregate by default, and an
+individual row wherever somebody has asked to be named against what they funded. A
+roll-up therefore has no name to publish or withhold, and reports its size instead —
+privilege does not unlock a name there, because the row never held one.
+
+Consequence: assignment is one directional. Money that has been allocated cannot be moved
+to another programme, because a published attribution has already told somebody what their
+contribution paid for, and changing it afterwards is the edit this system exists to make
+impossible. A mistake is corrected by recording the correction, not by rewriting the
+assignment.
+
+The per-programme figures are unchanged for restricted grants, and the migration backfills
+every existing row from the programme it already names, so nothing that was true before is
+different after.
+
+What this does not do: it does not let ImpactGraph take a payment. ADR-014 is unchanged —
+contributions arrive through the organisation's own accounts and appear here as observed
+inbound activity, whether or not they have been assigned yet.
+
+Date: 2026-09-24

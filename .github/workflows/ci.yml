@@ -13,13 +13,37 @@ jobs:
         working-directory: contracts
   api:
     runs-on: ubuntu-latest
+    # The migrations are written for PostgreSQL and the suite runs on SQLite, so the two
+    # can diverge unnoticed. One test migrates a throwaway database here and checks the
+    # schema it builds is the one the models describe.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: drift
+          POSTGRES_PASSWORD: drift
+          POSTGRES_DB: drift
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U drift"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_POSTGRES_URL: postgresql+psycopg://drift:drift@localhost:5432/drift
     steps:
       - uses: actions/checkout@v4
+      # The suite checks that every event the chain adapter decodes is one the compiled
+      # contract declares. Without the artifact that check can only skip, and the drift it
+      # exists to catch would reach a deployment before anything noticed.
+      - uses: foundry-rs/foundry-toolchain@v1
+      - run: forge build
+        working-directory: contracts
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: python -m pip install -e '.[dev]'
         working-directory: apps/api
-      - run: ruff check impactgraph tests && pytest -q
+      - run: ruff check impactgraph tests scripts && pytest -q
         working-directory: apps/api
   web:
     runs-on: ubuntu-latest
@@ -29,6 +53,34 @@ jobs:
         with: { node-version: "22", cache: npm, cache-dependency-path: apps/web/package-lock.json }
       - run: npm ci
         working-directory: apps/web
-      - run: npm test -- --run && npm run typecheck && npm run build
+      - run: npm run lint && npm test -- --run && npm run typecheck && npm run build
         working-directory: apps/web
-
+  browser:
+    runs-on: ubuntu-latest
+    # The journeys the product is demonstrated on. They rotted once already -- the
+    # operator journey navigated to a page that had required a session since
+    # authentication replaced the role header -- because nothing ran them. A suite the
+    # README tells people to run before touching the chain path has to actually run.
+    steps:
+      - uses: actions/checkout@v4
+      # The demo stack deploys the registry from this artifact before it will start.
+      - uses: foundry-rs/foundry-toolchain@v1
+      - run: forge build
+        working-directory: contracts
+      # The fixture reader, so this needs no model credentials. It recognises the
+      # INV-8291 document the operator journey uploads and refuses anything else.
+      - run: docker compose -f docker-compose.demo.yml up -d --wait
+        env:
+          AI_PROVIDER: mock
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm, cache-dependency-path: apps/web/package-lock.json }
+      - run: npm ci
+        working-directory: apps/web
+      - run: npx playwright install --with-deps chromium
+        working-directory: apps/web
+      - run: npx playwright test
+        working-directory: apps/web
+      - if: failure()
+        run: docker compose -f docker-compose.demo.yml logs --tail 200
+      - if: always()
+        run: docker compose -f docker-compose.demo.yml down -v

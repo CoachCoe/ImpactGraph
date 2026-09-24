@@ -148,6 +148,10 @@ h1,h2,h3,p{margin-top:0}
 .hero h1{color:var(--paper);font-size:clamp(38px,5.6vw,64px);line-height:1.08;letter-spacing:var(--track-display-lg);margin:17px 0}
 .hero h1 em{color:var(--brand);font-style:normal;font-weight:500}
 .hero p{font-size:18px;color:var(--dkmut);max-width:600px}
+.hero p strong{color:var(--paper)}
+.hero>.button{margin-top:12px}
+.contributionHero h1{max-width:1080px;font-size:clamp(34px,4.7vw,58px)}
+.contributionHero h1>a{color:var(--brand)}
 .section,.workspace,.inspector{max-width:1160px;margin:0 auto;padding:64px 24px}
 .sectionHead,.workspaceHead,.panelHead,.claimHero{display:flex;align-items:flex-start;justify-content:space-between;gap:24px}
 .sectionHead h2,.workspaceHead h1{font-size:clamp(26px,3.2vw,36px);line-height:1.12;margin:8px 0}
@@ -248,6 +252,10 @@ summary{font-size:13px;font-weight:700;cursor:pointer}
 .documentTitle small{color:var(--muted);margin-top:4px}
 .formGrid label{font-family:var(--font-mono);font-size:10px;letter-spacing:var(--track-label-sm);text-transform:uppercase;color:var(--muted)}
 .formGrid input{width:100%;margin-top:5px;border:1px solid var(--ghost-line);padding:10px;border-radius:7px;background:var(--field);color:var(--ink)}
+.reviewNote{background:var(--warn-wash);border-left:3px solid var(--warn);border-radius:0 8px 8px 0;padding:12px 14px;margin:20px 0 0;font-size:12px;line-height:1.55}
+.formGrid label.needsReview input[type=text],.formGrid label.needsReview>input{border-color:var(--warn)}
+.confirmField{display:flex;align-items:center;gap:7px;margin-top:6px;font-family:var(--font-sans);font-size:11px;letter-spacing:0;text-transform:none;color:var(--muted)}
+.confirmField input{width:auto;margin:0}
 .aiNote{display:flex;justify-content:space-between;background:var(--ok-quiet);border-radius:8px;padding:12px;font-family:var(--font-mono);font-size:11px}
 .aiNote span{color:var(--muted)}
 .uploadPanel{display:block}
@@ -439,3 +447,90 @@ footer{margin-top:24px;padding:36px var(--gutter) 56px;background:var(--ink-deep
   footer{padding:28px 16px 40px;display:block}
   footer>span{display:block;margin-top:6px}
 }
+.queuePanel{margin-bottom:18px}
+.queue{list-style:none;margin:12px 0 0;padding:0;display:grid;gap:8px}
+.queueItem{display:flex;flex-direction:column;gap:3px;width:100%;text-align:left;padding:11px 13px;border:1px solid var(--line);border-radius:8px;background:var(--card-quiet);color:var(--ink);cursor:pointer;font:inherit}
+.queueItem small{color:var(--muted);font-family:var(--font-mono);font-size:10px;letter-spacing:var(--track-label-sm);text-transform:uppercase}
+.queueItem.current{border-color:var(--ok);background:var(--ok-quiet)}
+.programList{display:grid;gap:10px;margin-top:18px}
+.programRow{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:15px 17px;border:1px solid var(--line);border-radius:9px;background:var(--card-quiet);color:var(--ink);text-decoration:none}
+.programRow small{display:block;color:var(--muted);margin-top:3px;font-size:12px}
+.projectPicker{display:flex;flex-direction:column;gap:6px;margin:16px 0 0;font-family:var(--font-mono);font-size:10px;letter-spacing:var(--track-label-sm);text-transform:uppercase;color:var(--muted)}
+.projectPicker select{width:100%;padding:10px;border:1px solid var(--ghost-line);border-radius:7px;background:var(--field);color:var(--ink);font-family:var(--font-sans);font-size:14px;letter-spacing:0;text-transform:none}
+.personalDataCheck{display:flex;align-items:flex-start;gap:10px;margin:16px 0 0;font-size:13px}
+.personalDataCheck input{width:auto;margin:2px 0 0}
+.personalDataCheck small{display:block;color:var(--muted);margin-top:3px;font-size:12px;line-height:1.5}
+.basisPanel{margin-top:20px;padding:16px 18px;border:1px solid var(--warn);border-radius:9px;background:var(--warn-wash)}
+.basisPanel h3{margin:6px 0 2px;font-size:16px}
+.basisPanel label{display:block;margin-top:12px;font-family:var(--font-mono);font-size:10px;letter-spacing:var(--track-label-sm);text-transform:uppercase;color:var(--muted)}
+.basisPanel input,.basisPanel select{width:100%;margin-top:5px;padding:9px;border:1px solid var(--ghost-line);border-radius:7px;background:var(--field);color:var(--ink);font-family:var(--font-sans);font-size:14px;letter-spacing:0;text-transform:none}
+.basisPanel .button{margin-top:16px}
+.proof{max-width:840px;margin:0 auto;display:grid;gap:22px}
+/* A grid item will not shrink below its content without this, so one unbroken hash or
+   the embed snippet widens the whole page rather than scrolling inside its own box. */
+.proof>*{min-width:0}
+.proof .hash{overflow-wrap:anywhere}
+.proofHead{padding:28px 0 4px}
+.proofHead h1{margin:8px 0 6px;font-size:clamp(24px,4vw,34px);line-height:1.25}
+.proofBy{color:var(--muted);margin:0 0 14px}
+.proofFacts{display:grid;gap:14px;margin:16px 0 0}
+.proofFacts dt{font-family:var(--font-mono);font-size:10px;letter-spacing:var(--track-label-sm);text-transform:uppercase;color:var(--muted)}
+.proofFacts dd{margin:4px 0 0}
+.proofLimits{border-color:var(--warn)}
+.plainList{margin:12px 0 0;padding-left:18px;display:grid;gap:10px;font-size:14px;line-height:1.6}
+.embedSnippet{margin:14px 0 0;padding:13px;border:1px solid var(--ghost-line);border-radius:8px;background:var(--field);overflow-x:auto;font-family:var(--font-mono);font-size:11px;line-height:1.6}
+.embedPreview{display:block;margin-top:14px}
+.proofFooter{text-align:center;color:var(--muted);font-size:12px;padding:6px 0 30px}
+@media (max-width:700px){.proofHead{padding-top:18px}}
+
+/* A proof printed for a grant application or a board pack. The controls go, the hashes
+   stay, and the page says it was a snapshot of something that keeps changing. */
+.printOnly{display:none}
+@media print{
+  header,footer,.embedSnippet,.embedPreview,.uploadActions{display:none!important}
+  .printOnly{display:block}
+  body{background:#fff;color:#000}
+  .proof{max-width:none;gap:14px}
+  .panel{border:1px solid #bbb;break-inside:avoid;page-break-inside:avoid}
+  .hash{word-break:break-all;font-size:9pt}
+  a[href]::after{content:""}
+}
+
+/* Field capture. Sized for one hand on a 360px phone: the control that takes a photograph
+   is the biggest thing on the screen, and nothing needs a second hand to reach. */
+.capturePanel{margin-bottom:18px}
+.captureButton{display:flex;align-items:center;justify-content:center;min-height:56px;margin:16px 0 0;border:1px solid var(--ok);border-radius:10px;background:var(--ok-quiet);color:var(--ok-ink);font-weight:600;cursor:pointer}
+.captureButton input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.captureStatus{margin:14px 0 0;font-size:13px;line-height:1.55}
+.captureStatus.offline{color:var(--warn)}
+.captureList{list-style:none;margin:14px 0 0;padding:0;display:grid;gap:8px}
+.captureList li{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 13px;border:1px solid var(--line);border-radius:8px;background:var(--card-quiet);font-size:13px}
+.captureList small{display:block;color:var(--muted);margin-top:3px;font-size:11px}
+.captureList em{flex-shrink:0;font-style:normal;font-family:var(--font-mono);font-size:10px;letter-spacing:var(--track-label-sm);text-transform:uppercase;color:var(--muted)}
+.captureList li.uploaded em{color:var(--ok)}
+.captureList li.failed em{color:var(--fail)}
+.captureList li.uploading em{color:var(--warn)}
+.captureStatus.filed{color:var(--ok-ink)}
+
+/* --- risk review queue --- */
+.riskFacts{margin:22px 0;display:grid;gap:0}
+.riskFacts>div{display:flex;gap:16px;padding:11px 0;border-top:1px solid var(--line)}
+.riskFacts dt{flex:0 0 140px;font-family:var(--font-mono);font-size:10px;letter-spacing:var(--track-label-sm);text-transform:uppercase;color:var(--muted);margin:0}
+.riskFacts dd{margin:0;font-size:13px;word-break:break-word}
+.riskNote{width:100%;margin-top:6px;padding:11px 12px;border:1px solid var(--ghost-line);border-radius:8px;background:var(--field);color:var(--ink);font-family:var(--font-sans);font-size:15px;line-height:1.5;min-height:76px;resize:vertical}
+/* Used by the risk queue, the 404 and the error boundary, so it is named for its shape
+   rather than for the first page that needed it. Links and buttons both sit in it. */
+.actionRow{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
+.actionRow>*{flex:1 1 auto;min-width:150px;text-align:center}
+
+/* --- keyboard entry --- */
+/* Off-screen until focused rather than display:none, which would take it out of the tab
+   order and defeat the purpose. Every page puts a full navigation bar before its content,
+   and without this a keyboard user tabs through all of it on every page. */
+/* No transition: a keyboard user tabbing quickly should not wait to see where focus
+   went, and the motion budget does not stretch to an affordance that exists to be fast. */
+.skipLink{position:absolute;left:16px;top:-56px;z-index:20;padding:11px 18px;border-radius:var(--radius-pill);background:var(--brand);color:var(--paper);font-family:var(--font-mono);font-size:11px;letter-spacing:var(--track-label-sm);text-transform:uppercase;text-decoration:none}
+.skipLink:focus{top:12px}
+.riskMethod{margin-top:10px;font-size:13px;color:var(--muted)}
+.riskMethod summary{cursor:pointer;font-family:var(--font-mono);font-size:10px;letter-spacing:var(--track-label-sm);text-transform:uppercase}
+.riskMethod p{margin:8px 0 0;max-width:62ch;line-height:1.55}

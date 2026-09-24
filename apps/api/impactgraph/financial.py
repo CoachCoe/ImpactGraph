@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .domain import Money
@@ -21,6 +21,7 @@ from .persistence import (
     DeliveryRecord,
     FinancialTransactionRecord,
     FundingRecord,
+    public_funder_name,
 )
 
 
@@ -48,6 +49,61 @@ class FinancialDataProvider(Protocol):
     name: str
 
     def fetch_statement(self, program_ref: str) -> list[ProviderTransaction]: ...
+
+
+@dataclass(frozen=True)
+class MemoMatch:
+    """How confidently a bank memo names an invoice.
+
+    A real memo is noisy and truncated -- "CARD PAYMENT TO AQUA SYSTEM", "INV8291/2 REF
+    88213" -- so an exact substring test finds nothing and matching too loosely invents a
+    reconciliation nobody checked. The score is reported and the decision is a person's,
+    which is the same answer extraction reached for the same reason.
+    """
+
+    invoice_number: str
+    confidence: float
+    reason: str
+
+
+#: At or above this, the match is offered as the likely one. Below it the memo is reported
+#: as unmatched rather than guessed at. Self-reported in the same sense as extraction
+#: confidence: a number this code computed, not a probability anyone measured.
+MEMO_MATCH_THRESHOLD = 0.6
+
+
+def _normalise(text: str) -> str:
+    return "".join(character for character in text.upper() if character.isalnum())
+
+
+def match_memo(memo: str, invoice_number: str) -> MemoMatch:
+    """Score one memo against one invoice number.
+
+    Exact containment scores highest. Otherwise the digits are compared, because a bank
+    strips punctuation and truncates prefixes far more often than it alters the number --
+    "INV-8291" arriving as "8291" is ordinary, and as "8921" is a different invoice.
+    """
+    haystack, needle = _normalise(memo), _normalise(invoice_number)
+    if not needle or not memo:
+        return MemoMatch(invoice_number, 0.0, "There is nothing to match against")
+    if needle in haystack:
+        return MemoMatch(invoice_number, 1.0, f"The memo contains {invoice_number}")
+
+    digits = "".join(character for character in needle if character.isdigit())
+    memo_digits = "".join(character for character in haystack if character.isdigit())
+    if digits and digits in memo_digits:
+        return MemoMatch(
+            invoice_number,
+            0.75,
+            f"The memo contains the digits of {invoice_number} without its prefix",
+        )
+    if digits and len(digits) >= 4 and digits[-4:] in memo_digits:
+        return MemoMatch(
+            invoice_number,
+            0.5,
+            f"The memo ends with the last four digits of {invoice_number}, which is weak",
+        )
+    return MemoMatch(invoice_number, 0.0, f"The memo does not resemble {invoice_number}")
 
 
 class MockFinancialDataProvider:
@@ -119,9 +175,16 @@ class FinancialLedger:
 
     @staticmethod
     def spent_against(session: Session, allocation_ref: str, currency: str) -> Money:
+        """What this allocation has actually paid out.
+
+        Reversed money is not spent. Counting it would leave a budget permanently
+        consumed by a payment the bank took back, and the operator with no way to use it
+        short of raising the allocation to cover money that never left.
+        """
         rows = session.scalars(
             select(FinancialTransactionRecord).where(
-                FinancialTransactionRecord.allocation_ref == allocation_ref
+                FinancialTransactionRecord.allocation_ref == allocation_ref,
+                FinancialTransactionRecord.settlement != "REVERSED",
             )
         )
         total = Money.zero(currency)
@@ -209,50 +272,107 @@ class FinancialIngestionService:
         return ImportResult(imported, skipped, rejected)
 
 
+#: How many rows of each ledger a summary carries. The totals above them are computed
+#: over everything; this bounds the response, not the arithmetic. A programme funded by a
+#: standing order has more contributions than anybody reads in one page, and this route is
+#: public and unauthenticated.
+LEDGER_PAGE = 100
+
+
+def _totals(session: Session, model, program_ref: str, **extra) -> Money:
+    """Sum a ledger in the database, grouped by currency.
+
+    Grouped rather than blended: adding across currencies is refused here exactly as
+    `Money` refuses it, and at most a handful of rows come back instead of the table.
+    """
+    query = (
+        select(model.currency, func.sum(model.amount_minor))
+        .where(model.program_ref == program_ref)
+        .group_by(model.currency)
+    )
+    for column, value in extra.items():
+        query = query.where(getattr(model, column) != value)
+    rows = [(currency, int(total or 0)) for currency, total in session.execute(query)]
+    if not rows:
+        return Money.zero("USD")
+    total = Money(rows[0][1], rows[0][0])
+    for currency, amount in rows[1:]:
+        total = total + Money(amount, currency)
+    return total
+
+
 def financial_summary(session: Session, program_ref: str) -> dict[str, Any]:
-    """Where the money came from, what it was committed to, and where it went."""
+    """Where the money came from, what it was committed to, and where it went.
+
+    Held money is not here. A contribution this programme has not been assigned has no
+    place in its figures, and `program_ref == program_ref` excludes a NULL without anybody
+    having to remember to.
+    """
+    received = _totals(session, FundingRecord, program_ref)
+    committed = _totals(session, AllocationRecord, program_ref)
+    spent = _totals(session, FinancialTransactionRecord, program_ref)
+    currency = received.currency if received.amount_minor else committed.currency
+
+    counts = {
+        status: int(total)
+        for status, total in session.execute(
+            select(FinancialTransactionRecord.match_status, func.count())
+            .where(FinancialTransactionRecord.program_ref == program_ref)
+            .group_by(FinancialTransactionRecord.match_status)
+        )
+    }
+
+    funding_total = session.scalar(
+        select(func.count()).select_from(FundingRecord).where(
+            FundingRecord.program_ref == program_ref
+        )
+    )
     funding = list(
-        session.scalars(select(FundingRecord).where(FundingRecord.program_ref == program_ref))
+        session.scalars(
+            select(FundingRecord)
+            .where(FundingRecord.program_ref == program_ref)
+            .order_by(FundingRecord.received_on, FundingRecord.external_id)
+            .limit(LEDGER_PAGE)
+        )
     )
     allocations = list(
-        session.scalars(select(AllocationRecord).where(AllocationRecord.program_ref == program_ref))
+        session.scalars(
+            select(AllocationRecord).where(AllocationRecord.program_ref == program_ref)
+        )
+    )
+    transaction_total = session.scalar(
+        select(func.count()).select_from(FinancialTransactionRecord).where(
+            FinancialTransactionRecord.program_ref == program_ref
+        )
     )
     transactions = list(
         session.scalars(
             select(FinancialTransactionRecord)
             .where(FinancialTransactionRecord.program_ref == program_ref)
             .order_by(FinancialTransactionRecord.occurred_on)
+            .limit(LEDGER_PAGE)
         )
     )
-    rows = funding or allocations or transactions
-    currency = rows[0].currency if rows else "USD"
-
-    received = Money.zero(currency)
-    for row in funding:
-        received = received + Money(row.amount_minor, row.currency)
-    committed = Money.zero(currency)
-    for row in allocations:
-        committed = committed + Money(row.amount_minor, row.currency)
-    spent = Money.zero(currency)
-    for row in transactions:
-        spent = spent + Money(row.amount_minor, row.currency)
-
-    counts: dict[str, int] = {}
-    for row in transactions:
-        counts[row.match_status] = counts.get(row.match_status, 0) + 1
 
     return {
         "programId": program_ref,
         "received": received.as_dict(),
         "committed": committed.as_dict(),
         "spent": spent.as_dict(),
-        "uncommitted": (received - committed).as_dict(),
-        "unspent": (committed - spent).as_dict(),
+        "uncommitted": (received - committed).as_dict()
+        if received.currency == committed.currency
+        else Money.zero(currency).as_dict(),
+        "unspent": (committed - spent).as_dict()
+        if committed.currency == spent.currency
+        else Money.zero(currency).as_dict(),
         "matchCounts": counts,
+        "fundingCount": int(funding_total or 0),
+        "transactionCount": int(transaction_total or 0),
         "funding": [
             {
                 "id": row.external_id,
-                "funder": row.funder_name,
+                "funder": public_funder_name(row),
+                "contributors": row.contributor_count,
                 "amount": Money(row.amount_minor, row.currency).as_dict(),
                 "receivedOn": row.received_on,
                 "sourceRef": row.source_ref,
@@ -397,3 +517,8 @@ class EvidenceReconciliationService:
                 result["status"].value if hasattr(result["status"], "value") else result["status"]
             )
         return result
+
+
+#: A bank reports a payment before it settles and can withdraw it afterwards. Only the
+#: middle one of these is a fact about the world.
+SETTLEMENT_STATES = ("PENDING", "SETTLED", "REVERSED")

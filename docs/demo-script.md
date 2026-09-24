@@ -8,9 +8,11 @@ Every step below is performable in the browser. Setup: `make db-up && make migra
 it the registry has no program or claim entity and both journeys revert on chain. `make seed`
 prints the demo account email addresses and their shared password.
 
-1. **Donor context.** Open the donor dashboard, signed out. Introduce the Clean Water Kenya
-   2026 program. Every figure here is read from the API, so it moves with the seed.
-2. **Follow the money.** Open the claim. The provenance panel renders the graph the backend
+1. **Donor context.** Open the donor dashboard, signed out. Start with the featured
+   contribution: received → committed → delivered → outcome. Open “Inspect every record”
+   and make clear that this is one contribution’s allocation trail, not a claim that a
+   particular banknote bought a particular item. Every figure is read from the API.
+2. **Follow the money.** Continue into the claim. The provenance panel renders the graph the backend
    returns: funding → allocation → TX-9182 → delivery → outcome → claim, with the evidence
    branching off. The sidebar shows the policy requirements and why the claim is not yet
    verified, and the explainable score the backend computed.
@@ -41,6 +43,8 @@ prints the demo account email addresses and their shared password.
    restores the pristine bytes.
 
 End: "ImpactGraph connects money, activity, evidence and outcomes into a verifiable chain
-of provenance." Be explicit about what is mocked: the bank, the AI extraction, the NGO
-records and every document are fictional. The registry, the commitments, the wallet
-signature, the receipt and event validation, and the integrity check are real.
+of provenance." Be explicit about what is fictional: the bank activity, NGO records and
+every document. In the hosted demo Inkling Small really extracts the document, but its
+confidence is self-reported and a person confirms the fields used for reconciliation. In
+offline mode the extractor is a fixture. The registry, commitments, wallet signature,
+receipt and event validation, and integrity check are real.

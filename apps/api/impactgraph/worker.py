@@ -12,6 +12,7 @@ from web3 import Web3
 
 from .blockchain import (
     INDEPENDENT_VERIFIER_ATTESTATION,
+    VERIFIER_ROLE,
     BlockchainOperation,
     BlockchainService,
     ReceiptObservation,
@@ -20,6 +21,7 @@ from .blockchain import (
     entity_id_bytes,
 )
 from .domain import BlockchainStatus, ClaimStatus, EvidenceWorkflowStatus
+from .hashing import program_hash
 from .metrics import chain_operations, outbox_submissions
 from .notifications import enqueue_claim_status_change
 from .observability import correlation_context, logger
@@ -31,6 +33,7 @@ from .persistence import (
     EvidenceRecord,
     OutboxRecord,
     ProcessedChainEventRecord,
+    ProgramRecord,
 )
 from .verification import evaluate_persisted_claim
 
@@ -104,15 +107,64 @@ class BlockchainOutboxWorker:
         with correlation_context(correlation_id):
             return self._submit_prepared(outbox_id, topic, payload)
 
+    def _mark_entity_submitted(
+        self, session: Session, operation: BlockchainOperationRecord
+    ) -> None:
+        """Evidence carries a workflow status of its own; a program and a claim do not.
+
+        Both remain PENDING until the receipt is observed, because a submitted transaction
+        is not a created entity and nothing may treat it as one.
+        """
+        if operation.operation_type == "REGISTER_EVIDENCE":
+            evidence = self._evidence(session, operation.entity_id)
+            evidence.workflow_status = EvidenceWorkflowStatus.REGISTRATION_PENDING
+            evidence.blockchain_status = BlockchainStatus.SUBMITTED
+
+    def _mark_entity_failed(
+        self, session: Session, operation: BlockchainOperationRecord
+    ) -> None:
+        """What a failed submission means for the row the operation was created for.
+
+        Dispatched rather than assumed: this used to reach straight for the evidence
+        record, which is a LookupError for any operation whose entity is not evidence.
+        """
+        if operation.operation_type == "REGISTER_EVIDENCE":
+            evidence = self._evidence(session, operation.entity_id)
+            evidence.workflow_status = EvidenceWorkflowStatus.REGISTRATION_FAILED
+            evidence.blockchain_status = BlockchainStatus.FAILED
+        elif operation.operation_type == "CREATE_PROGRAM_ENTITY":
+            program = session.scalar(
+                select(ProgramRecord).where(ProgramRecord.slug == operation.entity_id)
+            )
+            if program:
+                program.chain_status = "FAILED"
+        elif operation.operation_type == "CREATE_CLAIM_ENTITY":
+            claim = session.scalar(
+                select(ClaimRecord).where(ClaimRecord.external_id == operation.entity_id)
+            )
+            if claim:
+                claim.status = "CREATION_FAILED"
+
     def _submit_prepared(
         self, outbox_id: UUID, topic: str, payload: dict[str, Any]
     ) -> bool | None:
         try:
-            if topic != "blockchain.register_evidence":
+            if topic == "blockchain.register_evidence":
+                transaction_hash = self.blockchain.register_evidence(
+                    payload["evidenceId"], payload["programId"], payload["contentHash"]
+                )
+            elif topic == "blockchain.create_program":
+                transaction_hash = self.blockchain.create_program(
+                    payload["programId"], payload["commitment"]
+                )
+            elif topic == "blockchain.create_claim":
+                transaction_hash = self.blockchain.create_claim(
+                    payload["claimId"], payload["programId"], payload["commitment"]
+                )
+            elif topic == "blockchain.grant_verifier_role":
+                transaction_hash = self.blockchain.grant_verifier_role(payload["address"])
+            else:
                 raise ValueError(f"Unsupported outbox topic: {topic}")
-            transaction_hash = self.blockchain.register_evidence(
-                payload["evidenceId"], payload["programId"], payload["contentHash"]
-            )
         except Exception as exc:  # noqa: BLE001 -- persist every external adapter failure
             with self.session_factory() as session, session.begin():
                 outbox = session.get(OutboxRecord, outbox_id)
@@ -121,9 +173,7 @@ class BlockchainOutboxWorker:
                     return None
                 outbox.attempts += 1
                 operation.status, operation.error = BlockchainStatus.FAILED, str(exc)
-                evidence = self._evidence(session, operation.entity_id)
-                evidence.workflow_status = EvidenceWorkflowStatus.REGISTRATION_FAILED
-                evidence.blockchain_status = BlockchainStatus.FAILED
+                self._mark_entity_failed(session, operation)
                 self._audit(
                     session,
                     operation,
@@ -148,9 +198,7 @@ class BlockchainOutboxWorker:
                 return None
             operation.transaction_hash = transaction_hash
             operation.status, operation.error = BlockchainStatus.SUBMITTED, None
-            evidence = self._evidence(session, operation.entity_id)
-            evidence.workflow_status = EvidenceWorkflowStatus.REGISTRATION_PENDING
-            evidence.blockchain_status = BlockchainStatus.SUBMITTED
+            self._mark_entity_submitted(session, operation)
             outbox.processed_at = datetime.now(UTC)
             self._audit(
                 session, operation, "BLOCKCHAIN_TX_SUBMITTED", {"transactionHash": transaction_hash}
@@ -296,13 +344,85 @@ class BlockchainOutboxWorker:
                     self._confirm_verifier_attestation(
                         session, record, observation
                     )
-            elif result == BlockchainStatus.FAILED:
-                if record.operation_type == "REGISTER_EVIDENCE":
-                    evidence = self._evidence(session, record.entity_id)
-                    evidence.workflow_status, evidence.blockchain_status = (
-                        EvidenceWorkflowStatus.REGISTRATION_FAILED,
-                        BlockchainStatus.FAILED,
+                elif record.operation_type == "CREATE_PROGRAM_ENTITY":
+                    program = session.scalar(
+                        select(ProgramRecord).where(ProgramRecord.slug == record.entity_id)
                     )
+                    if program is None:
+                        raise LookupError("Program record is missing")
+                    onchain_error = self._onchain_program_mismatch(observation.events, program)
+                    if onchain_error:
+                        record.status, record.error = BlockchainStatus.FAILED, onchain_error
+                        program.chain_status = "FAILED"
+                        self._audit(
+                            session, record, "BLOCKCHAIN_TX_FAILED", {"error": onchain_error}
+                        )
+                        return (
+                            record.status,
+                            record.entity_id,
+                            record.operation_type,
+                            record.confirmations,
+                        )
+                    program.chain_status = "CONFIRMED"
+                    self._audit(
+                        session,
+                        record,
+                        "BLOCKCHAIN_TX_CONFIRMED",
+                        {"transactionHash": observation.transaction_hash},
+                    )
+                elif record.operation_type == "GRANT_VERIFIER_ROLE":
+                    onchain_error = self._onchain_role_mismatch(
+                        observation.events, record.entity_id
+                    )
+                    if onchain_error:
+                        record.status, record.error = BlockchainStatus.FAILED, onchain_error
+                        self._audit(
+                            session, record, "BLOCKCHAIN_TX_FAILED", {"error": onchain_error}
+                        )
+                        return (
+                            record.status,
+                            record.entity_id,
+                            record.operation_type,
+                            record.confirmations,
+                        )
+                    self._audit(
+                        session,
+                        record,
+                        "BLOCKCHAIN_TX_CONFIRMED",
+                        {"transactionHash": observation.transaction_hash},
+                    )
+                elif record.operation_type == "CREATE_CLAIM_ENTITY":
+                    claim = session.scalar(
+                        select(ClaimRecord).where(ClaimRecord.external_id == record.entity_id)
+                    )
+                    if claim is None:
+                        raise LookupError("Claim record is missing")
+                    onchain_error = self._onchain_claim_mismatch(observation.events, claim)
+                    if onchain_error:
+                        record.status, record.error = BlockchainStatus.FAILED, onchain_error
+                        claim.status = "CREATION_FAILED"
+                        self._audit(
+                            session, record, "BLOCKCHAIN_TX_FAILED", {"error": onchain_error}
+                        )
+                        return (
+                            record.status,
+                            record.entity_id,
+                            record.operation_type,
+                            record.confirmations,
+                        )
+                    self._audit(
+                        session,
+                        record,
+                        "BLOCKCHAIN_TX_CONFIRMED",
+                        {"transactionHash": observation.transaction_hash},
+                    )
+            elif result == BlockchainStatus.FAILED:
+                if record.operation_type in {
+                    "REGISTER_EVIDENCE",
+                    "CREATE_PROGRAM_ENTITY",
+                    "CREATE_CLAIM_ENTITY",
+                }:
+                    self._mark_entity_failed(session, record)
                 elif record.operation_type == "CREATE_VERIFIER_ATTESTATION":
                     attestation = session.scalar(
                         select(AttestationRecord).where(
@@ -419,6 +539,76 @@ class BlockchainOutboxWorker:
             return "The onchain evidence registration names a different program"
         if args.get("contentHash") != Web3.to_hex(digest_bytes(evidence.content_hash)):
             return "The onchain evidence registration commits to different bytes"
+        return None
+
+    @staticmethod
+    def _onchain_role_mismatch(
+        events: Sequence[dict[str, Any]], address: str
+    ) -> str | None:
+        """A RoleGranted in the receipt is not proof that this address got VERIFIER_ROLE.
+
+        Both the role and the account are checked: a receipt could carry a grant of a
+        different role, or of this role to somebody else.
+        """
+        event = next((item for item in events if item.get("event") == "RoleGranted"), None)
+        if event is None:
+            return "No RoleGranted event was found in the receipt"
+        args = event.get("args") or {}
+        if str(args.get("account", "")).lower() != address.lower():
+            return "The onchain grant names a different account"
+        if args.get("role") != Web3.to_hex(VERIFIER_ROLE):
+            return "The onchain grant is for a different role"
+        return None
+
+    @staticmethod
+    def _onchain_program_mismatch(
+        events: Sequence[dict[str, Any]], program: ProgramRecord
+    ) -> str | None:
+        """A receipt is not proof that this program was created.
+
+        Any contract can emit a ProgramCreated, and any transaction can carry one for a
+        different program, so the event is matched by entity and checked against the
+        commitment this service computed rather than taken as an outcome.
+        """
+        expected_entity = Web3.to_hex(entity_id_bytes(program.slug))
+        event = next(
+            (
+                item
+                for item in events
+                if item.get("event") == "ProgramCreated"
+                and item.get("entityId") in {program.slug, expected_entity}
+            ),
+            None,
+        )
+        if event is None:
+            return "No ProgramCreated event for this program was found in the receipt"
+        args = event.get("args") or {}
+        expected = Web3.to_hex(digest_bytes(program_hash(program.slug)))
+        if args.get("commitment") != expected:
+            return "The onchain program commits to a different identifier"
+        return None
+
+    @staticmethod
+    def _onchain_claim_mismatch(
+        events: Sequence[dict[str, Any]], claim: ClaimRecord
+    ) -> str | None:
+        expected_entity = Web3.to_hex(entity_id_bytes(claim.external_id))
+        event = next(
+            (
+                item
+                for item in events
+                if item.get("event") == "ClaimCreated"
+                and item.get("entityId") in {claim.external_id, expected_entity}
+            ),
+            None,
+        )
+        if event is None:
+            return "No ClaimCreated event for this claim was found in the receipt"
+        args = event.get("args") or {}
+        if args.get("programId") != Web3.to_hex(entity_id_bytes(claim.program_ref)):
+            return "The onchain claim names a different program"
+        if args.get("claimHash") != Web3.to_hex(digest_bytes(claim.payload_hash)):
+            return "The onchain claim commits to a different statement"
         return None
 
     def _confirm_verifier_attestation(

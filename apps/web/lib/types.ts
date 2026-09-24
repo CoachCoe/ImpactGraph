@@ -4,6 +4,8 @@ export type Program = {
   id: string;
   name: string;
   operator: string;
+  /** The organisation that operates it, which is what the treasury is scoped to. */
+  operatorOrgRef: string;
   region: string;
   status: string;
   funding: Money;
@@ -80,6 +82,11 @@ export type Evidence = {
   integrityStatus: string;
   blockchainStatus: string;
   extraction?: Record<string, string | number>;
+  providerMetadata?: {
+    provider: string;
+    model: string;
+    processedAt: string;
+  } | null;
   reconciliation?: { status: string; checks: ReconciliationCheck[] };
   blockchainReference?: { transactionHash: string; blockNumber: number };
 };
@@ -119,9 +126,14 @@ export type FinancialSummary = {
   uncommitted: Money;
   unspent: Money;
   matchCounts: Record<string, number>;
+  /** Totals cover every row; the arrays below are a bounded page of them. */
+  fundingCount: number;
+  transactionCount: number;
   funding: {
     id: string;
     funder: string;
+    /** More than one where the row stands for a roll-up of small contributions. */
+    contributors: number;
     amount: Money;
     receivedOn: string;
     sourceRef: string;
@@ -183,4 +195,17 @@ export type FundingAttribution = {
   overcommitted: Money;
   allocations: AttributedAllocation[];
   method: { basis: string; explanation: string };
+};
+
+/** What an organisation has been given, and how much of it is still unassigned. */
+export type OrganizationPosition = {
+  organizationRef: string;
+  byCurrency: {
+    currency: string;
+    received: Money;
+    held: Money;
+    assigned: Money;
+    contributors: number;
+  }[];
+  generatedAt: string;
 };

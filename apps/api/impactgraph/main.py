@@ -4,7 +4,9 @@ import asyncio
 import os
 from datetime import UTC, datetime
 from functools import lru_cache
-from typing import Annotated, Any
+from hmac import compare_digest
+from ipaddress import ip_address
+from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import (
@@ -15,6 +17,7 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Query,
     Request,
     Response,
     UploadFile,
@@ -24,6 +27,7 @@ from prometheus_client import CONTENT_TYPE_LATEST
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select, text
 
+from . import public_api
 from .attribution import MixedCurrencyError, funding_attribution
 from .auth import (
     SESSION_COOKIE,
@@ -32,6 +36,7 @@ from .auth import (
     AuthenticationError,
     authenticate,
     challenge_message,
+    hash_password,
     issue_wallet_challenge,
     resolve_session,
     revoke_session,
@@ -42,8 +47,11 @@ from .cli import register_seeded_evidence
 from .config import Settings
 from .database import create_session_factory
 from .demo import INVOICE_BYTES, TAMPERED_INVOICE_BYTES, store
+from .detection import perceptual_hash_for
 from .domain import BlockchainStatus, Role, Visibility
 from .evidence import (
+    EvidenceAnalysisProvider,
+    EvidenceUnrecoverable,
     FileEvidenceStorage,
     MockEvidenceAnalysisProvider,
     ReconciliationService,
@@ -56,6 +64,7 @@ from .export import (
     outcomes_csv,
     provenance_csv,
 )
+from .extraction import SCHEMA_FIELDS, TinkerEvidenceAnalysisProvider, review_required_fields
 from .financial import (
     EvidenceReconciliationService,
     FinancialIngestionService,
@@ -81,20 +90,40 @@ from .persistence import (
     FinancialTransactionRecord,
     OutboxRecord,
     ProgramRecord,
+    RiskFindingRecord,
     UserRecord,
+    as_utc_iso,
+    public_funder_name,
 )
+from .public_api import RateLimiter, client_address, enforce_rate_limit
 from .read_model import (
     CLAIM_ID as SEEDED_CLAIM_ID,
 )
 from .read_model import TransparencyReadRepository, reset_read_model
+from .risk import INTERACTIVE_IMAGE_LIMIT, ScanTooLarge
+from .risk import open_findings as risk_open_findings
+from .risk import precision as risk_precision
+from .risk import record_disposition as record_risk_disposition
+from .risk import scan as risk_scan
 from .services import (
     ApplicationActor,
     AuditService,
     AuthorizationError,
+    ClaimPublicationService,
+    DataProtectionApplicationService,
     DomainConflictError,
     EvidenceApplicationService,
+    FunderNameService,
+    IdempotencyConflictError,
+    OnboardingApplicationService,
+    SettlementService,
+    TenantApplicationService,
     VerificationApplicationService,
 )
+from .treasury import AssignmentRefused  # noqa: F401  (mapped by _tenant_write)
+from .treasury import assign as treasury_assign
+from .treasury import held as treasury_held
+from .treasury import position_response as treasury_position
 from .verification import restate_claims_for
 from .worker import BlockchainOutboxWorker
 
@@ -104,16 +133,19 @@ session_factory = (
     if settings.persistence_mode == "postgres"
     else None
 )
-evidence_storage = FileEvidenceStorage(settings.evidence_storage_path)
-if settings.ai_provider != "mock":
-    # Accepting a provider name and then using the mock anyway is the same silent-fallback
-    # failure the specification forbids for chains. No real provider is implemented yet.
-    raise RuntimeError(
-        f"AI_PROVIDER={settings.ai_provider!r} is configured but no such provider is "
-        "implemented. Set AI_PROVIDER=mock, or implement the provider behind "
-        "EvidenceAnalysisProvider before selecting it."
-    )
-analysis_provider = MockEvidenceAnalysisProvider()
+evidence_storage = FileEvidenceStorage(
+    settings.evidence_storage_path,
+    settings.evidence_encryption_key,
+    settings.evidence_key_path,
+)
+# Accepting a provider name and then using the mock anyway would be the silent fallback
+# the specification forbids for chains, so an unknown name is refused at startup by
+# Settings rather than degraded here.
+analysis_provider: EvidenceAnalysisProvider = (
+    TinkerEvidenceAnalysisProvider(model=settings.extraction_model)
+    if settings.ai_provider == "tinker"
+    else MockEvidenceAnalysisProvider()
+)
 reconciliation_service = ReconciliationService()
 evidence_reconciliation = EvidenceReconciliationService(reconciliation_service)
 financial_provider = MockFinancialDataProvider()
@@ -121,6 +153,7 @@ configure_logging()
 log = logger("impactgraph.api")
 
 app = FastAPI(title="ImpactGraph Transparency API", version="0.1.0")
+login_limiter = RateLimiter(requests=5, window=300)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -138,6 +171,18 @@ async def correlation_id(request: Request, call_next):
         response = await call_next(request)
         response.headers["x-correlation-id"] = value
         return response
+
+
+def _require_database(subject: str) -> None:
+    """Refuse a route that needs durable storage when the deployment has none.
+
+    503 throughout. The request is not in conflict with any state -- this deployment
+    simply cannot answer it -- and a caller retrying against a configured instance is the
+    right response. Twenty-one of these said 503 and sixteen said 409 for the identical
+    condition, which left no way for a client to handle it once.
+    """
+    if session_factory is None:
+        raise HTTPException(503, f"{subject} requires PERSISTENCE_MODE=postgres")
 
 
 def _refuse_demo_store_route() -> None:
@@ -239,10 +284,7 @@ def require_user(user: AuthenticatedUser | None, allowed: set[Role]) -> Authenti
     caller had to authenticate to obtain, so the separation-of-duties rules built on it
     are enforceable rather than advisory.
     """
-    if session_factory is None:
-        raise HTTPException(
-            409, "Authentication requires PERSISTENCE_MODE=postgres"
-        )
+    _require_database("Authentication")
     if user is None:
         raise _unauthenticated()
     if user.role not in allowed:
@@ -266,20 +308,109 @@ class InvoiceExtraction(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # Required, because reconciliation resolves a payment against these and an operator
+    # confirms every one of them before registration. The rest are nullable: a real
+    # document need not carry an equipment line, and a model that invents one to satisfy
+    # a schema is worse than a model that says the document did not contain it.
     documentType: str
     invoiceNumber: str
-    vendor: str
     amountMinor: int = Field(ge=0)
     currency: str = Field(pattern=r"^[A-Z]{3}$")
-    date: str
-    equipment: str
-    quantity: int = Field(ge=1)
-    projectReference: str
-    confidence: float = Field(ge=0, le=1)
+    vendor: str | None = None
+    date: str | None = None
+    equipment: str | None = None
+    quantity: int | None = Field(default=None, ge=1)
+    projectReference: str | None = None
+    # Self-reported by the model and per field, so the operator screen can mark the ones
+    # worth looking at rather than presenting one number for the whole document.
+    selfReportedConfidence: dict[str, Annotated[float, Field(ge=0, le=1)]]
+
+
+class OrganizationCreateRequest(BaseModel):
+    """The first user's role is not here: it follows from the organisation's kind."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=3, max_length=160, pattern=r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
+    name: str = Field(min_length=1, max_length=200)
+    kind: Literal["OPERATOR", "VERIFIER"]
+    userEmail: str = Field(min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    userName: str = Field(min_length=1, max_length=200)
+    userPassword: str = Field(min_length=12, max_length=200)
+
+
+class ProgramCreateRequest(BaseModel):
+    """The owning organisation is deliberately absent: it comes from the session."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=3, max_length=120, pattern=r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
+    name: str = Field(min_length=1, max_length=240)
+    region: str = Field(min_length=1, max_length=240)
+    verificationThreshold: int = Field(default=1, ge=1, le=10)
+
+
+class VerifierRoleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    userEmail: str = Field(min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class ProjectCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=3, max_length=160, pattern=r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
+    name: str = Field(min_length=1, max_length=240)
+
+
+class ClaimCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=3, max_length=160, pattern=r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
+    programId: str = Field(min_length=1, max_length=160)
+    projectId: str = Field(min_length=1, max_length=160)
+    statement: str = Field(min_length=1, max_length=1000)
+    outcomeId: str = Field(min_length=1, max_length=160)
+
+
+class DataProtectionRequest(BaseModel):
+    """What makes holding this object lawful. Not a consent form.
+
+    An organisation that delivers the aid it photographs cannot obtain freely given
+    consent from the person receiving it, so the basis is stated rather than assumed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lawfulBasis: Literal[
+        "CONSENT",
+        "CONTRACT",
+        "LEGAL_OBLIGATION",
+        "VITAL_INTERESTS",
+        "PUBLIC_TASK",
+        "LEGITIMATE_INTEREST",
+    ]
+    specialCategory: bool = False
+    controllerOrgRef: str = Field(min_length=1, max_length=160)
+    jointControllerOrgRef: str | None = Field(default=None, max_length=160)
+    subjectReference: str = Field(min_length=1, max_length=160)
+    purpose: str = Field(min_length=1, max_length=1000)
+    retainUntil: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class ErasureRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=1000)
 
 
 class EvidenceReviewRequest(BaseModel):
     extraction: InvoiceExtraction
+    #: The fields the operator confirmed against the document in front of them. Reviewing
+    #: is the act this records, so the endpoint refuses a review that does not cover every
+    #: field the analysis flagged -- otherwise the confirmation is a checkbox in a browser
+    #: and the API registers whatever a model proposed.
+    confirmed: list[str] = Field(default_factory=list)
 
 
 class WalletSubmissionRequest(BaseModel):
@@ -351,6 +482,13 @@ def evidence_record_response(record: EvidenceRecord) -> dict[str, Any]:
         "visibility": record.visibility,
         "workflowStatus": record.workflow_status,
         "analysisStatus": record.analysis_status,
+        # Which fields a person has to confirm. Always includes the ones reconciliation
+        # resolves a payment against, whatever the model reported about its own certainty:
+        # a misread digit in an invoice number turns a matched payment into an unmatched
+        # one, and the model has been observed misreading exactly that field.
+        "reviewRequired": (
+            review_required_fields(record.extraction) if record.extraction else []
+        ),
         "integrityStatus": record.integrity_status,
         "blockchainStatus": record.blockchain_status,
         "extraction": record.extraction,
@@ -404,9 +542,21 @@ def _session_payload(user: AuthenticatedUser) -> dict[str, Any]:
 
 
 @app.post("/auth/login")
-def login(body: LoginRequest, response: Response):
-    if session_factory is None:
-        raise HTTPException(409, "Authentication requires PERSISTENCE_MODE=postgres")
+def login(body: LoginRequest, request: Request, response: Response):
+    client = client_address(request)
+    allowed, remaining = login_limiter.check(client)
+    response.headers["X-RateLimit-Limit"] = str(login_limiter.requests)
+    response.headers["X-RateLimit-Remaining"] = str(remaining)
+    if not allowed:
+        raise HTTPException(
+            429,
+            detail={
+                "code": "LOGIN_RATE_LIMITED",
+                "message": "Too many sign-in attempts. Try again in five minutes.",
+            },
+            headers={"Retry-After": str(int(login_limiter.window))},
+        )
+    _require_database("Authentication")
     with session_factory.begin() as session:
         try:
             token, user = authenticate(session, body.email, body.password)
@@ -419,6 +569,7 @@ def login(body: LoginRequest, response: Response):
             raise HTTPException(
                 401, detail={"code": "INVALID_CREDENTIALS", "message": str(exc)}
             ) from exc
+        login_limiter.forget(client)
         log.info("auth.login_succeeded", user_id=str(user.user_id), role=user.role)
         payload = _session_payload(user)
     response.set_cookie(
@@ -483,6 +634,142 @@ def wallet_verify(body: WalletProofRequest, user: CurrentUser = None):
     return {"walletAddress": address}
 
 
+class ReversalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+@app.post("/financial/transactions/{transaction_ref}/reversal")
+def record_reversal(
+    request: Request,
+    transaction_ref: str,
+    body: ReversalRequest,
+    user: CurrentUser = None,
+):
+    """Record that the bank took a payment back.
+
+    A reversal is not an evidence change, so nothing else would carry it to the claim. A
+    donor would otherwise read a verified badge over a payment that did not happen.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    _require_database("Recording a reversal")
+    service = SettlementService()
+    return _tenant_write(
+        lambda session: service.mark_reversed(
+            session,
+            actor=actor,
+            transaction_ref=transaction_ref,
+            reason=body.reason,
+            correlation_id=request.state.correlation_id,
+        )
+    )
+
+
+class DispositionRequest(BaseModel):
+    """What a reviewer decided, and why.
+
+    The reason is required to close one. A queue that can be emptied without saying why
+    measures nothing, and the false positive rate this detection has to be judged on is
+    exactly what those reasons add up to.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    state: Literal["OPEN", "INVESTIGATING", "CONFIRMED", "DISMISSED"]
+    note: str = Field(default="", max_length=2000)
+
+
+def _finding_view(finding: RiskFindingRecord) -> dict[str, Any]:
+    return {
+        "id": finding.external_id,
+        "kind": finding.kind,
+        "explanation": finding.explanation,
+        "subjects": finding.subjects,
+        "state": finding.state,
+        "assignedTo": finding.assigned_to,
+        "dispositionNote": finding.disposition_note,
+        "raisedAt": finding.created_at.isoformat() if finding.created_at else None,
+        "closedAt": finding.closed_at.isoformat() if finding.closed_at else None,
+    }
+
+
+@app.post("/risk/scan")
+def run_risk_scan(request: Request, user: CurrentUser = None):
+    """Look for the things that look wrong, within one organisation's own records.
+
+    Never public and never cross-tenant: an invoice appearing in two organisations is a
+    coincidence or a matter for a regulator, and neither is a reason to show one customer
+    another customer's records.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    _require_database("Risk detection")
+    try:
+        return _tenant_write(
+            lambda session: {
+                "findings": [
+                    _finding_view(f)
+                    for f in risk_scan(session, actor.id, image_limit=INTERACTIVE_IMAGE_LIMIT)
+                ],
+            }
+        )
+    except ScanTooLarge as exc:
+        # Refused rather than left to time out and roll back, which would look like an
+        # intermittent fault and leave nothing scanned.
+        raise HTTPException(413, str(exc)) from exc
+
+
+@app.get("/risk/findings")
+def list_risk_findings(user: CurrentUser = None):
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    _require_database("Risk detection")
+    with session_factory() as session:
+        return {"findings": [_finding_view(f) for f in risk_open_findings(session, actor.id)]}
+
+
+@app.get("/risk/precision")
+def risk_precision_view(user: CurrentUser = None):
+    """How often each detector was right, from what reviewers decided about its findings.
+
+    Precision only. Nothing here knows about the fraud it never surfaced, so a recall
+    figure would be invented.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    _require_database("Risk detection")
+    with session_factory() as session:
+        return {"byKind": risk_precision(session, actor.id)}
+
+
+@app.post("/risk/findings/{finding_id}/disposition")
+def dispose_risk_finding(
+    request: Request,
+    finding_id: str,
+    body: DispositionRequest,
+    user: CurrentUser = None,
+):
+    """Record what a person decided. Nothing about a claim changes as a result.
+
+    A false accusation of fraud against an operating organisation is a serious harm; the
+    decision to act on a finding stays with a person, and this only writes down that they
+    made it.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    _require_database("Risk detection")
+    return _tenant_write(
+        lambda session: _finding_view(
+            record_risk_disposition(
+                session,
+                external_id=finding_id,
+                organization_ref=actor.id,
+                state=body.state,
+                actor_id=actor.id,
+                note=body.note,
+                correlation_id=request.state.correlation_id,
+            )
+        )
+    )
+
+
 @app.get("/financial/programs/{program_id}")
 def program_financials(program_id: str):
     """Where the money came from, what it was committed to, and where it went.
@@ -490,18 +777,119 @@ def program_financials(program_id: str):
     Public: "where did the money go" is one of the questions the product exists to answer,
     and an answer only its operator can see is not transparency.
     """
-    if session_factory is None:
-        raise HTTPException(409, "Financial records require PERSISTENCE_MODE=postgres")
+    _require_database("Financial records")
     with session_factory() as session:
         return financial_summary(session, program_id)
+
+
+class ContributionAssignment(BaseModel):
+    """Which programme a held contribution is to fund."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    programId: str = Field(min_length=1, max_length=160)
+
+
+@app.get("/financial/organizations/{organization_ref}/position")
+def organization_position(organization_ref: str, request: Request, response: Response):
+    """What this organisation has been given, and how much is still unassigned.
+
+    Public, and one of the four things the operating organisation commits to publishing.
+    An answer only its own staff can see is not the commitment.
+    """
+    _require_database("Financial records")
+    enforce_rate_limit(request, response)
+    with session_factory() as session:
+        return treasury_position(session, organization_ref)
+
+
+@app.get("/financial/organizations/{organization_ref}/held")
+def organization_held(
+    organization_ref: str,
+    request: Request,
+    response: Response,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    user: CurrentUser = None,
+):
+    """Contributions received and not yet assigned to a programme.
+
+    Operator-facing rather than public: the totals are the commitment, and a paginated
+    walk of individual contributions is a different thing from publishing a position.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    if actor.role != Role.ADMIN and actor.id != organization_ref:
+        raise HTTPException(403, "Held money is only listed for your own organisation")
+    _require_database("Financial records")
+    enforce_rate_limit(request, response)
+    with session_factory() as session:
+        rows = treasury_held(session, organization_ref, limit=limit, offset=offset)
+        return {
+            "organizationRef": organization_ref,
+            "contributions": [
+                {
+                    "id": row.external_id,
+                    "funder": public_funder_name(row),
+                    "contributors": row.contributor_count,
+                    "amount": {"amountMinor": row.amount_minor, "currency": row.currency},
+                    "receivedOn": row.received_on,
+                }
+                for row in rows
+            ],
+        }
+
+
+@app.post("/financial/funding/{funding_id}/assignment", status_code=201)
+def assign_contribution(
+    request: Request,
+    funding_id: str,
+    body: ContributionAssignment,
+    user: CurrentUser = None,
+):
+    """Decide what a held contribution funds. One direction only.
+
+    Reassigning allocated money would change what a published attribution says a
+    contribution paid for, after somebody has read it.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    _require_database("Assigning a contribution")
+    return _tenant_write(
+        lambda session: _assignment_response(
+            treasury_assign(
+                session,
+                funding_ref=funding_id,
+                program_ref=body.programId,
+                organization_ref=actor.id,
+            ),
+            actor=actor,
+            session=session,
+            correlation_id=request.state.correlation_id,
+        )
+    )
+
+
+def _assignment_response(funding, *, actor, session, correlation_id: str) -> dict[str, Any]:
+    AuditService().record(
+        session,
+        actor=actor,
+        action="FUNDING_ASSIGNED",
+        entity_type="FUNDING",
+        entity_id=funding.external_id,
+        correlation_id=correlation_id,
+        metadata={"programRef": funding.program_ref},
+    )
+    return {
+        "fundingId": funding.external_id,
+        "programId": funding.program_ref,
+        "assignedAt": as_utc_iso(funding.assigned_at),
+    }
 
 
 @app.get("/financial/funding/{funding_id}/attribution")
 def funding_attribution_view(funding_id: str):
     # Public, like the rest of the money trail: following a contribution to what it
     # reached is the question this product exists to answer.
-    if session_factory is None:
-        raise HTTPException(409, "Attribution requires PERSISTENCE_MODE=postgres")
+    _require_database("Attribution")
     with session_factory() as session:
         try:
             return funding_attribution(session, funding_id)
@@ -518,8 +906,7 @@ def funding_attribution_view(funding_id: str):
 
 @app.get("/financial/transactions/{transaction_id}")
 def financial_transaction(transaction_id: str):
-    if session_factory is None:
-        raise HTTPException(409, "Financial records require PERSISTENCE_MODE=postgres")
+    _require_database("Financial records")
     with session_factory() as session:
         record = session.scalar(
             select(FinancialTransactionRecord).where(
@@ -546,8 +933,7 @@ def import_financial_statement(
     actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
     _require_program_management(program_id, user)
     require_idempotency(idempotency_key)
-    if session_factory is None:
-        raise HTTPException(409, "Financial records require PERSISTENCE_MODE=postgres")
+    _require_database("Financial records")
     service = FinancialIngestionService(financial_provider)
     with session_factory.begin() as session:
         result = service.import_statement(session, program_ref=program_id)
@@ -660,8 +1046,42 @@ def _outbox_backlog() -> tuple[int, float]:
 REGISTRY.register(OutboxCollector(_outbox_backlog))
 
 
+def _reachable_from_the_internet(address: str) -> bool:
+    """Whether this caller could have come from outside the deployment.
+
+    Parsed rather than prefix-matched. The prefix list this replaced accepted 172.2.x.x
+    as private -- it is not, the RFC1918 block starts at 172.16 -- so a public address
+    one typo away from the intended range could read the metrics.
+
+    An address that does not parse is treated as external. A scraper has an IP; something
+    arriving without one is not a case to hold the door open for.
+    """
+    try:
+        return ip_address(address).is_global
+    except ValueError:
+        return True
+
+
 @app.get("/metrics")
-def metrics():
+def metrics(request: Request):
+    """Counters, for a scraper on the same network or one holding METRICS_TOKEN.
+
+    This was served to anyone who asked. Prometheus output is not sensitive in the way a
+    record is, but it is an operational map, and publishing it is a choice rather than a
+    default worth inheriting.
+    """
+    token = os.getenv("METRICS_TOKEN", "")
+    if token:
+        header = request.headers.get("authorization", "")
+        presented = header[7:] if header.lower().startswith("bearer ") else ""
+        if not compare_digest(presented, token):
+            raise HTTPException(401, "Metrics require the configured bearer token")
+    elif _reachable_from_the_internet(client_address(request)):
+        raise HTTPException(
+            403,
+            "Metrics are served to a scraper on this network. Set METRICS_TOKEN to "
+            "scrape from elsewhere.",
+        )
     return Response(content=render(), media_type=CONTENT_TYPE_LATEST)
 
 
@@ -675,8 +1095,7 @@ notification_transport = ConsoleNotificationTransport()
 @app.post("/claims/{claim_id}/follow", status_code=202)
 def follow_claim(claim_id: str, body: FollowRequest):
     """Ask to be told when this claim changes. No account, by design."""
-    if session_factory is None:
-        raise HTTPException(409, "Following a claim requires PERSISTENCE_MODE=postgres")
+    _require_database("Following a claim")
     with session_factory.begin() as session:
         claim = session.scalar(
             select(ClaimRecord).where(ClaimRecord.external_id == claim_id)
@@ -705,10 +1124,24 @@ def follow_claim(claim_id: str, body: FollowRequest):
     return {"status": "check_your_email"}
 
 
+class SubscriptionToken(BaseModel):
+    """The token from a notification message.
+
+    In the body rather than the query string, for the reason #12 moved the funder consent
+    token there: a URL is written to access logs, kept in browser history and handed to
+    the next site in a Referer. This token is a bearer credential for somebody's
+    subscription, and `/funding/name-consent` already treats its equivalent this way.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=16, max_length=128)
+
+
 @app.post("/notifications/confirm")
-def confirm_following(token: str):
-    if session_factory is None:
-        raise HTTPException(409, "Notifications require PERSISTENCE_MODE=postgres")
+def confirm_following(body: SubscriptionToken):
+    token = body.token
+    _require_database("Notifications")
     with session_factory.begin() as session:
         subscription = resolve_token(session, token)
         if subscription is None:
@@ -720,10 +1153,10 @@ def confirm_following(token: str):
 
 
 @app.post("/notifications/unsubscribe")
-def unsubscribe_from_claim(token: str):
+def unsubscribe_from_claim(body: SubscriptionToken):
     """One click, no account, and honoured immediately."""
-    if session_factory is None:
-        raise HTTPException(409, "Notifications require PERSISTENCE_MODE=postgres")
+    token = body.token
+    _require_database("Notifications")
     with session_factory.begin() as session:
         subscription = resolve_token(session, token)
         if subscription is None:
@@ -741,28 +1174,28 @@ def _csv_response(body: str, filename: str) -> Response:
 
 
 @app.get("/export/programs/{program_id}/money-trail.csv")
-def export_money_trail(program_id: str):
+def export_money_trail(program_id: str, request: Request, response: Response):
     """Public, like the money trail it serialises."""
-    if session_factory is None:
-        raise HTTPException(409, "Export requires PERSISTENCE_MODE=postgres")
+    _require_database("Export")
+    enforce_rate_limit(request, response)
     with session_factory() as session:
         body = money_trail_csv(session, program_id)
     return _csv_response(body, f"{program_id}-money-trail.csv")
 
 
 @app.get("/export/programs/{program_id}/outcomes.csv")
-def export_outcomes(program_id: str):
-    if session_factory is None:
-        raise HTTPException(409, "Export requires PERSISTENCE_MODE=postgres")
+def export_outcomes(program_id: str, request: Request, response: Response):
+    _require_database("Export")
+    enforce_rate_limit(request, response)
     with session_factory() as session:
         body = outcomes_csv(session, program_id)
     return _csv_response(body, f"{program_id}-outcomes.csv")
 
 
 @app.get("/export/claims/{claim_id}/provenance.csv")
-def export_provenance(claim_id: str):
-    if session_factory is None:
-        raise HTTPException(409, "Export requires PERSISTENCE_MODE=postgres")
+def export_provenance(claim_id: str, request: Request, response: Response):
+    _require_database("Export")
+    enforce_rate_limit(request, response)
     with session_factory() as session:
         if not claim_exists(session, claim_id):
             raise HTTPException(404, "Claim not found")
@@ -771,7 +1204,9 @@ def export_provenance(claim_id: str):
 
 
 @app.get("/export/claims/{claim_id}/evidence.csv")
-def export_evidence(claim_id: str, user: CurrentUser = None):
+def export_evidence(
+    claim_id: str, request: Request, response: Response, user: CurrentUser = None
+):
     """Exactly the rows this reader could already open, one at a time.
 
     Decided here against the session rather than inside the serialiser, so an export
@@ -779,8 +1214,8 @@ def export_evidence(claim_id: str, user: CurrentUser = None):
     that refuses what every other route permits. The per-row check is the same function
     the evidence endpoint uses, so the two cannot drift apart.
     """
-    if session_factory is None:
-        raise HTTPException(409, "Export requires PERSISTENCE_MODE=postgres")
+    _require_database("Export")
+    enforce_rate_limit(request, response)
     with session_factory() as session:
         if not claim_exists(session, claim_id):
             raise HTTPException(404, "Claim not found")
@@ -859,6 +1294,27 @@ def project(project_id: str):
     return store.project()
 
 
+@app.get("/claims")
+def claims(status: str | None = None, program: str | None = None, user: CurrentUser = None):
+    """Claims, optionally by status and program.
+
+    The verifier workspace named one claim in its source, so a second organisation's work
+    was unreachable and the queue its own comment described did not exist.
+
+    Drafts are left out for anyone but the organisation that wrote them. Any claim can
+    still be read by its identifier -- that is the transparency this product is for -- but
+    enumerating them would publish an organisation's unfinished statements the moment they
+    were written, which is a different thing from making the finished ones inspectable.
+    """
+    _require_database("Listing claims")
+    own_drafts = (
+        user.organization_external_id
+        if user and user.role in {Role.OPERATOR, Role.ADMIN}
+        else None
+    )
+    return database_read("claims", status, program, own_drafts)
+
+
 @app.get("/claims/{claim_id}")
 def claim(claim_id: str):
     if session_factory:
@@ -866,6 +1322,99 @@ def claim(claim_id: str):
     if claim_id != store.claim["id"]:
         raise HTTPException(404, "Claim not found")
     return store.claim
+
+
+# The read-only API third parties query. Mounted here because this module owns the
+# wiring; the contract lives in public_api.
+public_api.register(
+    app,
+    read=database_read,
+    claims_list=lambda program: database_read("claims", None, program, None) or [],
+)
+
+
+@app.post("/claims/{claim_id}/publish", status_code=201)
+def publish_claim(response: Response, request: Request, claim_id: str, user: CurrentUser = None):
+    """Publish a claim as a public proof. There is no route that unpublishes it.
+
+    201 the first time and 200 afterwards. Publishing twice is a no-op by design -- the
+    timestamp does not move -- and answering "created" to a call that created nothing is
+    the kind of small lie a client eventually depends on.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    _require_database("Publishing")
+    service = ClaimPublicationService()
+    published = _tenant_write(
+        lambda session: service.publish(
+            session,
+            actor=actor,
+            claim_id=claim_id,
+            correlation_id=request.state.correlation_id,
+        )
+    )
+    if published.get("alreadyPublished"):
+        response.status_code = 200
+    return published
+
+
+@app.get("/claims/{claim_id}/proof")
+def claim_proof(claim_id: str):
+    """A published claim, for a reader with no account and no context.
+
+    404 for a claim nobody published, so that publication is a decision an organisation
+    made rather than a default it was subjected to.
+    """
+    _require_database("This")
+    return database_read("proof", claim_id)
+
+
+#: How long a badge may be believed. A verification that has been withdrawn is the one
+#: thing an embedded badge must not keep asserting, and the cost of being wrong is far
+#: higher than the cost of a request.
+BADGE_MAX_AGE_SECONDS = 300
+
+#: Deliberately not a single "verified or not". A challenged claim says so, because the
+#: whole point of the badge updating is that a reader learns when it stopped being true.
+BADGE_APPEARANCE: dict[str, tuple[str, str]] = {
+    "VERIFIED": ("Independently verified", "#3fb68b"),
+    "CHALLENGED": ("Verification withdrawn", "#e3a23b"),
+    "REJECTED": ("Rejected by the verifier", "#e3a23b"),
+    "REVOKED": ("Revoked", "#c2543d"),
+    "VERIFICATION_PENDING": ("Verification pending", "#8fa3a3"),
+    "EVIDENCE_PENDING": ("Evidence pending", "#8fa3a3"),
+}
+
+
+@app.get("/claims/{claim_id}/badge.svg")
+def claim_badge(claim_id: str):
+    """A badge an organisation can embed on its own site.
+
+    It reflects the claim's status now. A badge that cached "verified" for ever would be
+    actively harmful: the moment a claim is challenged, every copy of it in the world is
+    asserting something this system has stopped standing behind. Hence a short max-age and
+    `must-revalidate` rather than a long one, and the rendered date so a stale copy shows
+    its own age instead of hiding it.
+    """
+    _require_database("This")
+    proof = database_read("proof", claim_id)
+    status = proof["claim"]["status"]
+    label, colour = BADGE_APPEARANCE.get(status, ("Status unknown", "#5b6664"))
+    rendered = datetime.now(UTC).strftime("%d %b %Y")
+    width = 116 + 7 * len(label)
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="44" role="img" aria-label="ImpactGraph: {label}">
+  <title>ImpactGraph: {label} (as at {rendered})</title>
+  <rect width="{width}" height="44" rx="6" fill="#0e1e1e"/>
+  <circle cx="18" cy="22" r="6" fill="{colour}"/>
+  <text x="32" y="19" fill="#f4fafa" font-family="system-ui,sans-serif" font-size="13">{label}</text>
+  <text x="32" y="34" fill="#8fa3a3" font-family="system-ui,sans-serif" font-size="10">ImpactGraph · {rendered}</text>
+</svg>"""
+    return Response(
+        content=svg,
+        media_type="image/svg+xml",
+        headers={
+            "Cache-Control": f"public, max-age={BADGE_MAX_AGE_SECONDS}, must-revalidate"
+        },
+    )
 
 
 @app.get("/claims/{claim_id}/provenance")
@@ -896,6 +1445,306 @@ def evidence(evidence_id: str, user: CurrentUser = None):
     return store.evidence[evidence_id]
 
 
+def _tenant_write(operation):
+    """Run a tenant creation and map its domain errors onto the HTTP contract."""
+    try:
+        with session_factory.begin() as session:
+            return operation(session)
+    except AuthorizationError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except IdempotencyConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (ValueError, DomainConflictError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/organizations", status_code=201)
+def create_organization(
+    request: Request,
+    body: OrganizationCreateRequest,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    """Onboard an organisation and its first person. Administrators only.
+
+    There is no public signup: who may act as an operator or a verifier is not something
+    to leave open. A verifier still cannot attest until its wallet has been proven and
+    granted VERIFIER_ROLE, which the response says.
+    """
+    actor = actor_for(require_user(user, {Role.ADMIN}))
+    key = require_idempotency(idempotency_key)
+    _require_database("Onboarding")
+    service = OnboardingApplicationService(settings.chain_id)
+    return _tenant_write(
+        lambda session: service.create_organization(
+            session,
+            actor=actor,
+            organization_id=body.id,
+            name=body.name,
+            kind=body.kind,
+            user_email=body.userEmail,
+            user_name=body.userName,
+            password_hash=hash_password(body.userPassword),
+            correlation_id=request.state.correlation_id,
+            idempotency_key=key,
+        )
+    )
+
+
+@app.post("/organizations/verifier-role", status_code=202)
+def grant_verifier_role(
+    request: Request,
+    body: VerifierRoleRequest,
+    background_tasks: BackgroundTasks,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    """Grant a verifier's proven wallet VERIFIER_ROLE on the registry.
+
+    `createAttestation` checks the role of the address that signed it, and a verifier signs
+    with their own wallet, so without this a newly onboarded verifier can sign nothing.
+    """
+    actor = actor_for(require_user(user, {Role.ADMIN}))
+    key = require_idempotency(idempotency_key)
+    _require_database("Granting a role")
+    service = OnboardingApplicationService(settings.chain_id)
+    response = _tenant_write(
+        lambda session: service.grant_verifier_role(
+            session,
+            actor=actor,
+            user_email=body.userEmail,
+            correlation_id=request.state.correlation_id,
+            idempotency_key=key,
+        )
+    )
+    if response.get("operationId"):
+        background_tasks.add_task(process_backend_operation, UUID(response["operationId"]))
+    return response
+
+
+class FunderNameChoice(BaseModel):
+    """The funder's decision, with the link that authorises it.
+
+    The token is in the body rather than the path because a path is written down: the
+    access log, the proxy log, the browser history and the Referer of anything the page
+    links to. Hashing it at rest and then handing it to the one component guaranteed to
+    record it would have been pointless.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=32, max_length=128)
+    publish: bool
+
+
+@app.post("/funding/{funding_id}/name-consent", status_code=201)
+def request_funder_name_consent(request: Request, funding_id: str, user: CurrentUser = None):
+    """Issue a link the funder can use to decide whether they are named.
+
+    Requesting it publishes nothing. There is deliberately no endpoint by which an
+    operator, who knows the name already, can publish it: that choice belongs to the
+    person it names.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    _require_database("This")
+    service = FunderNameService()
+    return _tenant_write(
+        lambda session: service.issue_consent_link(
+            session,
+            actor=actor,
+            funding_id=funding_id,
+            correlation_id=request.state.correlation_id,
+        )
+    )
+
+
+@app.post("/funding/name-consent")
+def choose_funder_name_publication(request: Request, body: FunderNameChoice):
+    """The funder's own decision, made with their own link.
+
+    Unauthenticated because the link is the authority, in the same way the notification
+    confirmation link is. Withdrawable, because a person changing their mind about being
+    named is exactly what this exists to respect.
+    """
+    _require_database("This")
+    service = FunderNameService()
+    return _tenant_write(
+        lambda session: service.set_publication(
+            session,
+            token=body.token,
+            publish=body.publish,
+            correlation_id=request.state.correlation_id,
+        )
+    )
+
+
+@app.get("/operator/programs")
+def operator_programs(user: CurrentUser = None):
+    """The programs this operator may file evidence under, with their projects.
+
+    Scoped to the caller's organisation rather than returning everything: the operator
+    workspace had one project named in its source, and listing every tenant's projects to
+    replace that would be a worse answer than the constant was.
+    """
+    authenticated = require_user(user, {Role.OPERATOR, Role.ADMIN})
+    _require_database("Listing programs")
+    with session_factory() as session:
+        query = select(ProgramRecord).order_by(ProgramRecord.name)
+        if authenticated.role != Role.ADMIN:
+            query = query.where(
+                ProgramRecord.operator_org_ref == authenticated.organization_external_id
+            )
+        programs = list(session.scalars(query))
+        projects = {
+            program.id: [
+                {"id": entity.external_id, "name": (entity.data or {}).get("name", entity.external_id)}
+                for entity in session.scalars(
+                    select(DomainEntityRecord).where(
+                        DomainEntityRecord.entity_type == "PROJECT",
+                        DomainEntityRecord.program_id == program.id,
+                    )
+                )
+            ]
+            for program in programs
+        }
+        return [
+            {
+                "id": program.slug,
+                "name": program.name,
+                "region": program.region,
+                "operator": program.operator_name,
+                "chainStatus": program.chain_status,
+                "projects": projects.get(program.id, []),
+            }
+            for program in programs
+        ]
+
+
+@app.post("/programs", status_code=201)
+def create_program(
+    request: Request,
+    body: ProgramCreateRequest,
+    background_tasks: BackgroundTasks,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    """Create a program and queue the registry entity it needs to be usable.
+
+    The program is returned PENDING. It cannot accept evidence until the worker has
+    observed the ProgramCreated event, because `registerEvidence` reverts with
+    UnknownProgram against a registry that has never heard of it.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    key = require_idempotency(idempotency_key)
+    _require_database("Creating a program")
+    service = TenantApplicationService(settings.chain_id)
+    response = _tenant_write(
+        lambda session: service.create_program(
+            session,
+            actor=actor,
+            program_id=body.id,
+            name=body.name,
+            region=body.region,
+            verification_threshold=body.verificationThreshold,
+            correlation_id=request.state.correlation_id,
+            idempotency_key=key,
+        )
+    )
+    if response.get("operationId"):
+        background_tasks.add_task(process_backend_operation, UUID(response["operationId"]))
+    return response
+
+
+@app.post("/programs/{program_id}/projects", status_code=201)
+def create_project(
+    request: Request,
+    program_id: str,
+    body: ProjectCreateRequest,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    """A project is not a registry entity, so this is a database write and nothing else."""
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    key = require_idempotency(idempotency_key)
+    _require_database("Creating a project")
+    service = TenantApplicationService(settings.chain_id)
+    return _tenant_write(
+        lambda session: service.create_project(
+            session,
+            actor=actor,
+            program_id=program_id,
+            project_id=body.id,
+            name=body.name,
+            correlation_id=request.state.correlation_id,
+            idempotency_key=key,
+        )
+    )
+
+
+@app.post("/programs/{program_id}/registry-entity", status_code=202)
+def retry_program_entity(
+    request: Request,
+    program_id: str,
+    background_tasks: BackgroundTasks,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    """Queue the registry entity again after a failed submission.
+
+    Without this a program whose chain call failed for a transient reason is a tombstone:
+    claims refuse it, evidence refuses it, and its identifier is taken so it cannot be
+    created again. Evidence has always been able to retry; a program could not.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    key = require_idempotency(idempotency_key)
+    _require_database("Retrying a registry entity")
+    service = TenantApplicationService(settings.chain_id)
+    response = _tenant_write(
+        lambda session: service.retry_registry_entity(
+            session,
+            actor=actor,
+            program_id=program_id,
+            correlation_id=request.state.correlation_id,
+            idempotency_key=key,
+        )
+    )
+    if response.get("operationId"):
+        background_tasks.add_task(process_backend_operation, UUID(response["operationId"]))
+    return response
+
+
+@app.post("/claims", status_code=201)
+def create_claim(
+    request: Request,
+    body: ClaimCreateRequest,
+    background_tasks: BackgroundTasks,
+    user: CurrentUser = None,
+    idempotency_key: str | None = Header(default=None),
+):
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    key = require_idempotency(idempotency_key)
+    _require_database("Creating a claim")
+    service = TenantApplicationService(settings.chain_id)
+    response = _tenant_write(
+        lambda session: service.create_claim(
+            session,
+            actor=actor,
+            claim_id=body.id,
+            program_id=body.programId,
+            project_id=body.projectId,
+            statement=body.statement,
+            outcome_id=body.outcomeId,
+            correlation_id=request.state.correlation_id,
+            idempotency_key=key,
+        )
+    )
+    if response.get("operationId"):
+        background_tasks.add_task(process_backend_operation, UUID(response["operationId"]))
+    return response
+
+
 @app.post("/evidence", status_code=201)
 async def upload_evidence(
     request: Request,
@@ -904,6 +1753,10 @@ async def upload_evidence(
     evidence_type: Annotated[str, Form()],
     file: Annotated[UploadFile, File()],
     visibility: Annotated[str, Form()] = "RESTRICTED",
+    # Declared by the operator, because nothing else can know whether a photograph has a
+    # person in it. Registration is refused for such an object until a lawful basis and a
+    # controller have been recorded against it.
+    personal_data: Annotated[bool, Form()] = False,
     user: CurrentUser = None,
     idempotency_key: str | None = Header(default=None),
 ):
@@ -938,6 +1791,10 @@ async def upload_evidence(
                     content_hash=content_hash,
                     mime_type=file.content_type or "application/octet-stream",
                     visibility=normalized_visibility,
+                    personal_data=personal_data,
+                    perceptual_hash=perceptual_hash_for(
+                        file.content_type or "", content
+                    ),
                     correlation_id=request.state.correlation_id,
                     idempotency_key=key,
                 )
@@ -1071,6 +1928,100 @@ def analyze_evidence(evidence_id: str, user: CurrentUser = None):
     return item
 
 
+def _require_confirmation(analyzed: dict[str, Any] | None, confirmed: list[str]) -> list[str]:
+    """The fields a person confirmed, refusing the review when any flagged one is missing.
+
+    Checked against the extraction as the model produced it, not the one being submitted:
+    an operator who edits amountMinor to something they did not read off the document must
+    still say so, and a client could otherwise clear a flag by changing the value.
+    """
+    outstanding = sorted(set(review_required_fields(analyzed or {})) - set(confirmed))
+    if outstanding:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "CONFIRMATION_REQUIRED",
+                "message": "These fields must be confirmed by a person before registration",
+                "fields": outstanding,
+            },
+        )
+    return sorted(set(confirmed) & set(SCHEMA_FIELDS))
+
+
+@app.get("/data-subjects/{subject_reference}")
+def data_subject_record(subject_reference: str, user: CurrentUser = None):
+    """Everything held about one person, for answering a subject access request.
+
+    Scoped to the controller: an operator sees the subjects of programmes its own
+    organisation is answerable for, and an administrator sees all of them. It reports what
+    is held rather than the contents, so this cannot become a way to read every restricted
+    object in the system by guessing a reference.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    _require_database("This")
+    service = DataProtectionApplicationService(evidence_storage)
+    with session_factory() as session:
+        return service.subject_record(
+            session, actor=actor, subject_reference=subject_reference
+        )
+
+
+@app.post("/evidence/{evidence_id}/data-protection", status_code=201)
+def declare_data_protection(
+    request: Request,
+    evidence_id: str,
+    body: DataProtectionRequest,
+    user: CurrentUser = None,
+):
+    """Record what makes holding this evidence lawful, and who is answerable for it."""
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    _require_evidence_management(evidence_id, user)
+    _require_database("Recording this")
+    service = DataProtectionApplicationService(evidence_storage)
+    return _tenant_write(
+        lambda session: service.declare(
+            session,
+            actor=actor,
+            evidence_id=evidence_id,
+            lawful_basis=body.lawfulBasis,
+            special_category=body.specialCategory,
+            controller_org_ref=body.controllerOrgRef,
+            joint_controller_org_ref=body.jointControllerOrgRef,
+            subject_reference=body.subjectReference,
+            purpose=body.purpose,
+            retain_until=body.retainUntil,
+            correlation_id=request.state.correlation_id,
+        )
+    )
+
+
+@app.post("/evidence/{evidence_id}/erase")
+def erase_evidence(
+    request: Request,
+    evidence_id: str,
+    body: ErasureRequest,
+    user: CurrentUser = None,
+):
+    """Destroy the key, making the object unrecoverable, and restate what rested on it.
+
+    The onchain commitment is not withdrawn and the response says so. It records that
+    these bytes were once committed, which remains true after the bytes are gone.
+    """
+    actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
+    _require_evidence_management(evidence_id, user)
+    _require_database("Erasure")
+    service = DataProtectionApplicationService(evidence_storage)
+    return _tenant_write(
+        lambda session: service.erase(
+            session,
+            actor=actor,
+            evidence_id=evidence_id,
+            reason=body.reason,
+            correlation_id=request.state.correlation_id,
+        )
+    )
+
+
 @app.post("/evidence/{evidence_id}/review")
 def review_evidence(
     evidence_id: str,
@@ -1086,6 +2037,7 @@ def review_evidence(
                 raise HTTPException(404, "Evidence not found")
             if item.workflow_status != "ANALYZED":
                 raise HTTPException(409, "Only ANALYZED evidence can be reviewed")
+            confirmed = _require_confirmation(item.extraction, body.confirmed)
             reviewed_extraction = body.extraction.model_dump(mode="json")
             item.extraction = reviewed_extraction
             item.reconciliation = evidence_reconciliation.reconcile(
@@ -1096,6 +2048,7 @@ def review_evidence(
             item.workflow_status = "REVIEWED"
             metadata = dict(item.metadata_json or {})
             metadata["reviewedBy"] = "Global Water Initiative"
+            metadata["confirmedFields"] = confirmed
             item.metadata_json = metadata
             session.flush()
             return evidence_record_response(item)
@@ -1104,6 +2057,7 @@ def review_evidence(
         raise HTTPException(404, "Evidence not found")
     if item["workflowStatus"] != "ANALYZED":
         raise HTTPException(409, "Only ANALYZED evidence can be reviewed")
+    item["confirmedFields"] = _require_confirmation(item.get("extraction"), body.confirmed)
     item["extraction"] = body.extraction.model_dump(mode="json")
     item["workflowStatus"] = "REVIEWED"
     item["reviewedBy"] = "Global Water Initiative"
@@ -1392,10 +2346,17 @@ def _registered_evidence_hash(record: EvidenceRecord) -> str:
 
 
 @app.post("/evidence/{evidence_id}/verify-integrity")
-def integrity(request: Request, evidence_id: str, user: CurrentUser = None):
+def integrity(
+    request: Request, response: Response, evidence_id: str, user: CurrentUser = None
+):
     # Deliberately public: verifying that evidence still matches its published commitment
     # is the product's central claim, and a donor must be able to check it without an
     # account. Visibility is enforced instead -- non-public evidence requires a session.
+    #
+    # Rate limited because it is the one public route that does real work per call: it
+    # reads an object out of storage and hashes it. Anonymous, unbounded and expensive is
+    # the combination worth not leaving open.
+    enforce_rate_limit(request, response)
     _require_evidence_visibility(evidence_id, user)
     if session_factory:
         with session_factory.begin() as session:
@@ -1406,6 +2367,20 @@ def integrity(request: Request, evidence_id: str, user: CurrentUser = None):
                 raise HTTPException(404, "Evidence not found")
             try:
                 content = evidence_storage.retrieve(record.storage_uri)
+            except EvidenceUnrecoverable as exc:
+                # Erased, not broken and not absent. Saying "could not be read back" here
+                # would describe a fault, when what happened is that someone exercised a
+                # right and this system did what it said it would.
+                record.integrity_status = "UNRECOVERABLE"
+                raise HTTPException(
+                    410,
+                    detail={
+                        "code": "EVIDENCE_ERASED",
+                        "message": "This evidence was erased at the request of its subject "
+                        "or by its retention schedule. The onchain commitment remains and "
+                        "still records that these bytes were once committed.",
+                    },
+                ) from exc
             except (OSError, ValueError) as exc:
                 raise HTTPException(
                     409,
@@ -1454,14 +2429,18 @@ def integrity(request: Request, evidence_id: str, user: CurrentUser = None):
 
 
 @app.post("/demo/evidence/{evidence_id}/tamper")
-def tamper(request: Request, evidence_id: str, user: CurrentUser = None):
+def tamper(
+    request: Request, response: Response, evidence_id: str, user: CurrentUser = None
+):
     require_user(user, {Role.ADMIN})
     if settings.demo_mode == "sepolia":
         raise HTTPException(409, "Refusing to alter evidence in a public demo run")
     storage_uri = _evidence_storage_uri(evidence_id)
     evidence_storage.overwrite(storage_uri, TAMPERED_INVOICE_BYTES)
     # The same correlation identifier covers the tamper and the check that detects it.
-    return integrity(request, evidence_id, user=user)
+    # Keyword arguments: this calls the route function directly, so a positional list is
+    # a thing that breaks silently the next time the signature gains a dependency.
+    return integrity(request=request, response=response, evidence_id=evidence_id, user=user)
 
 
 def _evidence_storage_uri(evidence_id: str) -> str:
@@ -1515,8 +2494,7 @@ def create_verifier_intent(
             },
         )
     key = require_idempotency(idempotency_key)
-    if session_factory is None:
-        raise HTTPException(409, "Durable verifier intents require PERSISTENCE_MODE=postgres")
+    _require_database("Durable verifier intents")
     if not settings.registry_address:
         raise HTTPException(503, "IMPACT_REGISTRY_ADDRESS is required")
     _assert_wallet_may_verify(verifier.wallet_address)
@@ -1548,8 +2526,7 @@ def reject_verification_request(
 ):
     verifier = require_user(user, {Role.VERIFIER})
     key = require_idempotency(idempotency_key)
-    if session_factory is None:
-        raise HTTPException(409, "Durable verification decisions require PERSISTENCE_MODE=postgres")
+    _require_database("Durable verification decisions")
     service = VerificationApplicationService(settings.chain_id, settings.registry_address)
     try:
         with session_factory.begin() as session:
@@ -1578,8 +2555,7 @@ def record_wallet_submission(
     user: CurrentUser = None,
 ):
     verifier = require_user(user, {Role.VERIFIER})
-    if session_factory is None:
-        raise HTTPException(409, "Durable wallet submissions require PERSISTENCE_MODE=postgres")
+    _require_database("Durable wallet submissions")
     service = VerificationApplicationService(settings.chain_id, settings.registry_address)
     try:
         with session_factory.begin() as session:
@@ -1602,8 +2578,7 @@ def record_wallet_submission(
 
 @app.get("/blockchain/operations/{operation_id}")
 def blockchain_operation(operation_id: UUID):
-    if session_factory is None:
-        raise HTTPException(409, "Durable operations require PERSISTENCE_MODE=postgres")
+    _require_database("Durable operations")
     with session_factory() as session:
         operation = session.get(BlockchainOperationRecord, operation_id)
         if operation is None:

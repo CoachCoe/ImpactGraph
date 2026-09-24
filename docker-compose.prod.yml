@@ -4,8 +4,9 @@
 # same images push to any registry. `scripts/deploy.sh` drives it.
 #
 # Not included, and required before this faces real users: TLS termination, a managed
-# database with backups, secret management, and authentication (the API has none -- see
-# docs/security.md).
+# database with backups, production secret management, MFA/SSO and identity proofing.
+# The application does provide password sessions and role/project authorization; see
+# docs/security.md for the boundary.
 name: impactgraph
 
 services:
@@ -46,9 +47,15 @@ services:
       BLOCK_EXPLORER_URL: ${BLOCK_EXPLORER_URL:-}
       BLOCKCHAIN_CONFIRMATIONS_REQUIRED: ${BLOCKCHAIN_CONFIRMATIONS_REQUIRED:-2}
       AI_PROVIDER: ${AI_PROVIDER:-mock}
+      TINKER_API_KEY: ${TINKER_API_KEY:-}
+      EXTRACTION_MODEL: ${EXTRACTION_MODEL:-thinkingmachines/Inkling-Small}
+      EVIDENCE_ENCRYPTION_KEY: ${EVIDENCE_ENCRYPTION_KEY:?set EVIDENCE_ENCRYPTION_KEY}
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-1048576}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+      TRUSTED_PROXY_ADDRESSES: ${TRUSTED_PROXY_ADDRESSES:-}
     volumes:
       - evidence-data:/data/evidence
+      - evidence-keys:/data/evidence-keys
     ports:
       - "${API_PORT:-8000}:8000"
     # The image probes liveness, so a transient dependency fault cannot get the
@@ -92,8 +99,12 @@ services:
       EVM_SENDER_ADDRESS: ${EVM_SENDER_ADDRESS:-}
       BLOCKCHAIN_CONFIRMATIONS_REQUIRED: ${BLOCKCHAIN_CONFIRMATIONS_REQUIRED:-2}
       AI_PROVIDER: ${AI_PROVIDER:-mock}
+      TINKER_API_KEY: ${TINKER_API_KEY:-}
+      EXTRACTION_MODEL: ${EXTRACTION_MODEL:-thinkingmachines/Inkling-Small}
+      EVIDENCE_ENCRYPTION_KEY: ${EVIDENCE_ENCRYPTION_KEY:?set EVIDENCE_ENCRYPTION_KEY}
     volumes:
       - evidence-data:/data/evidence
+      - evidence-keys:/data/evidence-keys
     # Scraped separately from the API: the worker is its own process and its
     # counters live in its own memory.
     ports:
@@ -112,6 +123,7 @@ services:
         # NEXT_PUBLIC_* values are inlined at build time, so a rebuild is required to
         # change them. Changing them in the environment alone has no effect.
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:?set NEXT_PUBLIC_API_BASE_URL}
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:?set NEXT_PUBLIC_SITE_URL}
         NEXT_PUBLIC_RPC_URL: ${NEXT_PUBLIC_RPC_URL:-}
         NEXT_PUBLIC_BLOCK_EXPLORER_URL: ${NEXT_PUBLIC_BLOCK_EXPLORER_URL:-}
         NEXT_PUBLIC_CHAIN_ID: ${CHAIN_ID:-}
@@ -127,3 +139,6 @@ services:
 volumes:
   postgres-data:
   evidence-data:
+  # Separate from evidence objects so crypto-erasure is not undone by restoring both
+  # from the same backup generation. See docs/key-rotation.md.
+  evidence-keys:

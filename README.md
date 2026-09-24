@@ -8,6 +8,9 @@ Ethereum is used for immutable commitments, provenance, and identified attestati
 for moving the program's fiat money or storing documents. AI extracts and correlates; it
 cannot establish verification.
 
+Product sequencing and the boundary between what this POC de-risks and what must happen
+next are in the [product roadmap](docs/product-roadmap.md).
+
 ```text
 Donor / Operator / Verifier UI
               ↓
@@ -106,8 +109,15 @@ One command, nothing else installed but Docker:
 
 ```bash
 cd contracts && forge build && cd ..   # the API image deploys from this artifact
+export TINKER_API_KEY=...              # the demo reads uploaded documents with a model
 ./scripts/demo.sh up
 ```
+
+The demo runs `AI_PROVIDER=tinker`, so an uploaded invoice is read by
+`thinkingmachines/Inkling-Small` rather than matched against a fixture. `demo.sh up`
+refuses to start without a key rather than failing on the operator's first upload. To run
+it offline instead, set `AI_PROVIDER=mock` in `docker-compose.demo.yml`; the fixture
+reader recognises only the seeded `INV-8291`.
 
 That starts a disposable chain, deploys the registry, creates the onchain program and
 claim entities, migrates, seeds, and smoke-tests the result — then prints the URLs. The
@@ -121,8 +131,9 @@ The chain publishes port 8545 so a browser wallet can reach it. If something els
 host already holds that port, the wallet will silently talk to the wrong chain — set
 `CHAIN_PORT` and `PUBLIC_RPC_URL` to move it.
 
-On a host, set `PUBLIC_API_URL` and `PUBLIC_RPC_URL` to the addresses a visitor's browser
-will use; they are inlined into the web bundle at build time.
+On a host, set `PUBLIC_SITE_URL`, `PUBLIC_API_URL` and `PUBLIC_RPC_URL` to the addresses a
+visitor's browser will use; they are inlined into the web bundle at build time. The site
+URL is also the canonical origin used by social cards and copied proof badges.
 
 This stack is deliberately separate from `docker-compose.prod.yml`, which points at a real
 network and must never run a chain of its own.
@@ -206,10 +217,10 @@ available as `make deploy-build`, `make deploy-up`, `make deploy-release` and so
 provenance read models, the web app, and that evidence integrity resolves the stored object
 and reports MATCH — not merely that a container started.
 
-Preflight refuses to start when the contract ABI has not been built, when `AI_PROVIDER`
-names a provider that does not exist, and, on Sepolia, when `CHAIN_ID` is wrong, the
-registry address is missing, or `EVM_SENDER_ADDRESS` is set — the backend must not sign on a
-public network.
+Preflight refuses to start when the contract ABI has not been built, evidence encryption
+has no key, `AI_PROVIDER` names a provider that does not exist, Tinker has no API key, or,
+on Sepolia, when `CHAIN_ID` is wrong, the registry address is missing, or
+`EVM_SENDER_ADDRESS` is set — the backend must not sign on a public network.
 
 `NEXT_PUBLIC_*` values are inlined into the web bundle at build time, so changing them
 requires a rebuild rather than a restart.
@@ -256,8 +267,10 @@ it. `/health/live` is dependency-free and is what the container probes; `/health
 checks PostgreSQL, the RPC and the evidence store, answers 503 with a per-component
 verdict, and is what the compose dependency gates and the smoke tests use.
 
-`/metrics` exposes the API's counters, and the worker runs its own exporter on port 9100
-because it is a separate process. The two numbers worth watching are the outbox depth and
+`/metrics` serves the API's counters to a scraper on the deployment's own network, or to
+one presenting `METRICS_TOKEN` as a bearer token; setting that token replaces the network
+check rather than adding to it. The worker runs its own exporter on port 9100 because it
+is a separate process. The two numbers worth watching are the outbox depth and
 the age of its oldest unsubmitted row: a stalled outbox is the one failure this system
 would otherwise hide, since every read model keeps answering exactly as before.
 
@@ -279,7 +292,7 @@ make test-contracts
 make test-api
 make test-web
 make test-browser-e2e
-cd apps/web && npm run build
+cd apps/web && npm run lint && npm run build
 ```
 
 With PostgreSQL, Anvil, and a deployed local registry configured, run
@@ -293,10 +306,61 @@ See [architecture](docs/architecture.md), [trust model](docs/trust-model.md),
 [hashing](docs/hashing.md), the [demo script](docs/demo-script.md), the
 [security notes](docs/security.md), and the [decision record](docs/decisions.md).
 
+## Money before it has a programme
+
+Contributions arrive against an organisation and are assigned to a programme afterwards,
+or not yet. `GET /financial/organizations/{ref}/position` publishes what has been given
+and how much of it is still unassigned, per currency — one of the four things the
+operating organisation commits to publishing, and not answerable per programme, because
+unrestricted money has no programme.
+
+A funding row may stand for many small contributions at once, carrying a contributor count
+instead of a name, so a daily total does not need a row per payment. An individual row is
+kept wherever somebody has asked to be named against what they funded. See ADR-018.
+
+Assignment is one directional: money that has been allocated cannot be moved, because a
+published attribution has already told somebody what their contribution paid for.
+
+```bash
+curl -s localhost:8000/financial/organizations/org-global-water/position
+```
+
+## Reviewing what looks wrong
+
+Verification examines one document at a time, so the patterns that indicate fraud —
+one invoice billed to two funders, one photograph standing in for three deliveries — are
+invisible to it. `POST /risk/scan` runs three deterministic detectors across one
+organisation's own records and posts what it finds to a queue a person decides in.
+
+Nothing it finds changes a claim, notifies anyone outside the organisation, or becomes
+public. Closing a finding requires a reason, and those reasons are the only measure of
+how often the checks were right; `GET /risk/precision` reports it. See ADR-015 to ADR-017.
+
+Near-duplicate image comparison grows faster than a portfolio does, so the HTTP scan
+refuses above a ceiling and large tenants run it out of band:
+
+```bash
+cd apps/api && .venv/bin/python -m impactgraph.cli risk-scan --organization org-global-water
+```
+
+## Asking the people a claim describes
+
+A claim that nobody named in it has been asked about rests on the operating
+organisation's own account. `BENEFICIARY_CONFIRMATION` is a policy requirement that warns
+when nobody has been asked and fails when somebody disputes the delivery.
+
+The channel is **disabled** until the safeguarding review in
+[docs/beneficiary-safeguarding.md](docs/beneficiary-safeguarding.md) is signed off, and
+there is no SMS or USSD transport. Enrolment is deliberately separate in time from
+delivery, because an operator controlling both at once controls who gets asked.
+
 ## Limitations
 
-The banking provider, AI provider, NGO records, outcomes and all demo evidence are
-fictional and deterministic. Never present mock or Anvil results as Ethereum verification.
+The banking activity, NGO records, outcomes and all demo evidence are fictional. Hosted
+Inkling extraction really runs when configured, but it reads a fictional document and its
+self-reported confidence is not an accuracy measurement. Offline extraction is a
+deterministic fixture. Never present model output, mock data or Anvil results as independent
+verification.
 
 What is real: the Solidity registry and its role checks; evidence upload, original-byte
 hashing and the immutability of the registered commitment; integrity verification against the stored bytes; the
@@ -311,8 +375,15 @@ What is not:
 - **No payment *initiation*, by design.** ImpactGraph observes financial activity through
   a `FinancialDataProvider` and never moves money. The provider is a deterministic mock;
   a real adapter implements the same interface without anything downstream changing.
-- **No AI.** The extractor is a fixed dictionary returned for documents containing
-  `INV-8291`. `AI_PROVIDER` set to anything but `mock` fails at startup rather than silently using the mock.
+- **Extraction confidence is self-reported.** A model asked how sure it is produces a
+  plausible number, not a calibrated one, so nothing downstream is gated on it. The fields
+  reconciliation resolves a payment against — invoice number, amount and currency — are
+  confirmed by an operator whatever the model claims, because a single misread digit turns
+  a matched payment into an unmatched one. `AI_PROVIDER` names `mock` or `tinker`, and
+  anything else fails at startup rather than silently using the mock.
+- **PDFs are refused, not read.** Only PNG, JPEG and plain text reach the model. A PDF
+  decoded as text is mojibake, and a model handed mojibake returns confident nonsense;
+  rendering pages to images is the fix and is not built.
 - **Incomplete verifier decisions.** Reject is implemented as an idempotent audited domain
   operation. Request-more-evidence remains disabled because the specification does not define
   whether it returns a claim to EVIDENCE_PENDING or leaves it VERIFICATION_PENDING.
@@ -336,9 +407,11 @@ What is not:
   `GET /blockchain/transactions/{hash}`. The middle two fabricate onchain confirmation and
   the first fabricates a transaction hash. All are listed in
   [security](docs/security.md) rather than left to be discovered.
-- **CI coverage is narrower than the trust boundary.** CI runs Foundry, backend unit/API,
-  frontend unit/type, and production build gates, but not PostgreSQL migrations, Anvil-backed
-  integration, or Playwright. Run `make test-local-e2e` and `make test-browser-e2e` locally
+- **CI coverage is narrower than the trust boundary.** CI runs Foundry, backend unit/API
+  against a PostgreSQL service — so the migrations are applied where they are deployed
+  rather than only against SQLite — frontend lint/unit/type, production build gates, and the
+  Playwright journeys against the full demo stack with `AI_PROVIDER=mock`. It does not
+  run the Anvil-backed evidence integration script; run `make test-local-e2e` locally
   before changing anything on the chain path. Receipt observation is the exception: the
   check that an event came from the configured registry, and not from any contract that
   emits the same signature, is covered against stub RPC objects and needs no chain.

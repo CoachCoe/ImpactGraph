@@ -38,6 +38,10 @@ class VerificationContext:
     required_verifications: int
     current_bundle_hash: str
     operator_id: str
+    #: What the people the claim describes said, where they were asked. None means no
+    #: round has been run, which is not the same as nobody confirming.
+    beneficiary_confirmed: int | None = None
+    beneficiary_disputed: int = 0
 
     @property
     def _current(self) -> tuple[ConfirmedVerification, ...]:
@@ -108,6 +112,7 @@ class VerificationPolicyService:
                 "The operating organisation has attested this claim",
                 "Required operator attestation is missing",
             ),
+            self._beneficiary_requirement(context),
             self._require(
                 "INDEPENDENT_VERIFICATION",
                 len(context.qualifying_issuers) >= context.required_verifications,
@@ -181,6 +186,38 @@ class VerificationPolicyService:
         )
 
     @staticmethod
+    def _beneficiary_requirement(context: VerificationContext) -> PolicyRequirement:
+        """What the people the claim describes said.
+
+        A dispute FAILS: somebody who received the aid says it did not arrive as
+        described, and that is the most direct evidence this system can hold. Nothing
+        above it in the trust model outranks it.
+
+        No round is a WARNING and not a failure. The channel is disabled until the
+        safeguarding review is signed off, so a hard requirement would stall every
+        legitimate claim to enforce a check nobody is allowed to run yet -- and it would
+        make the pressure to switch the channel on come from the wrong direction.
+        """
+        if context.beneficiary_disputed > 0:
+            return PolicyRequirement(
+                "BENEFICIARY_CONFIRMATION",
+                Result.FAIL,
+                f"{context.beneficiary_disputed} of the people asked dispute this delivery",
+            )
+        if context.beneficiary_confirmed is None:
+            return PolicyRequirement(
+                "BENEFICIARY_CONFIRMATION",
+                Result.WARNING,
+                "Nobody the claim describes has been asked. This rests on the operating "
+                "organisation's account of what happened.",
+            )
+        return PolicyRequirement(
+            "BENEFICIARY_CONFIRMATION",
+            Result.PASS,
+            f"{context.beneficiary_confirmed} of the people asked confirm this delivery",
+        )
+
+    @staticmethod
     def _require(name: str, passes: bool, success: str, failure: str) -> PolicyRequirement:
         return PolicyRequirement(
             name, Result.PASS if passes else Result.FAIL, success if passes else failure
@@ -221,7 +258,12 @@ def claim_subgraph(
 
 def claim_provenance_complete(session: Session, claim_id: str) -> bool:
     """Validate the required connected path for one claim, never unrelated graph edges."""
-    edges = list(session.scalars(select(ProvenanceEdgeRecord)))
+    # Every edge consulted below hangs off something reachable backwards from the claim,
+    # so the scoped walk is the whole search space. Reading the table and filtering it in
+    # Python was the circularity claim_subgraph was written to avoid, and it put the cost
+    # of a public route in proportion to the size of the database rather than the length
+    # of one chain.
+    _, edges = claim_subgraph(session, claim_id)
 
     def sources(target_id: str, relationship: str, source_type: str) -> set[str]:
         return {
@@ -230,7 +272,6 @@ def claim_provenance_complete(session: Session, claim_id: str) -> bool:
             if edge.target_id == target_id
             and edge.relationship == relationship
             and edge.source_type == source_type
-            and edge.superseded_by is None
         }
 
     outcomes = sources(claim_id, "SUPPORTS", "OUTCOME")

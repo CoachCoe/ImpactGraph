@@ -21,7 +21,23 @@ x-chain: &chain
   CHAIN_NAME: "Anvil local EVM"
   DEMO_MODE: local
   PERSISTENCE_MODE: postgres
-  AI_PROVIDER: mock
+  # Real extraction: the demo reads the uploaded document with a model rather than
+  # returning a fixture. The key is never baked into the image or this file -- it is read
+  # from the host environment, and scripts/demo.sh refuses to start without it.
+  # Throwaway, like everything else in this stack. A deployment generates its own and
+  # keeps it somewhere the evidence disk is not, because destroying it is the erasure.
+  # A volume of its own, because erasure destroys a key and one backup holding both the
+  # objects and their keys undoes every erasure the moment it is restored.
+  EVIDENCE_KEY_PATH: /data/evidence-keys
+  EVIDENCE_ENCRYPTION_KEY: "${EVIDENCE_ENCRYPTION_KEY:-aW1wYWN0Z3JhcGgtZGVtby1rZXktbm90LXNlY3JldCE=}"
+  # Overridable so the stack can run without a Tinker key: CI and any contributor who
+  # has not got one set AI_PROVIDER=mock, which reads the INV-8291 fixture and refuses
+  # anything else. The default stays real extraction, because that is the demo.
+  AI_PROVIDER: "${AI_PROVIDER:-tinker}"
+  # Not ${VAR:?...}: that would fail `demo.sh down` and `logs` too. Absent, the API
+  # refuses to start, and scripts/demo.sh says so before anything is built.
+  TINKER_API_KEY: "${TINKER_API_KEY:-}"
+  EXTRACTION_MODEL: "${EXTRACTION_MODEL:-thinkingmachines/Inkling-Small}"
   DATABASE_URL: postgresql+psycopg://impactgraph:impactgraph@postgres:5432/impactgraph
 
 services:
@@ -65,7 +81,7 @@ services:
       chain: {condition: service_healthy}
       postgres: {condition: service_healthy}
     environment: *chain
-    volumes: ["evidence-data:/data/evidence"]
+    volumes: ["evidence-data:/data/evidence", "evidence-keys:/data/evidence-keys"]
     restart: "no"
     command:
       - /bin/sh
@@ -86,7 +102,7 @@ services:
       <<: *chain
       APP_ENV: demo
       BLOCKCHAIN_CONFIRMATIONS_REQUIRED: "1"
-    volumes: ["evidence-data:/data/evidence"]
+    volumes: ["evidence-data:/data/evidence", "evidence-keys:/data/evidence-keys"]
     ports: ["${API_PORT:-8000}:8000"]
     # The image probes liveness, so a transient dependency fault cannot get the
     # process replaced. The service_healthy gates below mean "the API can serve",
@@ -112,7 +128,7 @@ services:
     environment:
       <<: *chain
       BLOCKCHAIN_CONFIRMATIONS_REQUIRED: "1"
-    volumes: ["evidence-data:/data/evidence"]
+    volumes: ["evidence-data:/data/evidence", "evidence-keys:/data/evidence-keys"]
     command: ["python", "-m", "impactgraph.cli", "worker", "--interval", "2"]
     # Scraped separately from the API: the worker is its own process and its counters
     # live in its own memory.
@@ -130,7 +146,7 @@ services:
     depends_on:
       api: {condition: service_healthy}
     environment: *chain
-    volumes: ["evidence-data:/data/evidence"]
+    volumes: ["evidence-data:/data/evidence", "evidence-keys:/data/evidence-keys"]
     command:
       - /bin/sh
       - -c
@@ -156,6 +172,7 @@ services:
         # Inlined at build time. The browser reaches the API and the chain directly, so
         # these are the visitor's addresses, not the in-network ones.
         NEXT_PUBLIC_API_BASE_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+        NEXT_PUBLIC_SITE_URL: ${PUBLIC_SITE_URL:-http://localhost:3000}
         NEXT_PUBLIC_RPC_URL: ${PUBLIC_RPC_URL:-http://localhost:8545}
         NEXT_PUBLIC_CHAIN_ID: "31337"
         NEXT_PUBLIC_CHAIN_NAME: "Anvil local EVM"
@@ -173,3 +190,6 @@ services:
 
 volumes:
   evidence-data:
+  # Separate from the objects on purpose. A deployment gives this its own backup policy,
+  # because a restore that predates an erasure brings the key back and undoes it.
+  evidence-keys:

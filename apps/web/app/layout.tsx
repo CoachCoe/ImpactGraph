@@ -22,6 +22,7 @@ const mono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"),
   title: "ImpactGraph — Verifiable impact",
   description: "Inspect the chain of trust behind real-world impact.",
 };
@@ -31,8 +32,11 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     <html lang="en" className={`${sans.variable} ${display.variable} ${mono.variable}`}>
       <body>
         <SessionProvider>
+          <a className="skipLink" href="#main">
+            Skip to content
+          </a>
           <Header />
-          <main>{children}</main>
+          <main id="main">{children}</main>
           <footer>
             ImpactGraph · Transparent provenance for real-world impact
             <span>

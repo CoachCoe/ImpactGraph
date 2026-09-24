@@ -26,8 +26,8 @@ Every change must pass all three suites. CI runs exactly these:
 
 ```bash
 cd contracts && forge fmt --check && forge test
-cd apps/api  && ruff check impactgraph tests && pytest -q
-cd apps/web  && npm test -- --run && npm run typecheck && npm run build
+cd apps/api  && ruff check impactgraph tests scripts && pytest -q
+cd apps/web  && npm run lint && npm test -- --run && npm run typecheck && npm run build
 ```
 
 `make test` runs the three test suites but not the formatter, the linter or the
@@ -66,7 +66,8 @@ leave commentary about the edit itself — that belongs in the commit message.
 
 **Working documents stay out of the repository.** Plans, status reports, findings and
 session notes belong in the issue or pull request that owns the conversation. Committed
-Markdown is limited to what someone cloning the repository needs.
+Markdown is limited to what someone cloning the repository needs. The maintained product
+roadmap is part of that documentation; temporary delivery plans are not.
 
 ## Commits and pull requests
 

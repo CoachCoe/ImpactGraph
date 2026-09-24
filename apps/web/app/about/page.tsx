@@ -1,5 +1,7 @@
 import Link from "next/link";
+import { readFromApi } from "@/lib/api";
 import { networkInfo } from "@/lib/network";
+import type { Claim } from "@/lib/types";
 
 export const metadata = {
   title: "How ImpactGraph works",
@@ -18,17 +20,41 @@ const CHAIN = [
   { stage: "Outcome", detail: "The result the money was meant to produce." },
 ];
 
-/** Each is answered on a page, not in prose. */
-const QUESTIONS = [
-  { question: "What happened?", answer: "The claim, in one sentence, with its status.", href: "/claims/claim-water-12-200" },
-  { question: "Where did the funding originate?", answer: "The first record in the chain names the funder and the amount.", href: "/claims/claim-water-12-200" },
-  { question: "Where did the money go?", answer: "Every observed payment, reconciled against the evidence filed for it.", href: "/financial" },
-  { question: "What evidence supports it?", answer: "The documents, what was extracted from them, and what they cross-check against.", href: "/evidence/ev-inv-8291" },
-  { question: "Who verified the result?", answer: "Named attestations, each tied to the wallet that signed it.", href: "/claims/claim-water-12-200" },
-  { question: "How reliable is the evidence?", answer: "A score broken into its components, with the largest gap named.", href: "/claims/claim-water-12-200" },
-];
+/**
+ * Each is answered on a page, not in prose.
+ *
+ * The page is linked to a real record rather than a named one, so this reads correctly on
+ * a deployment that never ran the showcase seed. Where no example exists yet, the question
+ * still stands and there is simply nothing to open.
+ */
+function questions(claimId: string | null, evidenceId: string | null) {
+  return [
+    { question: "What happened?", answer: "The claim, in one sentence, with its status.", href: claimId && `/claims/${claimId}` },
+    { question: "Where did the funding originate?", answer: "The first record in the chain names the funder and the amount.", href: claimId && `/claims/${claimId}` },
+    { question: "Where did the money go?", answer: "Every observed payment, reconciled against the evidence filed for it.", href: "/financial" },
+    { question: "What evidence supports it?", answer: "The documents, what was extracted from them, and what they cross-check against.", href: evidenceId && `/evidence/${evidenceId}` },
+    { question: "Who verified the result?", answer: "Named attestations, each tied to the wallet that signed it.", href: claimId && `/claims/${claimId}` },
+    { question: "How reliable is the evidence?", answer: "A score broken into its components, with the largest gap named.", href: claimId && `/claims/${claimId}` },
+  ];
+}
 
-/** The policy in verification.py. A claim is verified only when every one passes. */
+/** A claim to point the explanation at, with the evidence it rests on. */
+async function example() {
+  const claims = (await readFromApi<{ id: string }[]>("/claims")) ?? [];
+  const claimId = claims[0]?.id ?? null;
+  if (!claimId) return { claimId: null, evidenceId: null };
+  const claim = await readFromApi<Claim>(`/claims/${claimId}`);
+  return { claimId, evidenceId: claim?.evidenceIds[0] ?? null };
+}
+
+/**
+ * The policy in verification.py.
+ *
+ * A claim is blocked by a failure, not by anything short of one. The last of these warns
+ * when nobody has been asked and fails only on a dispute, because a delivery nobody has
+ * been able to ask about is a weaker claim rather than a false one -- and a requirement
+ * that blocked on it would stop every claim until a channel exists that does not yet.
+ */
 const POLICY = [
   ["Provenance is complete", "There is an unbroken path from funding to outcome."],
   ["Evidence is committed onchain", "Its commitment was registered and confirmed."],
@@ -38,9 +64,11 @@ const POLICY = [
   ["An independent verifier has confirmed", "A second organisation signed it onchain."],
   ["The attestation covers current evidence", "The signature is bound to this bundle, not an earlier one."],
   ["The verifier is not the operator", "Resolved from the program's operator, not from a request header."],
+  ["The people it describes were asked", "Warns when nobody has been; fails when somebody disputes it."],
 ];
 
-export default function About() {
+export default async function About() {
+  const { claimId, evidenceId } = await example();
   const network = networkInfo();
 
   return (
@@ -73,19 +101,21 @@ export default function About() {
             </li>
           ))}
         </ol>
-        <p className="note">
-          <Link href="/claims/claim-water-12-200">See the chain for the seeded claim →</Link>
-        </p>
+        {claimId ? (
+          <p className="note">
+            <Link href={`/claims/${claimId}`}>See the chain for a recorded claim →</Link>
+          </p>
+        ) : null}
       </section>
 
       <section className="panel">
         <span className="eyebrow">WHAT A DONOR CAN ASK</span>
         <h2>Six questions, each answered by a record</h2>
         <dl className="aboutQuestions">
-          {QUESTIONS.map((item) => (
+          {questions(claimId, evidenceId).map((item) => (
             <div key={item.question}>
               <dt>
-                <Link href={item.href}>{item.question}</Link>
+                {item.href ? <Link href={item.href}>{item.question}</Link> : item.question}
               </dt>
               <dd>{item.answer}</dd>
             </div>
@@ -156,7 +186,10 @@ export default function About() {
             <ul>
               <li>The NGO, the programme, the payments and every document</li>
               <li>The banking provider — the system observes money, it never moves it</li>
-              <li>The document extractor, which returns a fixed result</li>
+              <li>
+                The offline document extractor, which returns a fixture result; the demo
+                can instead use a hosted model, but its output still requires human review
+              </li>
               <li>Outcome measurement, which is asserted rather than surveyed</li>
             </ul>
           </div>
@@ -176,9 +209,11 @@ export default function About() {
           not move, so the mismatch is detectable — by you, not by us telling you.
         </p>
         <div className="uploadActions">
-          <Link className="button" href="/evidence/ev-inv-8291">
-            Open the evidence <span aria-hidden>→</span>
-          </Link>
+          {evidenceId ? (
+            <Link className="button" href={`/evidence/${evidenceId}`}>
+              Open the evidence <span aria-hidden>→</span>
+            </Link>
+          ) : null}
           <Link className="secondary" href="/financial">
             Follow the money
           </Link>

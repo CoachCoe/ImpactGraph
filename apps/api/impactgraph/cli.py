@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -23,12 +24,14 @@ from .blockchain import (
     digest_bytes,
     entity_id_bytes,
 )
-from .config import PUBLIC_CHAIN_IDS, Settings
+from .config import PUBLIC_CHAIN_IDS, Settings, _decode_encryption_key
+from .credentials import seal, unseal
 from .database import create_session_factory
 from .demo import INVOICE_BYTES, store
 from .domain import BlockchainStatus
 from .evidence import FileEvidenceStorage
-from .hashing import claim_hash, hash_fields, sha256_bytes
+from .financial import FinancialIngestionService, MockFinancialDataProvider
+from .hashing import claim_hash, hash_fields, program_hash, sha256_bytes
 from .metrics import REGISTRY
 from .notifications import ConsoleNotificationTransport, NotificationDispatcher
 from .observability import configure_logging, logger
@@ -36,6 +39,8 @@ from .persistence import (
     BlockchainOperationRecord,
     EvidenceRecord,
     ProcessedChainEventRecord,
+    ProgramRecord,
+    ProviderCredentialRecord,
 )
 from .read_model import (
     CLAIM_ID,
@@ -46,6 +51,8 @@ from .read_model import (
     reset_read_model,
     seed_read_model,
 )
+from .retention import RetentionResult, RetentionWorker
+from .risk import scan as scan_for_risk
 from .worker import BlockchainOutboxWorker
 
 log = logger("impactgraph.worker")
@@ -53,7 +60,11 @@ log = logger("impactgraph.worker")
 
 def seed() -> None:
     settings = Settings.from_env()
-    storage = FileEvidenceStorage(settings.evidence_storage_path)
+    storage = FileEvidenceStorage(
+        settings.evidence_storage_path,
+        settings.evidence_encryption_key,
+        settings.evidence_key_path,
+    )
     invoice_uri = storage.uri_for("ev-inv-8291")
     storage.overwrite(invoice_uri, INVOICE_BYTES)
     store.reset()
@@ -95,7 +106,11 @@ def demo_reset(local_only: bool) -> None:
     settings = Settings.from_env()
     if not local_only or settings.demo_mode == "sepolia":
         raise RuntimeError("Demo reset is restricted to an explicitly selected local environment")
-    storage = FileEvidenceStorage(settings.evidence_storage_path)
+    storage = FileEvidenceStorage(
+        settings.evidence_storage_path,
+        settings.evidence_encryption_key,
+        settings.evidence_key_path,
+    )
     if settings.persistence_mode == "postgres":
         factory = create_session_factory(settings.database_url)
         with factory.begin() as session:
@@ -481,7 +496,7 @@ def bootstrap_chain() -> None:
     else:
         _await(
             "program",
-            chain.create_program(PROGRAM_ID, hash_fields("program", (("id", PROGRAM_ID),))),
+            chain.create_program(PROGRAM_ID, program_hash(PROGRAM_ID)),
         )
     if chain.entity_exists(CLAIM_ID):
         actions.append({"action": "claim", "transactionHash": "already present"})
@@ -599,6 +614,159 @@ def worker_loop(interval_seconds: float) -> None:
         time.sleep(interval_seconds)
 
 
+def retention_once() -> RetentionResult:
+    """Erase everything past its retention schedule, once."""
+    configure_logging()
+    settings = Settings.from_env()
+    worker = RetentionWorker(
+        session_factory=create_session_factory(settings.database_url),
+        storage=FileEvidenceStorage(
+            settings.evidence_storage_path,
+            settings.evidence_encryption_key,
+            settings.evidence_key_path,
+        ),
+    )
+    result = worker.run_once()
+    log.info("retention.batch", erased=result.erased, failed=result.failed)
+    return result
+
+
+def retention_loop(interval_seconds: float) -> None:
+    """Enforce retention continuously.
+
+    Its own process rather than a step inside the chain worker: an erasure that is already
+    overdue must not wait on a registration, and a failing RPC must not postpone it.
+    """
+    configure_logging()
+    settings = Settings.from_env()
+    worker = RetentionWorker(
+        session_factory=create_session_factory(settings.database_url),
+        storage=FileEvidenceStorage(
+            settings.evidence_storage_path,
+            settings.evidence_encryption_key,
+            settings.evidence_key_path,
+        ),
+    )
+    log.info("retention.started", interval_seconds=interval_seconds)
+    while True:
+        try:
+            result = worker.run_once()
+            if result.erased or result.failed:
+                log.info("retention.batch", erased=result.erased, failed=result.failed)
+        except Exception as exc:  # noqa: BLE001 -- must outlive a transient database fault
+            log.error("retention.batch_failed", error_type=exc.__class__.__name__)
+        time.sleep(interval_seconds)
+
+
+def rotate_encryption_key() -> dict[str, int]:
+    """Re-seal everything under a new key-encryption key.
+
+    Re-seals rather than swaps. A swap makes every bank connection dead and every evidence
+    object unrecoverable in one step, which is the failure docs/key-rotation.md exists to
+    prevent.
+
+    An object whose key has already been destroyed is skipped and stays erased: rotation
+    must not resurrect what somebody exercised a right to remove.
+    """
+    configure_logging()
+    settings = Settings.from_env()
+    new_key = _decode_encryption_key(os.getenv("EVIDENCE_ENCRYPTION_KEY_NEXT", ""))
+    if not new_key:
+        raise RuntimeError(
+            "EVIDENCE_ENCRYPTION_KEY_NEXT is required, and must differ from the current key"
+        )
+    if new_key == settings.evidence_encryption_key:
+        raise RuntimeError("The next key is the current key; nothing would be rotated")
+
+    storage = FileEvidenceStorage(
+        settings.evidence_storage_path,
+        settings.evidence_encryption_key,
+        settings.evidence_key_path,
+    )
+    factory = create_session_factory(settings.database_url)
+    resealed = skipped = credentials = 0
+
+    with factory.begin() as session:
+        for record in session.scalars(select(EvidenceRecord)):
+            if storage.rewrap(record.storage_uri, new_key):
+                resealed += 1
+            else:
+                skipped += 1
+        for credential in session.scalars(select(ProviderCredentialRecord)):
+            if credential.revoked_at is not None or not credential.sealed_refresh_token:
+                continue
+            token = unseal(
+                settings.evidence_encryption_key,
+                credential.sealed_refresh_token,
+                associated=f"{credential.organization_ref}:{credential.provider}",
+            )
+            credential.sealed_refresh_token = seal(
+                new_key,
+                token,
+                associated=f"{credential.organization_ref}:{credential.provider}",
+            )
+            credentials += 1
+
+    log.info(
+        "rotation.complete", resealed=resealed, skipped=skipped, credentials=credentials
+    )
+    print(
+        f"Re-sealed {resealed} evidence objects and {credentials} credentials. "
+        f"Skipped {skipped} already-erased objects.\n"
+        "Verify an integrity check and a bank connection under the new key before "
+        "promoting it, and destroy the old key only after that passes."
+    )
+    return {"resealed": resealed, "skipped": skipped, "credentials": credentials}
+
+
+def financial_sync_loop(interval_seconds: float) -> None:
+    """Import statements on a schedule rather than when somebody remembers.
+
+    Its own process, like retention and notifications. A bank feed that is slow or down
+    must not hold up a registration, and a chain fault must not stop the money arriving.
+
+    Importing is already idempotent by the provider's own reference, so a run that
+    overlaps a manual import records nothing twice.
+    """
+    configure_logging()
+    settings = Settings.from_env()
+    factory = create_session_factory(settings.database_url)
+    service = FinancialIngestionService(MockFinancialDataProvider())
+    log.info("financial_sync.started", interval_seconds=interval_seconds)
+    while True:
+        try:
+            with factory.begin() as session:
+                for program in session.scalars(select(ProgramRecord)):
+                    imported = service.import_statement(session, program.slug)
+                    if imported:
+                        log.info(
+                            "financial_sync.imported",
+                            program=program.slug,
+                            transactions=len(imported),
+                        )
+        except Exception as exc:  # noqa: BLE001 -- must outlive a transient provider fault
+            # The class, never the text: a provider error can carry a URL with a token in it.
+            log.error("financial_sync.failed", error_type=exc.__class__.__name__)
+        time.sleep(interval_seconds)
+
+
+def risk_scan(organization_ref: str) -> int:
+    """Look for duplicates and concentrations across one organisation's records.
+
+    Out of band and without the ceiling the HTTP route applies: near-duplicate image
+    comparison grows faster than the portfolio does, and a large tenant's scan is
+    something to schedule rather than something to wait for in a browser.
+    """
+    configure_logging()
+    settings = Settings.from_env()
+    factory = create_session_factory(settings.database_url)
+    with factory.begin() as session:
+        posted = scan_for_risk(session, organization_ref)
+        count = len(posted)
+    log.info("risk.scan", organization=organization_ref, findings=count)
+    return count
+
+
 def notification_loop(interval_seconds: float) -> None:
     """Drain notification intent from the outbox.
 
@@ -650,10 +818,22 @@ def main() -> None:
     loop.add_argument("--interval", type=float, default=2.0)
     notify = sub.add_parser("notifications")
     notify.add_argument("--interval", type=float, default=5.0)
+    sub.add_parser("retention-once")
+    sub.add_parser("rotate-encryption-key")
+    sync = sub.add_parser("financial-sync")
+    # Hourly: a bank feed does not change faster than that, and a tighter loop is requests
+    # against somebody's rate limit for no new information.
+    sync.add_argument("--interval", type=float, default=3600.0)
+    retention = sub.add_parser("retention")
+    # Hourly by default: a retention period is measured in years, and checking more often
+    # would be load without meaning.
+    retention.add_argument("--interval", type=float, default=3600.0)
     deploy = sub.add_parser("deploy-registry")
     deploy.add_argument("--expect-address", default=None)
     sub.add_parser("bootstrap-chain")
     sub.add_parser("chain-args")
+    risk = sub.add_parser("risk-scan")
+    risk.add_argument("--organization", required=True)
     record = sub.add_parser("record-evidence-registration")
     record.add_argument("--transaction-hash", required=True)
     run = sub.add_parser("new-demo-run")
@@ -671,12 +851,22 @@ def main() -> None:
         worker_loop(args.interval)
     elif args.command == "notifications":
         notification_loop(args.interval)
+    elif args.command == "financial-sync":
+        financial_sync_loop(args.interval)
+    elif args.command == "rotate-encryption-key":
+        rotate_encryption_key()
+    elif args.command == "retention-once":
+        retention_once()
+    elif args.command == "retention":
+        retention_loop(args.interval)
     elif args.command == "deploy-registry":
         deploy_registry(args.expect_address)
     elif args.command == "bootstrap-chain":
         bootstrap_chain()
     elif args.command == "chain-args":
         chain_args()
+    elif args.command == "risk-scan":
+        risk_scan(args.organization)
     elif args.command == "record-evidence-registration":
         record_evidence_registration(args.transaction_hash)
     elif args.command == "new-demo-run":

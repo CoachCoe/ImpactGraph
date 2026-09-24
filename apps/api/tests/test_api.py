@@ -6,6 +6,7 @@ from impactgraph.evidence import FileEvidenceStorage
 from impactgraph.hashing import sha256_bytes
 from impactgraph.main import app, session_factory
 from impactgraph.persistence import EvidenceRecord, ProvenanceEdgeRecord
+from tests.conftest import TEST_ENCRYPTION_KEY
 
 OPERATOR = "operator@globalwater.example"
 VERIFIER = "verifier@impactverify.example"
@@ -50,6 +51,36 @@ def test_login_rejects_a_wrong_password_and_an_unknown_account():
     assert unknown.status_code == 401
     # The same message for both: otherwise an anonymous caller can enumerate accounts.
     assert wrong.json()["detail"]["message"] == unknown.json()["detail"]["message"]
+
+
+def test_login_rate_limits_repeated_guesses():
+    session = client()
+    for _ in range(5):
+        response = session.post(
+            "/auth/login", json={"email": OPERATOR, "password": "wrong"}
+        )
+        assert response.status_code == 401
+    refused = session.post(
+        "/auth/login", json={"email": OPERATOR, "password": "still-wrong"}
+    )
+    assert refused.status_code == 429
+    assert refused.json()["detail"]["code"] == "LOGIN_RATE_LIMITED"
+    assert refused.headers["retry-after"] == "300"
+
+
+def test_successful_login_clears_the_client_failure_budget():
+    session = client()
+    for _ in range(4):
+        assert session.post(
+            "/auth/login", json={"email": OPERATOR, "password": "wrong"}
+        ).status_code == 401
+    assert session.post(
+        "/auth/login", json={"email": OPERATOR, "password": "impactgraph-demo"}
+    ).status_code == 200
+    for _ in range(5):
+        assert session.post(
+            "/auth/login", json={"email": OPERATOR, "password": "wrong-again"}
+        ).status_code == 401
 
 
 def test_logout_revokes_the_session(sign_in):
@@ -190,7 +221,9 @@ def test_upload_rejects_an_unknown_visibility_before_storing(sign_in):
 def test_tamper_demo_alters_stored_bytes_and_integrity_detects_it(sign_in):
     admin = client()
     sign_in(admin, ADMIN)
-    storage = FileEvidenceStorage(Settings.from_env().evidence_storage_path)
+    storage = FileEvidenceStorage(
+        Settings.from_env().evidence_storage_path, TEST_ENCRYPTION_KEY
+    )
     uri = storage.uri_for(EVIDENCE_ID)
     before = storage.retrieve(uri)
 
@@ -257,7 +290,11 @@ def test_operator_evidence_slice_is_submitted_but_not_registered(sign_in):
     analyzed = operator.post(f"/evidence/{evidence_id}/analyze")
     assert analyzed.json()["workflowStatus"] == "ANALYZED"
     reviewed = operator.post(
-        f"/evidence/{evidence_id}/review", json={"extraction": analyzed.json()["extraction"]}
+        f"/evidence/{evidence_id}/review",
+        json={
+            "extraction": analyzed.json()["extraction"],
+            "confirmed": analyzed.json()["reviewRequired"],
+        },
     )
     assert reviewed.json()["workflowStatus"] == "REVIEWED"
 
@@ -288,17 +325,20 @@ def test_operator_correction_is_validated_and_reconciled_again(sign_in):
         },
         files={"file": ("INV-8291.txt", b"Invoice INV-8291", "text/plain")},
     )
-    extraction = operator.post(f"/evidence/{evidence_id}/analyze").json()["extraction"]
+    analyzed = operator.post(f"/evidence/{evidence_id}/analyze").json()
+    extraction, confirmed = analyzed["extraction"], analyzed["reviewRequired"]
     extraction["amountMinor"] = 1
     reviewed = operator.post(
-        f"/evidence/{evidence_id}/review", json={"extraction": extraction}
+        f"/evidence/{evidence_id}/review",
+        json={"extraction": extraction, "confirmed": confirmed},
     )
     assert reviewed.status_code == 200
     assert reviewed.json()["reconciliation"]["status"] == "CONFLICT"
 
     extraction["amountMinor"] = -1
     rejected = operator.post(
-        f"/evidence/{evidence_id}/review", json={"extraction": extraction}
+        f"/evidence/{evidence_id}/review",
+        json={"extraction": extraction, "confirmed": confirmed},
     )
     assert rejected.status_code == 422
 
@@ -588,3 +628,70 @@ def test_the_graph_follows_provenance_edges_rather_than_a_fixed_payment():
             )
         )
     assert payments() == ["ftx-9182", "ftx-9184"]
+
+
+def test_evidence_cannot_be_registered_on_a_model_nobody_checked(sign_in):
+    """The operator screen blocks this, and the screen is not where a guarantee lives.
+
+    Two posts with an operator session were enough to put a misread invoice number on
+    chain: /review took whatever extraction it was handed and moved straight to REVIEWED.
+    """
+    operator = client()
+    sign_in(operator, OPERATOR)
+    evidence_id = "ev-unconfirmed-flow"
+    operator.post(
+        "/evidence",
+        headers={"Idempotency-Key": "unconfirmed-upload"},
+        data={
+            "evidence_id": evidence_id,
+            "project_id": "project-water-12",
+            "evidence_type": "INVOICE",
+            "visibility": "RESTRICTED",
+        },
+        files={"file": ("INV-8291.txt", b"Invoice INV-8291", "text/plain")},
+    )
+    analyzed = operator.post(f"/evidence/{evidence_id}/analyze").json()
+    flagged = analyzed["reviewRequired"]
+    assert {"invoiceNumber", "amountMinor", "currency"} <= set(flagged)
+
+    refused = operator.post(
+        f"/evidence/{evidence_id}/review", json={"extraction": analyzed["extraction"]}
+    )
+    assert refused.status_code == 422
+    assert refused.json()["detail"]["code"] == "CONFIRMATION_REQUIRED"
+    assert set(refused.json()["detail"]["fields"]) == set(flagged)
+
+    # Confirming all but one is still not a review.
+    partial = operator.post(
+        f"/evidence/{evidence_id}/review",
+        json={"extraction": analyzed["extraction"], "confirmed": flagged[1:]},
+    )
+    assert partial.status_code == 422
+    assert partial.json()["detail"]["fields"] == [flagged[0]]
+
+    # Nothing moved: the evidence is still waiting on a person.
+    assert operator.get(f"/evidence/{evidence_id}").json()["workflowStatus"] == "ANALYZED"
+
+    accepted = operator.post(
+        f"/evidence/{evidence_id}/review",
+        json={"extraction": analyzed["extraction"], "confirmed": flagged},
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["workflowStatus"] == "REVIEWED"
+
+
+def test_claims_can_be_listed_for_a_queue_rather_than_named_in_source(sign_in):
+    """The verifier workspace named one claim, so a second organisation's work could not
+    be reached and the queue its own comment described did not exist."""
+    client_ = client()
+    everything = client_.get("/claims")
+    assert everything.status_code == 200
+    assert any(item["id"] == "claim-water-12-200" for item in everything.json())
+
+    pending = client_.get("/claims", params={"status": "VERIFICATION_PENDING"})
+    assert pending.status_code == 200
+    assert all(item["status"] == "VERIFICATION_PENDING" for item in pending.json())
+
+    scoped = client_.get("/claims", params={"program": "program-clean-water-kenya-2026"})
+    assert all(item["programId"] == "program-clean-water-kenya-2026" for item in scoped.json())
+    assert client_.get("/claims", params={"program": "program-nope"}).json() == []

@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ProvenanceGraph } from "@/components/ProvenanceGraph";
@@ -31,7 +32,24 @@ const REQUIREMENT_LABELS: Record<string, string> = {
   INDEPENDENT_VERIFICATION: "An independent verifier has confirmed",
   BUNDLE_CURRENT: "The attestation covers the current evidence",
   ACTOR_SEPARATION: "The verifier is not the operator",
+  // Without an entry here the raw policy name was rendered to donors, on the page this
+  // product exists to be read on.
+  BENEFICIARY_CONFIRMATION: "The people it describes were asked",
 };
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const claim = await readFromApi<Claim>(`/claims/${(await params).id}`);
+  if (!claim) return { title: "No such claim — ImpactGraph", robots: { index: false } };
+  const standing = claimStanding(claim.status);
+  return {
+    title: `${standing.badge} — ${claim.statement}`,
+    description: `${claim.statement} Inspect the evidence, the money and the verification behind it.`,
+  };
+}
 
 export default async function ClaimInspector({ params }: { params: Promise<{ id: string }> }) {
   // params is a Promise in Next 16. The route segment was previously ignored entirely,
@@ -202,6 +220,10 @@ export default async function ClaimInspector({ params }: { params: Promise<{ id:
                 </li>
               ))}
             </ul>
+            <p className="note">
+              Each of these is a check the policy runs, not a judgement anybody entered.{" "}
+              <Link href="/about">What each one means and why it is there</Link>.
+            </p>
           </section>
 
           <section className="panel proof">

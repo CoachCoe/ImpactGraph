@@ -94,11 +94,58 @@ def test_the_backlog_reader_measures_the_oldest_unsubmitted_row():
                 session.delete(record)
 
 
-def test_the_metrics_endpoint_serves_the_prometheus_exposition_format(client):
-    response = client.get("/metrics")
+def _scraper() -> TestClient:
+    """A caller on the network the API is deployed to, which is where a scraper lives."""
+    return TestClient(app, client=("10.0.0.7", 51234))
+
+
+def test_the_metrics_endpoint_serves_the_prometheus_exposition_format():
+    response = _scraper().get("/metrics")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")
     assert "impactgraph_outbox_pending" in response.text
+
+
+def test_metrics_are_not_served_to_the_open_internet(client):
+    """Backlog depth, error rates and per-route latency are an operational map: they say
+    which part of this is struggling and when a queue is worth flooding. This was served
+    to anyone who asked for it."""
+    refused = client.get("/metrics")
+    assert refused.status_code == 403
+    assert "impactgraph_outbox_pending" not in refused.text
+
+
+def test_a_public_address_near_the_private_range_is_still_public():
+    """172.2.x.x is not RFC1918 -- the block starts at 172.16 -- and the prefix list this
+    replaced accepted it. One typo away from the intended range and the metrics were
+    readable from the internet."""
+    assert TestClient(app, client=("172.2.3.4", 5555)).get("/metrics").status_code == 403
+    assert TestClient(app, client=("172.20.1.1", 5555)).get("/metrics").status_code == 200
+
+
+def test_a_caller_without_an_address_is_treated_as_external():
+    """A scraper has an IP. Something arriving without one is not a case to hold the door
+    open for -- and the default TestClient host is exactly that shape."""
+    assert TestClient(app).get("/metrics").status_code == 403
+
+
+def test_a_configured_token_lets_a_scraper_in_from_anywhere(monkeypatch):
+    monkeypatch.setenv("METRICS_TOKEN", "scrape-me-6f2b")
+    remote = TestClient(app, client=("8.8.8.8", 4444))
+
+    assert remote.get("/metrics").status_code == 401
+    assert remote.get("/metrics", headers={"Authorization": "Bearer wrong"}).status_code == 401
+
+    allowed = remote.get("/metrics", headers={"Authorization": "Bearer scrape-me-6f2b"})
+    assert allowed.status_code == 200
+    assert "impactgraph_outbox_pending" in allowed.text
+
+
+def test_a_token_replaces_the_network_check_rather_than_adding_to_it(monkeypatch):
+    """Otherwise setting a token to scrape remotely would silently keep the endpoint open
+    to everything on the local network that does not present one."""
+    monkeypatch.setenv("METRICS_TOKEN", "scrape-me-6f2b")
+    assert _scraper().get("/metrics").status_code == 401
 
 
 def test_an_integrity_check_counts_the_outcome_it_persisted(client):
@@ -115,23 +162,19 @@ def test_an_operation_awaiting_confirmations_is_not_counted_on_every_poll():
     An operation stays SUBMITTED until it reaches the required confirmation depth, and
     `observe_submitted` re-reads it on every tick. Only the transition counts.
     """
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
 
     from impactgraph.blockchain import MockBlockchainService
     from impactgraph.domain import Role
     from impactgraph.metrics import chain_operations
-    from impactgraph.persistence import Base
     from impactgraph.services import (
         ApplicationActor,
         EvidenceApplicationService,
         mark_evidence_reviewed,
     )
     from impactgraph.worker import BlockchainOutboxWorker
+    from tests.support import memory_factory
 
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    factory = sessionmaker(engine, expire_on_commit=False)
+    factory = memory_factory()
 
     service = EvidenceApplicationService(chain_id=31337)
     actor = ApplicationActor("operator-1", Role.OPERATOR)

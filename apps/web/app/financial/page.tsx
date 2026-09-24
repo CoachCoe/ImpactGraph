@@ -1,11 +1,17 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { ImportStatement } from "@/components/ImportStatement";
 import { Status } from "@/components/Status";
 import { readFromApi } from "@/lib/api";
 import { formatMoney } from "@/lib/money";
-import type { FinancialSummary } from "@/lib/types";
+import { resolveProgram } from "@/lib/programs";
+import type { FinancialSummary, OrganizationPosition } from "@/lib/types";
 
-const PROGRAM_ID = "program-clean-water-kenya-2026";
+export const metadata: Metadata = {
+  title: "The money trail — ImpactGraph",
+  description:
+    "Every payment in a programme, what evidence was filed against it, and what reconciled.",
+};
 
 const MATCH_LABEL: Record<string, string> = {
   MATCHED: "Evidenced",
@@ -21,16 +27,30 @@ function matchKind(status: string) {
   return "pending" as const;
 }
 
-export default async function FinancialPage() {
-  const summary = await readFromApi<FinancialSummary>(`/financial/programs/${PROGRAM_ID}`);
+export default async function FinancialPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ program?: string }>;
+}) {
+  const chosen = await resolveProgram((await searchParams).program);
+  if (chosen.state !== "resolved") return <ChooseProgramFirst state={chosen.state} />;
+  const { id: programId, featuredClaimId } = chosen.program;
+  const summary = await readFromApi<FinancialSummary>(`/financial/programs/${programId}`);
+  // Scoped to the organisation rather than the programme: unrestricted money has no
+  // programme yet, which is the whole reason it is worth publishing.
+  const position = chosen.program.operatorOrgRef
+    ? await readFromApi<OrganizationPosition>(
+        `/financial/organizations/${chosen.program.operatorOrgRef}/position`,
+      )
+    : null;
   if (!summary) {
     return (
       <div className="inspector">
         <section className="panel">
           <h2>The financial ledger is unavailable</h2>
           <p className="subtle">
-            This page reads live records. Start the API with <code>make api</code> after
-            <code>make db-up &amp;&amp; make migrate &amp;&amp; make seed</code>.
+            No cached totals are shown because this page only presents records it can read
+            and check now. Please try again shortly.
           </p>
         </section>
       </div>
@@ -70,7 +90,7 @@ export default async function FinancialPage() {
           <span>Evidenced spend</span>
           <strong>
             {(summary.matchCounts.MATCHED ?? 0) + (summary.matchCounts.PARTIAL_MATCH ?? 0)}/
-            {summary.transactions.length}
+            {summary.transactionCount}
           </strong>
           <small>Payments with matching evidence</small>
         </article>
@@ -113,7 +133,7 @@ export default async function FinancialPage() {
             </p>
           </section>
 
-          <ImportStatement programId={PROGRAM_ID} />
+          <ImportStatement programId={programId} />
         </div>
 
         <aside>
@@ -123,12 +143,45 @@ export default async function FinancialPage() {
               <Link className="scoreRow" href={`/funding/${item.id}`} key={item.id}>
                 <span>
                   {item.funder}
-                  <small>{item.receivedOn} · follow this contribution →</small>
+                  <small>
+                    {item.receivedOn}
+                    {item.contributors > 1 ? " · a day's contributions" : ""} · follow this
+                    contribution →
+                  </small>
                 </span>
                 <b>{formatMoney(item.amount, { maximumFractionDigits: 0 })}</b>
               </Link>
             ))}
+            {summary.fundingCount > summary.funding.length ? (
+              <p className="note">
+                Showing {summary.funding.length} of {summary.fundingCount} contributions.
+                The totals above cover every one of them.
+              </p>
+            ) : null}
           </section>
+
+          {position && position.byCurrency.length > 0 ? (
+            <section className="panel">
+              <span className="eyebrow">HELD BY THE ORGANISATION</span>
+              <p className="subtle">
+                Contributions received and not yet assigned to a programme. Published
+                because money sitting still is as much a fact as money spent.
+              </p>
+              {position.byCurrency.map((item) => (
+                <div className="scoreRow" key={item.currency}>
+                  <span>
+                    Not yet assigned
+                    <small>
+                      {formatMoney(item.received, { maximumFractionDigits: 0 })} received from{" "}
+                      {item.contributors.toLocaleString()}{" "}
+                      {item.contributors === 1 ? "contribution" : "contributions"}
+                    </small>
+                  </span>
+                  <b>{formatMoney(item.held, { maximumFractionDigits: 0 })}</b>
+                </div>
+              ))}
+            </section>
+          ) : null}
 
           <section className="panel">
             <span className="eyebrow">ALLOCATIONS</span>
@@ -173,7 +226,7 @@ export default async function FinancialPage() {
               Each payment supports a delivery, which supports an outcome, which supports
               the claim.
             </p>
-            <Link className="button full" href="/claims/claim-water-12-200">
+            <Link className="button full" href={`/claims/${featuredClaimId}`}>
               Follow it to the claim <span aria-hidden>→</span>
             </Link>
           </section>
@@ -188,15 +241,39 @@ export default async function FinancialPage() {
             </p>
             {/* Plain links rather than fetches: the browser saves the file, and the
                 endpoints are public, so no session is involved. */}
-            <a className="secondary full" href={`/api/export/programs/${PROGRAM_ID}/money-trail.csv`}>
+            <a className="secondary full" href={`/api/export/programs/${programId}/money-trail.csv`}>
               Money trail (CSV)
             </a>
-            <a className="secondary full" href={`/api/export/programs/${PROGRAM_ID}/outcomes.csv`}>
+            <a className="secondary full" href={`/api/export/programs/${programId}/outcomes.csv`}>
               Outcomes and their methods (CSV)
             </a>
           </section>
         </aside>
       </div>
+    </div>
+  );
+}
+
+function ChooseProgramFirst({ state }: { state: "choose" | "none" | "unavailable" }) {
+  return (
+    <div className="inspector">
+      <section className="panel">
+        <h2>
+          {state === "unavailable"
+            ? "The financial ledger is unavailable"
+            : state === "none"
+              ? "No programs yet"
+              : "Choose a program"}
+        </h2>
+        <p className="subtle">
+          {state === "choose"
+            ? "A money trail belongs to one program. Pick the one you want to follow."
+            : "There is nothing to total until a program exists and its ledger has been imported."}
+        </p>
+        <Link className="button" href="/">
+          {state === "choose" ? "See the programs" : "Back to the record"}
+        </Link>
+      </section>
     </div>
   );
 }

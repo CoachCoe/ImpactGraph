@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from .config import Settings
@@ -16,6 +17,7 @@ from .evidence import (
     FileEvidenceStorage,
     ReconciliationService,
 )
+from .extraction import review_required_fields
 from .financial import (
     EvidenceReconciliationService,
     FinancialIngestionService,
@@ -30,6 +32,7 @@ from .persistence import (
     AuditLogRecord,
     BlockchainOperationRecord,
     ClaimRecord,
+    DataProtectionRecord,
     DeliveryRecord,
     DomainEntityRecord,
     EvidenceRecord,
@@ -42,8 +45,14 @@ from .persistence import (
     ProcessedChainEventRecord,
     ProgramRecord,
     ProvenanceEdgeRecord,
+    as_utc_iso,
+    public_funder_name,
 )
 from .verification import EvidenceScoreService, claim_subgraph, evaluate_persisted_claim
+
+#: Not yet put forward by the operator who wrote them, so not listed to everyone. A claim
+#: is still readable by identifier in any state; this governs enumeration only.
+DRAFT_CLAIM_STATUSES = ("DRAFT", "EVIDENCE_PENDING", "CREATION_FAILED")
 
 PROGRAM_ID = "program-clean-water-kenya-2026"
 PROJECT_ID = "project-water-12"
@@ -72,7 +81,12 @@ def seed_read_model(session: Session, storage: EvidenceStorage | None = None) ->
     """Idempotently installs the deterministic showcase without deleting user records."""
     # Restore the showcase bytes before the early return below. Seeding is what makes the
     # demo repeatable, so it has to undo a tamper even when the rows are already present.
-    evidence_store = storage or FileEvidenceStorage(Settings.from_env().evidence_storage_path)
+    _settings = Settings.from_env()
+    evidence_store = storage or FileEvidenceStorage(
+        _settings.evidence_storage_path,
+        _settings.evidence_encryption_key,
+        _settings.evidence_key_path,
+    )
     storage_uri = evidence_store.uri_for(EVIDENCE_ID)
     evidence_store.overwrite(storage_uri, INVOICE_BYTES)
     if session.scalar(select(ProgramRecord).where(ProgramRecord.slug == PROGRAM_ID)):
@@ -87,6 +101,10 @@ def seed_read_model(session: Session, storage: EvidenceStorage | None = None) ->
             operator_org_ref=OPERATOR_ORG_REF,
             region="Kisumu County, Kenya",
             status="ACTIVE",
+            # `bootstrap-chain` creates this program's registry entity and waits for the
+            # receipt, so by the time anything can reference it the chain has it. A program
+            # created through the API starts PENDING and is confirmed by the worker.
+            chain_status="CONFIRMED",
         )
     )
     # The models intentionally avoid broad ORM relationships; establish the FK parent
@@ -124,7 +142,9 @@ def seed_read_model(session: Session, storage: EvidenceStorage | None = None) ->
     session.add(
         FundingRecord(
             external_id=FUNDING_ID,
+            organization_ref=OPERATOR_ORG_REF,
             program_ref=PROGRAM_ID,
+            assigned_at=datetime.now(UTC),
             funder_name="Jane Smith",
             amount_minor=1000000,
             currency="USD",
@@ -135,8 +155,11 @@ def seed_read_model(session: Session, storage: EvidenceStorage | None = None) ->
     session.add(
         FundingRecord(
             external_id="funding-institutional-90000",
+            organization_ref=OPERATOR_ORG_REF,
             program_ref=PROGRAM_ID,
+            assigned_at=datetime.now(UTC),
             funder_name="Institutional funding pool",
+            funder_is_organisation=True,
             amount_minor=9000000,
             currency="USD",
             received_on="2026-07-01",
@@ -346,6 +369,10 @@ def reset_read_model(session: Session, storage: EvidenceStorage | None = None) -
         BlockchainOperationRecord,
         IdempotencyRecord,
         AuditLogRecord,
+        # Before the evidence it describes: a record of what made holding an object
+        # lawful must not outlive the object and attach itself to the next one reusing
+        # the identifier.
+        DataProtectionRecord,
         ProvenanceEdgeRecord,
         AttestationRecord,
         ClaimRecord,
@@ -428,6 +455,10 @@ class TransparencyReadRepository:
             "id": record.slug,
             "name": record.name,
             "operator": record.operator_name,
+            # Which organisation operates a programme is already public -- separation of
+            # duties is decided against it -- and the money trail needs it to ask what
+            # that organisation is still holding.
+            "operatorOrgRef": record.operator_org_ref,
             "region": record.region,
             "status": record.status,
             "funding": ledger["received"],
@@ -476,6 +507,134 @@ class TransparencyReadRepository:
             "actions": ["IMPORT_FINANCIAL_STATEMENT", "RECORD_DELIVERY", "UPLOAD_EVIDENCE"],
         }
 
+    def claims(
+        self,
+        status: str | None = None,
+        program_id: str | None = None,
+        operator_org_ref: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """The claims themselves, so a workspace can show a queue rather than one constant.
+
+        Summaries: a verifier picking work needs to know which claim and how far along it
+        is, and the bundle they are about to sign is read separately once they choose it.
+
+        `operator_org_ref` is the organisation whose drafts may be included. Anyone may
+        read a claim by its identifier, which is the transparency this product exists for,
+        but enumeration is not addressability: listing every claim would publish an
+        organisation's unfinished statements the moment they were written, before any
+        evidence supports them and before anyone chose to put them forward. So a claim
+        appears to everyone only once it has been submitted for verification, and its own
+        operator sees its drafts as well.
+        """
+        query = select(ClaimRecord).order_by(ClaimRecord.created_at)
+        if operator_org_ref is None:
+            query = query.where(ClaimRecord.status.notin_(DRAFT_CLAIM_STATUSES))
+        else:
+            owned = select(ProgramRecord.slug).where(
+                ProgramRecord.operator_org_ref == operator_org_ref
+            )
+            query = query.where(
+                or_(
+                    ClaimRecord.status.notin_(DRAFT_CLAIM_STATUSES),
+                    ClaimRecord.program_ref.in_(owned),
+                )
+            )
+        if status:
+            query = query.where(ClaimRecord.status == status)
+        if program_id:
+            query = query.where(ClaimRecord.program_ref == program_id)
+        return [
+            {
+                "id": record.external_id,
+                "programId": record.program_ref,
+                "projectId": record.project_ref,
+                "statement": record.statement,
+                "status": record.status,
+                "verifiedAt": as_utc_iso(record.verified_at),
+                "publishedAt": as_utc_iso(record.published_at),
+            }
+            for record in self.session.scalars(query)
+        ]
+
+    def proof(self, claim_id: str) -> dict[str, Any]:
+        """A published claim, as a stranger with no context should receive it.
+
+        Only a published claim. Refusing an unpublished one rather than rendering it is
+        what makes publication a decision the organisation made rather than a default it
+        was subjected to.
+
+        The status is read now, not at publication: a page that kept saying VERIFIED after
+        the claim was challenged would be the most damaging thing this product could ship.
+        """
+        record = self._claim(claim_id)
+        if record.published_at is None:
+            raise LookupError("This claim has not been published as a public proof")
+        claim = self.claim(claim_id)
+        program = self.session.scalar(
+            select(ProgramRecord).where(ProgramRecord.slug == record.program_ref)
+        )
+        decision, _evidence, _verifiers = evaluate_persisted_claim(self.session, record)
+        onchain = next(
+            (
+                item
+                for item in claim["attestations"]
+                if item.get("onchain") and item.get("transactionHash")
+            ),
+            None,
+        )
+        return {
+            "claim": {
+                "id": claim["id"],
+                "statement": claim["statement"],
+                "status": claim["status"],
+                "verifiedAt": claim["verifiedAt"],
+                "payloadHash": claim["payloadHash"],
+                "verificationBundleHash": claim["verificationBundleHash"],
+                "policyVersion": claim["policyVersion"],
+            },
+            # The programme leads, because the organisation that did the work is who a
+            # reader should understand this to be about.
+            "operator": {
+                "name": program.operator_name if program else "",
+                "organisationRef": program.operator_org_ref if program else "",
+                "program": program.name if program else "",
+                "region": program.region if program else "",
+            },
+            "requirements": [
+                {
+                    "requirement": item.requirement,
+                    "status": item.status,
+                    "reason": item.reason,
+                }
+                for item in decision.requirements
+            ],
+            "attestations": claim["attestations"],
+            "onchain": onchain,
+            "publishedAt": as_utc_iso(record.published_at),
+            # What the verification does and does not mean, in the product rather than in
+            # the repository. A reader landing here cold has no other way to know.
+            "proves": [
+                (
+                    "The documents behind this claim were committed to a public blockchain, "
+                    "and re-reading them still produces the same commitment."
+                ),
+                (
+                    "Named verifiers signed the exact bundle shown here, with wallets "
+                    "anyone can check on the chain."
+                ),
+            ],
+            "doesNotProve": [
+                (
+                    "That the work described actually helped anyone. This records what was "
+                    "delivered and what it cost, not whether it was worth doing."
+                ),
+                (
+                    "That the original documents are truthful. A forged invoice, committed "
+                    "honestly, is still a forged invoice."
+                ),
+            ],
+        }
+
     def claim(self, claim_id: str) -> dict[str, Any]:
         record = self._claim(claim_id)
         attestations = list(
@@ -496,7 +655,7 @@ class TransparencyReadRepository:
             "payloadHash": record.payload_hash,
             "verificationBundleHash": record.verification_bundle_hash,
             "policyVersion": record.verification_policy_version,
-            "verifiedAt": record.verified_at.isoformat() if record.verified_at else None,
+            "verifiedAt": as_utc_iso(record.verified_at),
             "evidenceIds": self._supporting_evidence_ids(record.external_id),
             "attestations": [
                 {
@@ -536,6 +695,12 @@ class TransparencyReadRepository:
             "integrityStatus": record.integrity_status,
             "blockchainStatus": record.blockchain_status,
             "extraction": record.extraction,
+            # The same list the analysis response carries. Without it a client that
+            # reloaded the page could no longer tell which fields /review will demand,
+            # and would be refused with no way to know what to confirm.
+            "reviewRequired": (
+                review_required_fields(record.extraction) if record.extraction else []
+            ),
             "reconciliation": record.reconciliation,
             **record.metadata_json,
         }
@@ -589,7 +754,7 @@ class TransparencyReadRepository:
                 {
                     "id": row.external_id,
                     "type": "FUNDING",
-                    "title": row.funder_name,
+                    "title": public_funder_name(row),
                     "detail": f"{amount(row)} contributed",
                 }
             )

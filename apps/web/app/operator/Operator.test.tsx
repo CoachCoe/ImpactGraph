@@ -44,9 +44,29 @@ const analyzed = {
   },
 };
 
+/** One project, ready to file under, so the workflow under test is the evidence one. */
+const PROGRAMS = [
+  {
+    id: "program-clean-water-kenya-2026",
+    name: "Clean Water Kenya",
+    region: "Kisumu County",
+    operator: "Global Water Initiative",
+    chainStatus: "CONFIRMED",
+    projects: [{ id: "project-water-12", name: "Water Project #12" }],
+  },
+];
+
 function stubFetch(responses: unknown[]) {
-  const mock = vi.fn().mockImplementation(() =>
-    Promise.resolve({ ok: true, json: () => Promise.resolve(responses.shift()) }),
+  // The workspace reads the projects it may file under before anything else. That is not
+  // part of the sequence under test, so it is answered by URL and the queue is untouched.
+  const mock = vi.fn().mockImplementation((url: string) =>
+    Promise.resolve({
+      ok: true,
+      json: () =>
+        Promise.resolve(
+          String(url).includes("/operator/programs") ? PROGRAMS : responses.shift(),
+        ),
+    }),
   );
   vi.stubGlobal("fetch", mock);
   return mock;
@@ -65,7 +85,9 @@ describe("Operator evidence workflow", () => {
     ]);
     render(<Operator />);
     fireEvent.click(screen.getByRole("button", { name: "Load demo INV-8291" }));
-    fireEvent.click(screen.getByRole("button", { name: "Upload & analyze" }));
+    const upload = screen.getByRole("button", { name: "Upload & analyze" });
+    await waitFor(() => expect(upload).toBeEnabled());
+    fireEvent.click(upload);
     await screen.findByText("Invoice INV-8291");
     fireEvent.click(screen.getByRole("button", { name: "Accept & register evidence" }));
     await waitFor(() =>
@@ -96,7 +118,9 @@ describe("Operator evidence workflow", () => {
     ]);
     render(<Operator />);
     fireEvent.click(screen.getByRole("button", { name: "Load demo INV-8291" }));
-    fireEvent.click(screen.getByRole("button", { name: "Upload & analyze" }));
+    const upload = screen.getByRole("button", { name: "Upload & analyze" });
+    await waitFor(() => expect(upload).toBeEnabled());
+    fireEvent.click(upload);
     await screen.findByText("Invoice INV-8291");
     fireEvent.click(screen.getByRole("button", { name: "Accept & register evidence" }));
     await waitFor(() =>
@@ -115,7 +139,9 @@ describe("Operator evidence workflow", () => {
     ]);
     render(<Operator />);
     fireEvent.click(screen.getByRole("button", { name: "Load demo INV-8291" }));
-    fireEvent.click(screen.getByRole("button", { name: "Upload & analyze" }));
+    const upload = screen.getByRole("button", { name: "Upload & analyze" });
+    await waitFor(() => expect(upload).toBeEnabled());
+    fireEvent.click(upload);
     await screen.findByText("Invoice INV-8291");
     fireEvent.click(screen.getByRole("button", { name: "Accept & register evidence" }));
     const alert = await screen.findByRole("alert");
