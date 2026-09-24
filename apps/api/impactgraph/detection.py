@@ -168,16 +168,21 @@ def duplicate_invoices(invoices: Sequence[InvoiceFacts]) -> list[Finding]:
         if len(refs) < 2:
             continue
         programs = sorted({item.program_ref for item in group})
+        # Normalised forms match; they do not read. "AQUASYSTEMSLTD" is not a name a
+        # reviewer recognises, and an explanation they have to decode is one they skim.
+        shown_vendor = group[0].vendor
+        shown_number = group[0].invoice_number
         if len(programs) > 1:
             explanation = (
-                f"Invoice {number} from {vendor} supports deliveries in "
+                f"Invoice {shown_number} from {shown_vendor} supports deliveries in "
                 f"{len(programs)} programmes ({', '.join(programs)}). One invoice billed "
                 f"to more than one funder would be paid for twice."
             )
         else:
             explanation = (
-                f"Invoice {number} from {vendor} is registered {len(refs)} times in "
-                f"{programs[0]}. Either it was uploaded twice or it was counted twice."
+                f"Invoice {shown_number} from {shown_vendor} is registered "
+                f"{len(refs)} times in {programs[0]}. Either it was uploaded twice or it "
+                f"was counted twice."
             )
         findings.append(
             Finding(
@@ -186,7 +191,12 @@ def duplicate_invoices(invoices: Sequence[InvoiceFacts]) -> list[Finding]:
                 key=("DUPLICATE_INVOICE", vendor, number),
                 kind="DUPLICATE_INVOICE",
                 explanation=explanation,
-                subjects={"evidence": refs, "programs": programs, "invoiceNumber": number},
+                subjects={
+                    "evidence": refs,
+                    "programs": programs,
+                    "invoiceNumber": shown_number,
+                    "vendor": shown_vendor,
+                },
             )
         )
 

@@ -451,3 +451,16 @@ def test_the_consent_link_is_never_written_into_a_url():
     assert not any(
         path.startswith("/funding/name-consent/") for path in paths
     ), "the consent token is in a path, and paths are logged"
+
+
+def test_publishing_twice_does_not_claim_to_have_created_anything():
+    """The second call is a no-op -- the timestamp does not move -- and answering
+    "201 Created" to it is a small lie a client eventually depends on."""
+    client = operator_client()
+    first = client.post(f"/claims/{CLAIM}/publish")
+    assert first.status_code in (200, 201), first.text
+
+    again = client.post(f"/claims/{CLAIM}/publish")
+    assert again.status_code == 200, again.text
+    assert again.json()["alreadyPublished"] is True
+    assert again.json()["publishedAt"] == first.json()["publishedAt"]

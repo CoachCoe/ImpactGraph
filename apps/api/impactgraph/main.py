@@ -1199,12 +1199,17 @@ public_api.register(
 
 
 @app.post("/claims/{claim_id}/publish", status_code=201)
-def publish_claim(request: Request, claim_id: str, user: CurrentUser = None):
-    """Publish a claim as a public proof. There is no route that unpublishes it."""
+def publish_claim(response: Response, request: Request, claim_id: str, user: CurrentUser = None):
+    """Publish a claim as a public proof. There is no route that unpublishes it.
+
+    201 the first time and 200 afterwards. Publishing twice is a no-op by design -- the
+    timestamp does not move -- and answering "created" to a call that created nothing is
+    the kind of small lie a client eventually depends on.
+    """
     actor = actor_for(require_user(user, {Role.OPERATOR, Role.ADMIN}))
     _require_database("Publishing")
     service = ClaimPublicationService()
-    return _tenant_write(
+    published = _tenant_write(
         lambda session: service.publish(
             session,
             actor=actor,
@@ -1212,6 +1217,9 @@ def publish_claim(request: Request, claim_id: str, user: CurrentUser = None):
             correlation_id=request.state.correlation_id,
         )
     )
+    if published.get("alreadyPublished"):
+        response.status_code = 200
+    return published
 
 
 @app.get("/claims/{claim_id}/proof")

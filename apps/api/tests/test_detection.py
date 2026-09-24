@@ -404,3 +404,40 @@ def test_what_the_hash_does_not_catch_is_stated_rather_than_implied():
 
     assert hamming(upright, mirrored) > NEAR_DUPLICATE_DISTANCE
     assert "mirrored, rotated or cropped hard" in reused_images.__doc__
+
+
+def test_the_explanation_reads_the_way_the_document_does():
+    """Matching normalises case and punctuation; explaining must not. Walking the demo
+    produced "Invoice INV8291 from AQUASYSTEMSLTD", which is not a vendor anybody
+    recognises, on the one line the whole design says a reviewer has to be able to act
+    on."""
+    findings = duplicate_invoices(
+        [
+            _invoice("ev-1", "prog-a", number="INV-8291", vendor="Aqua Systems Ltd."),
+            _invoice("ev-2", "prog-b", number="inv8291", vendor="AQUA SYSTEMS LTD"),
+        ]
+    )
+
+    assert "INV-8291" in findings[0].explanation
+    assert "Aqua Systems Ltd." in findings[0].explanation
+    assert "AQUASYSTEMSLTD" not in findings[0].explanation
+    assert findings[0].subjects["vendor"] == "Aqua Systems Ltd."
+
+
+def test_readable_output_does_not_make_the_identity_unstable():
+    """The key stays normalised. If it followed the displayed spelling, the same invoice
+    filed as "Aqua Systems Ltd." and "AQUA SYSTEMS LTD" would be two findings."""
+    first = duplicate_invoices(
+        [
+            _invoice("ev-1", "prog-a", vendor="Aqua Systems Ltd.", number="INV-8291"),
+            _invoice("ev-2", "prog-b", vendor="Aqua Systems Ltd.", number="INV-8291"),
+        ]
+    )[0]
+    second = duplicate_invoices(
+        [
+            _invoice("ev-2", "prog-b", vendor="AQUA SYSTEMS LTD", number="inv8291"),
+            _invoice("ev-1", "prog-a", vendor="Aqua Systems Ltd.", number="INV-8291"),
+        ]
+    )[0]
+
+    assert first.key == second.key
