@@ -27,7 +27,11 @@ case "${1:-up}" in
     [[ -f "$ARTIFACT" ]] || die "$ARTIFACT is missing. Run 'cd contracts && forge build' first."
     # Checked here rather than at container start: a stack that comes up and then fails on
     # the operator's first upload is a worse way to learn the key is missing.
-    [[ -n "${TINKER_API_KEY:-}" ]] || die "TINKER_API_KEY is not set. The demo reads uploaded documents with a model; export a key, or set AI_PROVIDER=mock in $COMPOSE_FILE to run the fixture reader instead."
+    # Checked here rather than at container start, and only when the stack is actually
+    # going to use it: AI_PROVIDER=mock is a supported way to run this without a key.
+    if [[ "${AI_PROVIDER:-tinker}" == "tinker" && -z "${TINKER_API_KEY:-}" ]]; then
+      die "TINKER_API_KEY is not set. The demo reads uploaded documents with a model; export a key, or run with AI_PROVIDER=mock to use the fixture reader instead."
+    fi
     step "Building"
     compose build
     step "Starting (the chain is deployed and seeded on first start)"

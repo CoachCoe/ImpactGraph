@@ -55,4 +55,33 @@ jobs:
         working-directory: apps/web
       - run: npm test -- --run && npm run typecheck && npm run build
         working-directory: apps/web
+  browser:
+    runs-on: ubuntu-latest
+    # The journeys the product is demonstrated on. They rotted once already -- the
+    # operator journey navigated to a page that had required a session since
+    # authentication replaced the role header -- because nothing ran them. A suite the
+    # README tells people to run before touching the chain path has to actually run.
+    steps:
+      - uses: actions/checkout@v4
+      # The demo stack deploys the registry from this artifact before it will start.
+      - uses: foundry-rs/foundry-toolchain@v1
+      - run: forge build
+        working-directory: contracts
+      # The fixture reader, so this needs no model credentials. It recognises the
+      # INV-8291 document the operator journey uploads and refuses anything else.
+      - run: docker compose -f docker-compose.demo.yml up -d --wait
+        env:
+          AI_PROVIDER: mock
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm, cache-dependency-path: apps/web/package-lock.json }
+      - run: npm ci
+        working-directory: apps/web
+      - run: npx playwright install --with-deps chromium
+        working-directory: apps/web
+      - run: npx playwright test
+        working-directory: apps/web
+      - if: failure()
+        run: docker compose -f docker-compose.demo.yml logs --tail 200
+      - if: always()
+        run: docker compose -f docker-compose.demo.yml down -v
 

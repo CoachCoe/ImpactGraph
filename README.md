@@ -383,9 +383,10 @@ What is not:
   [security](docs/security.md) rather than left to be discovered.
 - **CI coverage is narrower than the trust boundary.** CI runs Foundry, backend unit/API
   against a PostgreSQL service — so the migrations are applied where they are deployed
-  rather than only against SQLite — frontend unit/type, and production build gates. It
-  does not run Anvil-backed integration or Playwright. Run `make test-local-e2e` and
-  `make test-browser-e2e` locally before changing anything on the chain path. Receipt observation is the exception: the
+  rather than only against SQLite — frontend unit/type, production build gates, and the
+  Playwright journeys against the full demo stack with `AI_PROVIDER=mock`. It does not
+  run the Anvil-backed evidence integration script; run `make test-local-e2e` locally
+  before changing anything on the chain path. Receipt observation is the exception: the
   check that an event came from the configured registry, and not from any contract that
   emits the same signature, is covered against stub RPC objects and needs no chain.
 

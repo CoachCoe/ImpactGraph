@@ -30,7 +30,10 @@ x-chain: &chain
   # objects and their keys undoes every erasure the moment it is restored.
   EVIDENCE_KEY_PATH: /data/evidence-keys
   EVIDENCE_ENCRYPTION_KEY: "${EVIDENCE_ENCRYPTION_KEY:-aW1wYWN0Z3JhcGgtZGVtby1rZXktbm90LXNlY3JldCE=}"
-  AI_PROVIDER: tinker
+  # Overridable so the stack can run without a Tinker key: CI and any contributor who
+  # has not got one set AI_PROVIDER=mock, which reads the INV-8291 fixture and refuses
+  # anything else. The default stays real extraction, because that is the demo.
+  AI_PROVIDER: "${AI_PROVIDER:-tinker}"
   # Not ${VAR:?...}: that would fail `demo.sh down` and `logs` too. Absent, the API
   # refuses to start, and scripts/demo.sh says so before anything is built.
   TINKER_API_KEY: "${TINKER_API_KEY:-}"

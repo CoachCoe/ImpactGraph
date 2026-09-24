@@ -3,10 +3,10 @@ import { expect, test, type Page } from "@playwright/test";
 /**
  * The two journeys the product is demonstrated on.
  *
- * CI does not run these, which is how they were able to rot: the operator journey
- * navigated straight to a page that has required a session ever since authentication
- * replaced the role header, and both asserted copy that had since changed. A suite the
- * README tells people to run before touching the chain path has to actually pass.
+ * These rotted once because nothing ran them: the operator journey navigated straight to
+ * a page that has required a session ever since authentication replaced the role header,
+ * and both asserted copy that had since changed. CI now runs them against the demo stack
+ * on every push, so the next time they drift it is a red build rather than a discovery.
  */
 
 const OPERATOR = "operator@globalwater.example";
