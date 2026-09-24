@@ -76,7 +76,7 @@ def follow(email: str, claim_id: str = CLAIM_ID, confirm: bool = True) -> str:
         token = subscribe(session, email=email, claim_id=claim_id)
     assert token is not None
     if confirm:
-        TestClient(app).post("/notifications/confirm", params={"token": token})
+        TestClient(app).post("/notifications/confirm", json={"token": token})
     return token
 
 
@@ -144,7 +144,7 @@ def test_an_unconfirmed_address_is_never_written_to():
 
 def test_unsubscribing_is_honoured_immediately(client):
     token = follow("donor@example.com")
-    assert client.post("/notifications/unsubscribe", params={"token": token}).status_code == 200
+    assert client.post("/notifications/unsubscribe", json={"token": token}).status_code == 200
 
     assert session_factory is not None
     with session_factory.begin() as session:
@@ -215,7 +215,7 @@ def test_a_stranger_cannot_resubscribe_someone_who_opted_out(client):
     the confirmation would let anyone re-enrol anyone, with no message to say so.
     """
     token = follow("donor@example.com")
-    client.post("/notifications/unsubscribe", params={"token": token})
+    client.post("/notifications/unsubscribe", json={"token": token})
 
     client.post(f"/claims/{CLAIM_ID}/follow", json={"email": "donor@example.com"})
 
@@ -246,7 +246,7 @@ def test_an_established_follower_keeps_the_token_they_were_given(client):
     """Reissuing on every request would let anyone break someone's unsubscribe link."""
     token = follow("donor@example.com")
     client.post(f"/claims/{CLAIM_ID}/follow", json={"email": "donor@example.com"})
-    assert client.post("/notifications/unsubscribe", params={"token": token}).status_code == 200
+    assert client.post("/notifications/unsubscribe", json={"token": token}).status_code == 200
 
 
 def test_a_crash_between_claiming_and_sending_does_not_lose_the_message(client, sign_in):
@@ -303,3 +303,13 @@ def test_a_permanently_failing_address_is_eventually_given_up_on(client, sign_in
             select(OutboxRecord).where(OutboxRecord.topic == CLAIM_STATUS_CHANGED)
         )
     assert intent is not None and intent.processed_at is not None
+
+
+def test_a_subscription_token_is_not_accepted_in_the_url(client):
+    """#12 moved the funder consent token into the body because a URL is written to
+    access logs, kept in browser history and handed onward in a Referer. These two
+    endpoints kept taking theirs as a query parameter, and the token is a bearer
+    credential for somebody's subscription."""
+    for path in ("/notifications/confirm", "/notifications/unsubscribe"):
+        refused = client.post(f"{path}?token=some-token-that-is-long-enough")
+        assert refused.status_code == 422, path

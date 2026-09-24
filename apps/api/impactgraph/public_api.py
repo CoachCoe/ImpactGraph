@@ -109,6 +109,11 @@ def _client(request: Request) -> str:
     return forwarded.split(",")[0].strip() or peer
 
 
+def client_address(request: Request) -> str:
+    """The trusted peer address, for anything that has to decide who is calling."""
+    return _client(request)
+
+
 def enforce_rate_limit(request: Request, response: Response) -> None:
     allowed, remaining = limiter.check(_client(request))
     response.headers["X-RateLimit-Limit"] = str(limiter.requests)

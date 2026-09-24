@@ -94,11 +94,44 @@ def test_the_backlog_reader_measures_the_oldest_unsubmitted_row():
                 session.delete(record)
 
 
-def test_the_metrics_endpoint_serves_the_prometheus_exposition_format(client):
-    response = client.get("/metrics")
+def _scraper() -> TestClient:
+    """A caller on the network the API is deployed to, which is where a scraper lives."""
+    return TestClient(app, client=("10.0.0.7", 51234))
+
+
+def test_the_metrics_endpoint_serves_the_prometheus_exposition_format():
+    response = _scraper().get("/metrics")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")
     assert "impactgraph_outbox_pending" in response.text
+
+
+def test_metrics_are_not_served_to_the_open_internet(client):
+    """Backlog depth, error rates and per-route latency are an operational map: they say
+    which part of this is struggling and when a queue is worth flooding. This was served
+    to anyone who asked for it."""
+    refused = client.get("/metrics")
+    assert refused.status_code == 403
+    assert "impactgraph_outbox_pending" not in refused.text
+
+
+def test_a_configured_token_lets_a_scraper_in_from_anywhere(monkeypatch):
+    monkeypatch.setenv("METRICS_TOKEN", "scrape-me-6f2b")
+    remote = TestClient(app, client=("203.0.113.9", 4444))
+
+    assert remote.get("/metrics").status_code == 401
+    assert remote.get("/metrics", headers={"Authorization": "Bearer wrong"}).status_code == 401
+
+    allowed = remote.get("/metrics", headers={"Authorization": "Bearer scrape-me-6f2b"})
+    assert allowed.status_code == 200
+    assert "impactgraph_outbox_pending" in allowed.text
+
+
+def test_a_token_replaces_the_network_check_rather_than_adding_to_it(monkeypatch):
+    """Otherwise setting a token to scrape remotely would silently keep the endpoint open
+    to everything on the local network that does not present one."""
+    monkeypatch.setenv("METRICS_TOKEN", "scrape-me-6f2b")
+    assert _scraper().get("/metrics").status_code == 401
 
 
 def test_an_integrity_check_counts_the_outcome_it_persisted(client):

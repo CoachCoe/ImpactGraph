@@ -4,6 +4,7 @@ import asyncio
 import os
 from datetime import UTC, datetime
 from functools import lru_cache
+from hmac import compare_digest
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
@@ -90,6 +91,7 @@ from .persistence import (
     RiskFindingRecord,
     UserRecord,
 )
+from .public_api import client_address, enforce_rate_limit
 from .read_model import (
     CLAIM_ID as SEEDED_CLAIM_ID,
 )
@@ -918,8 +920,33 @@ def _outbox_backlog() -> tuple[int, float]:
 REGISTRY.register(OutboxCollector(_outbox_backlog))
 
 
+#: Loopback and the RFC1918 ranges a scraper shares a network with. A metrics endpoint
+#: is reconnaissance: backlog depth, error rates and per-route latency tell an attacker
+#: which part of this is struggling and when a queue is worth flooding.
+_PRIVATE_PREFIXES = ("127.", "::1", "10.", "192.168.", "172.16.", "172.17.", "172.18.",
+                     "172.19.", "172.2", "172.30.", "172.31.", "localhost")
+
+
 @app.get("/metrics")
-def metrics():
+def metrics(request: Request):
+    """Counters, for a scraper on the same network or one holding METRICS_TOKEN.
+
+    This was served to anyone who asked. Prometheus output is not sensitive in the way a
+    record is, but it is an operational map, and publishing it is a choice rather than a
+    default worth inheriting.
+    """
+    token = os.getenv("METRICS_TOKEN", "")
+    if token:
+        header = request.headers.get("authorization", "")
+        presented = header[7:] if header.lower().startswith("bearer ") else ""
+        if not compare_digest(presented, token):
+            raise HTTPException(401, "Metrics require the configured bearer token")
+    elif not client_address(request).startswith(_PRIVATE_PREFIXES):
+        raise HTTPException(
+            403,
+            "Metrics are served to a scraper on this network. Set METRICS_TOKEN to "
+            "scrape from elsewhere.",
+        )
     return Response(content=render(), media_type=CONTENT_TYPE_LATEST)
 
 
@@ -962,8 +989,23 @@ def follow_claim(claim_id: str, body: FollowRequest):
     return {"status": "check_your_email"}
 
 
+class SubscriptionToken(BaseModel):
+    """The token from a notification message.
+
+    In the body rather than the query string, for the reason #12 moved the funder consent
+    token there: a URL is written to access logs, kept in browser history and handed to
+    the next site in a Referer. This token is a bearer credential for somebody's
+    subscription, and `/funding/name-consent` already treats its equivalent this way.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=16, max_length=128)
+
+
 @app.post("/notifications/confirm")
-def confirm_following(token: str):
+def confirm_following(body: SubscriptionToken):
+    token = body.token
     _require_database("Notifications")
     with session_factory.begin() as session:
         subscription = resolve_token(session, token)
@@ -976,8 +1018,9 @@ def confirm_following(token: str):
 
 
 @app.post("/notifications/unsubscribe")
-def unsubscribe_from_claim(token: str):
+def unsubscribe_from_claim(body: SubscriptionToken):
     """One click, no account, and honoured immediately."""
+    token = body.token
     _require_database("Notifications")
     with session_factory.begin() as session:
         subscription = resolve_token(session, token)
@@ -996,25 +1039,28 @@ def _csv_response(body: str, filename: str) -> Response:
 
 
 @app.get("/export/programs/{program_id}/money-trail.csv")
-def export_money_trail(program_id: str):
+def export_money_trail(program_id: str, request: Request, response: Response):
     """Public, like the money trail it serialises."""
     _require_database("Export")
+    enforce_rate_limit(request, response)
     with session_factory() as session:
         body = money_trail_csv(session, program_id)
     return _csv_response(body, f"{program_id}-money-trail.csv")
 
 
 @app.get("/export/programs/{program_id}/outcomes.csv")
-def export_outcomes(program_id: str):
+def export_outcomes(program_id: str, request: Request, response: Response):
     _require_database("Export")
+    enforce_rate_limit(request, response)
     with session_factory() as session:
         body = outcomes_csv(session, program_id)
     return _csv_response(body, f"{program_id}-outcomes.csv")
 
 
 @app.get("/export/claims/{claim_id}/provenance.csv")
-def export_provenance(claim_id: str):
+def export_provenance(claim_id: str, request: Request, response: Response):
     _require_database("Export")
+    enforce_rate_limit(request, response)
     with session_factory() as session:
         if not claim_exists(session, claim_id):
             raise HTTPException(404, "Claim not found")
@@ -1023,7 +1069,9 @@ def export_provenance(claim_id: str):
 
 
 @app.get("/export/claims/{claim_id}/evidence.csv")
-def export_evidence(claim_id: str, user: CurrentUser = None):
+def export_evidence(
+    claim_id: str, request: Request, response: Response, user: CurrentUser = None
+):
     """Exactly the rows this reader could already open, one at a time.
 
     Decided here against the session rather than inside the serialiser, so an export
@@ -1032,6 +1080,7 @@ def export_evidence(claim_id: str, user: CurrentUser = None):
     the evidence endpoint uses, so the two cannot drift apart.
     """
     _require_database("Export")
+    enforce_rate_limit(request, response)
     with session_factory() as session:
         if not claim_exists(session, claim_id):
             raise HTTPException(404, "Claim not found")
@@ -2154,10 +2203,17 @@ def _registered_evidence_hash(record: EvidenceRecord) -> str:
 
 
 @app.post("/evidence/{evidence_id}/verify-integrity")
-def integrity(request: Request, evidence_id: str, user: CurrentUser = None):
+def integrity(
+    request: Request, response: Response, evidence_id: str, user: CurrentUser = None
+):
     # Deliberately public: verifying that evidence still matches its published commitment
     # is the product's central claim, and a donor must be able to check it without an
     # account. Visibility is enforced instead -- non-public evidence requires a session.
+    #
+    # Rate limited because it is the one public route that does real work per call: it
+    # reads an object out of storage and hashes it. Anonymous, unbounded and expensive is
+    # the combination worth not leaving open.
+    enforce_rate_limit(request, response)
     _require_evidence_visibility(evidence_id, user)
     if session_factory:
         with session_factory.begin() as session:
@@ -2230,14 +2286,18 @@ def integrity(request: Request, evidence_id: str, user: CurrentUser = None):
 
 
 @app.post("/demo/evidence/{evidence_id}/tamper")
-def tamper(request: Request, evidence_id: str, user: CurrentUser = None):
+def tamper(
+    request: Request, response: Response, evidence_id: str, user: CurrentUser = None
+):
     require_user(user, {Role.ADMIN})
     if settings.demo_mode == "sepolia":
         raise HTTPException(409, "Refusing to alter evidence in a public demo run")
     storage_uri = _evidence_storage_uri(evidence_id)
     evidence_storage.overwrite(storage_uri, TAMPERED_INVOICE_BYTES)
     # The same correlation identifier covers the tamper and the check that detects it.
-    return integrity(request, evidence_id, user=user)
+    # Keyword arguments: this calls the route function directly, so a positional list is
+    # a thing that breaks silently the next time the signature gains a dependency.
+    return integrity(request=request, response=response, evidence_id=evidence_id, user=user)
 
 
 def _evidence_storage_uri(evidence_id: str) -> str:

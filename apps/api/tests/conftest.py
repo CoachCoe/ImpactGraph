@@ -44,6 +44,7 @@ from impactgraph.auth import DEMO_PASSWORD, seed_demo_accounts
 from impactgraph.database import create_session_factory
 from impactgraph.evidence import FileEvidenceStorage
 from impactgraph.persistence import Base
+from impactgraph.public_api import limiter
 from impactgraph.read_model import reset_read_model, seed_read_model
 
 _factory = create_session_factory(os.environ["DATABASE_URL"])
@@ -64,6 +65,19 @@ def fresh_database():
     yield
     with _factory.begin() as session:
         reset_read_model(session, _storage)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_rate_limit():
+    """Every test starts with a full allowance.
+
+    The limiter is one in-memory counter per process, so without this the suite spends a
+    shared window: tests pass or fail depending on how many ran before them and in what
+    order, which is the least useful kind of flake.
+    """
+    limiter.forget()
+    yield
+    limiter.forget()
 
 
 @pytest.fixture
