@@ -172,6 +172,7 @@ services:
         # Inlined at build time. The browser reaches the API and the chain directly, so
         # these are the visitor's addresses, not the in-network ones.
         NEXT_PUBLIC_API_BASE_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+        NEXT_PUBLIC_SITE_URL: ${PUBLIC_SITE_URL:-http://localhost:3000}
         NEXT_PUBLIC_RPC_URL: ${PUBLIC_RPC_URL:-http://localhost:8545}
         NEXT_PUBLIC_CHAIN_ID: "31337"
         NEXT_PUBLIC_CHAIN_NAME: "Anvil local EVM"

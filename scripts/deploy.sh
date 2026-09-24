@@ -59,8 +59,16 @@ preflight() {
     [[ -n "${IMPACT_REGISTRY_ADDRESS:-}" ]] \
       || die "IMPACT_REGISTRY_ADDRESS is required. Deploy first with scripts/deploy-sepolia.sh."
   fi
-  [[ "${AI_PROVIDER:-mock}" == "mock" ]] \
-    || die "AI_PROVIDER=${AI_PROVIDER} is not implemented; the API will refuse to start."
+  case "${AI_PROVIDER:-mock}" in
+    mock) ;;
+    tinker)
+      [[ -n "${TINKER_API_KEY:-}" ]] \
+        || die "AI_PROVIDER=tinker requires TINKER_API_KEY."
+      ;;
+    *) die "AI_PROVIDER=${AI_PROVIDER} is not implemented; choose mock or tinker." ;;
+  esac
+  [[ -n "${EVIDENCE_ENCRYPTION_KEY:-}" ]] \
+    || die "EVIDENCE_ENCRYPTION_KEY is required. See .env.production.example."
 }
 
 api_run() { compose run --rm --no-deps -T api "$@"; }

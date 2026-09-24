@@ -82,6 +82,11 @@ export type Evidence = {
   integrityStatus: string;
   blockchainStatus: string;
   extraction?: Record<string, string | number>;
+  providerMetadata?: {
+    provider: string;
+    model: string;
+    processedAt: string;
+  } | null;
   reconciliation?: { status: string; checks: ReconciliationCheck[] };
   blockchainReference?: { transactionHash: string; blockNumber: number };
 };

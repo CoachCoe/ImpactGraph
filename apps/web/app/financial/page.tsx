@@ -49,8 +49,8 @@ export default async function FinancialPage({
         <section className="panel">
           <h2>The financial ledger is unavailable</h2>
           <p className="subtle">
-            This page reads live records. Start the API with <code>make api</code> after
-            <code>make db-up &amp;&amp; make migrate &amp;&amp; make seed</code>.
+            No cached totals are shown because this page only presents records it can read
+            and check now. Please try again shortly.
           </p>
         </section>
       </div>

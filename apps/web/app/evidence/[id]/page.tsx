@@ -96,10 +96,11 @@ export default async function EvidenceInspector({
                 </div>
               </div>
               <p className="note">
-                Extracted by the mock analysis provider at{" "}
-                {Math.round(Number(extraction.confidence) * 100)}% confidence. This is
-                extraction confidence, not trust: AI proposes facts and never verifies a
-                claim.
+                Read by {evidence.providerMetadata?.provider ?? "the analysis provider"}
+                {evidence.providerMetadata?.model
+                  ? ` using ${evidence.providerMetadata.model}`
+                  : ""}. Confidence is self-reported per field, not measured accuracy or
+                trust: AI proposes facts and never verifies a claim.
               </p>
             </section>
           )}

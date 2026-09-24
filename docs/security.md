@@ -95,7 +95,9 @@ AI keys, or production database credentials. Anvil keys are publicly known devel
 keys and must never hold value. Sepolia deployment is explicit; browser code never receives
 a backend signing key.
 
-This POC does not include identity proofing, malware scanning, hardened object storage IAM, encryption key management, rate
-distributed rate limiting, CSRF/session protection, KYC/AML, HSM signing, high-availability workers, or a
-security audit. Add these before processing
+Evidence is encrypted at rest with per-object data keys, but this POC does not include
+managed encryption-key custody or hardened object-storage IAM. It also does not include
+identity proofing, malware scanning, distributed rate limiting, dedicated CSRF tokens
+(SameSite cookies provide the current mitigation), KYC/AML, HSM signing,
+high-availability workers, or an independent security audit. Add these before processing
 real users or sensitive evidence.

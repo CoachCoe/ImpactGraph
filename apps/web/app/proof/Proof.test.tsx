@@ -101,15 +101,25 @@ describe("public proof page", () => {
   });
 
   it("offers an embed that is one line and points at the live badge", async () => {
+    const previousSiteUrl = process.env.NEXT_PUBLIC_SITE_URL;
+    process.env.NEXT_PUBLIC_SITE_URL = "https://proofs.example/";
     readProof.mockResolvedValue(ok(PROOF));
-    render(
-      await ProofPage({ params: Promise.resolve({ id: PROOF.claim.id }) }),
-    );
-    const snippet = screen.getByText(/badge\.svg/);
-    expect(snippet.textContent).toContain(
-      `/claims/${PROOF.claim.id}/badge.svg`,
-    );
-    expect(snippet.textContent!.split("\n")).toHaveLength(1);
+    try {
+      render(
+        await ProofPage({ params: Promise.resolve({ id: PROOF.claim.id }) }),
+      );
+      const snippet = screen.getByText(/badge\.svg/);
+      expect(snippet.textContent).toContain(
+        `https://proofs.example/api/claims/${PROOF.claim.id}/badge.svg`,
+      );
+      expect(snippet.textContent).toContain(
+        `https://proofs.example/proof/${PROOF.claim.id}`,
+      );
+      expect(snippet.textContent!.split("\n")).toHaveLength(1);
+    } finally {
+      if (previousSiteUrl === undefined) delete process.env.NEXT_PUBLIC_SITE_URL;
+      else process.env.NEXT_PUBLIC_SITE_URL = previousSiteUrl;
+    }
   });
 
   it("tells a reader the page shows current status, not the status when it was shared", async () => {
@@ -139,6 +149,8 @@ describe("public proof page", () => {
     expect(String(metadata.openGraph?.title)).toContain(
       "Verification withdrawn",
     );
+    expect(String(metadata.description)).toContain("Current status: Verification withdrawn");
+    expect(String(metadata.description)).not.toContain("Verified against evidence");
   });
 
   it("keeps an unpublished claim out of search results", async () => {

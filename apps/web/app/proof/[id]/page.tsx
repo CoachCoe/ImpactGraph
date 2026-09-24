@@ -24,7 +24,7 @@ export async function generateMetadata({ params }: Params): Promise<Metadata> {
   const { claim, operator } = found.data;
   const standing = claimStanding(claim.status);
   const title = `${operator.name} — ${standing.badge}`;
-  const description = `${claim.statement} Verified against evidence committed to a public blockchain, and checkable without an account.`;
+  const description = `${claim.statement} Current status: ${standing.badge}. Inspect the evidence and commitments without an account.`;
   return {
     title,
     description,
@@ -192,7 +192,7 @@ export default async function ProofPage({ params }: Params) {
       <EmbedBadge claimId={claim.id} statement={claim.statement} />
 
       <p className="proofFooter">
-        Verified on <Link href="/">ImpactGraph</Link> · this page shows the
+        Recorded on <Link href="/">ImpactGraph</Link> · this page shows the
         claim&rsquo;s current status, not the status on the day it was shared.
       </p>
     </div>
@@ -206,7 +206,7 @@ function EmbedBadge({
   claimId: string;
   statement: string;
 }) {
-  const base = process.env.NEXT_PUBLIC_API_URL ?? "";
+  const base = (process.env.NEXT_PUBLIC_SITE_URL ?? "").replace(/\/$/, "");
   const snippet = `<a href="${base}/proof/${claimId}"><img src="${base}/api/claims/${claimId}/badge.svg" alt="${statement.replace(/"/g, "&quot;")}" height="44" /></a>`;
   return (
     <section className="panel">
@@ -252,10 +252,10 @@ function Unavailable() {
   return (
     <section className="section">
       <div className="panel">
-        <h2>The transparency API is unavailable</h2>
+        <h2>The live transparency record is temporarily unavailable</h2>
         <p className="subtle">
-          This page reads live data rather than rendering a fixed copy, so there
-          is nothing to show until the API is reachable.
+          No cached status is shown because a proof page must reflect the current record.
+          Please try again shortly.
         </p>
       </div>
     </section>

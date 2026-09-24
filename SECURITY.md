@@ -14,7 +14,7 @@ Do not deploy this to Ethereum mainnet.
 Please do not open a public issue.
 
 Report privately through
-[GitHub Security Advisories](https://github.com/CoachCoe/Web3Connector/security/advisories/new),
+[GitHub Security Advisories](https://github.com/CoachCoe/ImpactGraph/security/advisories/new),
 which lets us discuss and fix the issue before it is disclosed.
 
 Please include what an attacker gains, the steps to reproduce, and the commit you tested.
@@ -42,8 +42,9 @@ the one claim the product makes.
 
 These are known and documented, not vulnerabilities:
 
-- The AI extractor, financial data provider, NGO records, outcomes and demo evidence are
-  deterministic fixtures. They are fictional by design.
+- The financial activity, NGO records, outcomes and demo evidence are fictional by design.
+  The offline extractor is deterministic; a configured hosted demo may run real Inkling
+  extraction against those fictional documents. Model output is never verification.
 - Demo-only endpoints under `/demo/*`, including the tampering fixture. They are refused
   when the stack runs against a public network.
 - Anvil's default accounts and their well-known private keys, which appear in the demo

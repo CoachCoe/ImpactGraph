@@ -22,6 +22,7 @@ const mono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"),
   title: "ImpactGraph — Verifiable impact",
   description: "Inspect the chain of trust behind real-world impact.",
 };

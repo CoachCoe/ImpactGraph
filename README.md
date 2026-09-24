@@ -131,8 +131,9 @@ The chain publishes port 8545 so a browser wallet can reach it. If something els
 host already holds that port, the wallet will silently talk to the wrong chain — set
 `CHAIN_PORT` and `PUBLIC_RPC_URL` to move it.
 
-On a host, set `PUBLIC_API_URL` and `PUBLIC_RPC_URL` to the addresses a visitor's browser
-will use; they are inlined into the web bundle at build time.
+On a host, set `PUBLIC_SITE_URL`, `PUBLIC_API_URL` and `PUBLIC_RPC_URL` to the addresses a
+visitor's browser will use; they are inlined into the web bundle at build time. The site
+URL is also the canonical origin used by social cards and copied proof badges.
 
 This stack is deliberately separate from `docker-compose.prod.yml`, which points at a real
 network and must never run a chain of its own.
@@ -216,10 +217,10 @@ available as `make deploy-build`, `make deploy-up`, `make deploy-release` and so
 provenance read models, the web app, and that evidence integrity resolves the stored object
 and reports MATCH — not merely that a container started.
 
-Preflight refuses to start when the contract ABI has not been built, when `AI_PROVIDER`
-names a provider that does not exist, and, on Sepolia, when `CHAIN_ID` is wrong, the
-registry address is missing, or `EVM_SENDER_ADDRESS` is set — the backend must not sign on a
-public network.
+Preflight refuses to start when the contract ABI has not been built, evidence encryption
+has no key, `AI_PROVIDER` names a provider that does not exist, Tinker has no API key, or,
+on Sepolia, when `CHAIN_ID` is wrong, the registry address is missing, or
+`EVM_SENDER_ADDRESS` is set — the backend must not sign on a public network.
 
 `NEXT_PUBLIC_*` values are inlined into the web bundle at build time, so changing them
 requires a rebuild rather than a restart.
@@ -355,8 +356,11 @@ delivery, because an operator controlling both at once controls who gets asked.
 
 ## Limitations
 
-The banking provider, AI provider, NGO records, outcomes and all demo evidence are
-fictional and deterministic. Never present mock or Anvil results as Ethereum verification.
+The banking activity, NGO records, outcomes and all demo evidence are fictional. Hosted
+Inkling extraction really runs when configured, but it reads a fictional document and its
+self-reported confidence is not an accuracy measurement. Offline extraction is a
+deterministic fixture. Never present model output, mock data or Anvil results as independent
+verification.
 
 What is real: the Solidity registry and its role checks; evidence upload, original-byte
 hashing and the immutability of the registered commitment; integrity verification against the stored bytes; the
