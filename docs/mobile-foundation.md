@@ -112,6 +112,10 @@ stays web-only: it is keyed by an email and returns to website pages.
   again. A different amount expires the earlier session at Stripe and returns a new one.
   If the earlier session was paid just as the request arrived the answer is `409`: poll
   `GET /donor/me/recurring` for the active gift.
+- The website's `beginCheckout` (web only, not bundled) now also lets its donors restart:
+  it expires an earlier open session for the email and creates a new one. That includes a
+  session the app opened, so an app checkout can be closed from the website; treat an
+  expired session like an abandoned one and start again.
 - Checkout returns to `<origin>/app/return?result=success&session_id=<id>` or
   `<origin>/app/return?result=cancel`. The origin is `DONOR_NATIVE_RETURN_ORIGIN`, else the
   public origin. Neither address proves payment: poll `GET /donor/me/recurring` until its
