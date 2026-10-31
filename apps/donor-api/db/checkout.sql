@@ -28,3 +28,9 @@ status=CASE WHEN status='PENDING' THEN 'OPEN' ELSE status END WHERE id=$1;
 -- The checkout attempt holding the donor's recurring slot, locked.
 SELECT a.* FROM donor_recurring_reservations r JOIN donor_stripe_checkouts a ON a.id=r.attempt_id
 WHERE r.donor_id=$1 FOR UPDATE OF a;
+
+-- name: CountRecentCheckoutAttempts :one
+-- Hosted checkouts begun for the donor since the cutoff, the budget that
+-- bounds how often anyone can make the website expire the donor's open one.
+SELECT count(*)::bigint FROM donor_stripe_checkouts a JOIN donor_checkouts c ON c.id=a.checkout_id
+WHERE c.donor_id=$1 AND a.created_at>$2;

@@ -194,7 +194,7 @@ type openCheckout struct{ attempt queries.DonorStripeCheckout }
 func (openCheckout) Error() string { return "an equivalent checkout is already open" }
 
 // staleCheckout is returned the same way when the donor's earlier unpaid
-// native checkout holds the recurring slot but cannot answer the request, so
+// checkout holds the recurring slot but cannot answer the request, so
 // it must be expired at the processor before the slot is free.
 type staleCheckout struct{ attempt queries.DonorStripeCheckout }
 
@@ -203,14 +203,47 @@ func (staleCheckout) Error() string { return "an unpaid checkout holds the recur
 // reuseMargin is the time an open checkout must have left to be handed back.
 const reuseMargin = 5 * time.Minute
 
-// heldCheckout decides what the recurring slot's holder means for a native
-// request: the holder itself, a holder to expire, or a conflict. Only an
-// open, unpaid native checkout is ever touched; a paid or pending one, or any
-// request from the website, is the conflict it always was.
+// restartBudget caps the hosted checkouts, counting the new one, begun for one donor in restartWindow
+// before a website request may expire another open one. The website cannot
+// tell the donor from someone who typed their email, so this bounds how often
+// a stranger can make the processor close the donor's checkout.
+//
+// A checkout begun within restartGrace is never expired by another website
+// request. Requests racing to restart would otherwise keep expiring each
+// other's replacement and leave nothing open; a person abandoning a page
+// needs longer than that to come back.
+const (
+	restartBudget = 10
+	restartWindow = time.Hour
+	restartGrace  = 15 * time.Second
+)
+
+// heldCheckout decides what the recurring slot's holder means for a request:
+// the holder itself, a holder to expire, or a conflict. Only an open, unpaid
+// checkout is ever touched; a paid or pending one is the conflict it always
+// was. A signed-in app request may be handed its own open session back. A
+// website request never is: its caller is whoever typed the email, and the
+// session's URL pays on the donor's behalf, so it is expired and replaced.
 func heldCheckout(ctx context.Context, q *queries.Queries, donor queries.Donor, request payments.CheckoutRequest, now time.Time) error {
 	held, err := q.ReservedAttempt(ctx, donor.ID)
-	if err != nil || request.NativeReturn == "" || held.Status != "OPEN" || !held.HostedUrl.Valid || !held.StripeSessionID.Valid {
+	if err != nil || held.Status != "OPEN" || !held.HostedUrl.Valid || !held.StripeSessionID.Valid {
 		return payments.ErrCheckoutConflict
+	}
+	if request.NativeReturn == "" {
+		if now.Before(held.CreatedAt.Time.Add(restartGrace)) {
+			return payments.ErrCheckoutConflict
+		}
+		recent, err := q.CountRecentCheckoutAttempts(
+			ctx,
+			queries.CountRecentCheckoutAttemptsParams{DonorID: donor.ID, CreatedAt: timestamp(now.Add(-restartWindow))},
+		)
+		if err != nil {
+			return err
+		}
+		if recent > restartBudget {
+			return payments.ErrCheckoutThrottled
+		}
+		return staleCheckout{held}
 	}
 	draft, err := q.CheckoutDraft(ctx, held.CheckoutID)
 	if err != nil {

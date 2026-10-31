@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
+	"time"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -17,6 +19,10 @@ type CheckoutSource interface {
 	BeginCheckout(context.Context, payments.CheckoutRequest) (payments.CheckoutResult, error)
 	BeginNativeCheckout(context.Context, string, pgtype.UUID, int64) (payments.NativeCheckoutResult, error)
 }
+
+// restartRetryAfter is the wait a throttled restart is told; the budget
+// refills within the hour and an unpaid checkout lapses in one.
+const restartRetryAfter = 10 * time.Minute
 
 type checkoutBody struct {
 	Name      string          `json:"name,omitempty"`
@@ -63,7 +69,16 @@ func (a *api) beginCheckout(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, payments.ErrUnconfigured):
 		paymentsOff.write(w)
 	case errors.Is(err, payments.ErrCheckoutConflict):
-		writeError(w, r, http.StatusConflict, "Checkout conflicts with an existing request", nil)
+		writeError(
+			w,
+			r,
+			http.StatusConflict,
+			"A monthly gift for this email is already active or was started moments ago. Wait a few seconds and try again.",
+			nil,
+		)
+	case errors.Is(err, payments.ErrCheckoutThrottled):
+		w.Header().Set("Retry-After", strconv.Itoa(int(restartRetryAfter.Seconds())))
+		writeError(w, r, http.StatusTooManyRequests, "Too many checkouts were started for this email. Try again later.", nil)
 	case errors.Is(err, store.ErrDenied):
 		writeError(w, r, http.StatusForbidden, "Giving is unavailable for this account", nil)
 	case errors.Is(err, store.EmailRoleError{}):

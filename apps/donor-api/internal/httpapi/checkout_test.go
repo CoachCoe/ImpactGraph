@@ -129,13 +129,22 @@ func TestCheckoutErrorsArePrivate(t *testing.T) {
 	for _, tc := range []struct {
 		err    error
 		status int
-	}{{payments.ErrCheckoutConflict, 409}, {payments.ErrCheckoutInput, 422}, {store.ErrDenied, 403}, {errors.New("private processor details"), 503}} {
+	}{{payments.ErrCheckoutConflict, 409}, {payments.ErrCheckoutThrottled, 429}, {payments.ErrCheckoutInput, 422}, {store.ErrDenied, 403}, {errors.New("private processor details"), 503}} {
 		server := NewServer("", Services{Checkout: &checkoutStub{err: tc.err}})
 		response := httptest.NewRecorder()
 		server.Handler.ServeHTTP(response, checkoutRequest(`{"email":"donor@example.org","amount_minor":3000}`))
 		if response.Code != tc.status || strings.Contains(response.Body.String(), "private processor") {
 			t.Errorf("%v: got %d %s, want %d without processor detail", tc.err, response.Code, response.Body, tc.status)
 		}
+	}
+}
+
+func TestThrottledCheckoutRestartTellsTheClientWhenToRetry(t *testing.T) {
+	server := NewServer("", Services{Checkout: &checkoutStub{err: payments.ErrCheckoutThrottled}})
+	response := httptest.NewRecorder()
+	server.Handler.ServeHTTP(response, checkoutRequest(`{"email":"donor@example.org","amount_minor":3000}`))
+	if response.Code != 429 || response.Header().Get("Retry-After") != "600" {
+		t.Fatalf("got %d with Retry-After %q, want 429 and 600", response.Code, response.Header().Get("Retry-After"))
 	}
 }
 

@@ -14,6 +14,9 @@ import (
 var (
 	ErrCheckoutConflict = errors.New("checkout conflicts with an existing request")
 	ErrCheckoutInput    = errors.New("invalid checkout fields")
+	// ErrCheckoutThrottled reports that this email has begun too many
+	// checkouts for another open one to be expired; the caller retries later.
+	ErrCheckoutThrottled = errors.New("too many checkouts begun for this email; retry later")
 	// ErrProcessorUnavailable reports a processor call that failed or could not
 	// be made; the caller may retry the same request.
 	ErrProcessorUnavailable = errors.New("payment processor is unavailable; retry the same request")

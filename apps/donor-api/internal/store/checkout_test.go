@@ -147,7 +147,14 @@ func TestCheckoutRetriesAndReservations(t *testing.T) {
 	changed = request
 	changed.RequestID = testID(t)
 	if _, err = service.BeginCheckout(ctx, changed); !errors.Is(err, payments.ErrCheckoutConflict) {
-		t.Fatal("second recurring checkout allowed")
+		t.Fatal("a checkout begun moments ago was expired")
+	}
+	// Once abandoned, a restart replaces the session rather than being refused
+	// or handed the earlier session's URL.
+	mustExec(t, database(t), "UPDATE donor_stripe_checkouts SET created_at=now()-interval '1 minute' WHERE id=$1", request.RequestID)
+	replacement, err := service.BeginCheckout(ctx, changed)
+	if err != nil || replacement == result || len(gateway.expired) != 1 || len(gateway.calls) != 3 {
+		t.Fatalf("restart did not replace the session: %+v %v, expired %v", replacement, err, gateway.expired)
 	}
 }
 
