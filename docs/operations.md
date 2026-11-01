@@ -177,7 +177,7 @@ schema.
 | Role | Process | URL variable | Access |
 |---|---|---|---|
 | `dad_api` | API | `DONOR_API_DATABASE_URL` | Reads every table for views and exports; writes donor, session, checkout, recurring-command, projection, staff, content, and webhook-inbox records; cannot change gifts or billing periods, and deletes only reservations, subscription leases, passkey ceremonies, and passkeys |
-| `dad_worker_stripe` | Stripe worker | `DONOR_WORKER_STRIPE_DATABASE_URL` | Processes the webhook inbox and writes gifts, billing periods and observations, refunds, subscriptions, projections, and the mail and push queues; reads sessions only to find app devices; no staff or content records |
+| `dad_worker_stripe` | Stripe worker | `DONOR_WORKER_STRIPE_DATABASE_URL` | Processes the webhook inbox and writes gifts, billing periods and observations, refunds, subscriptions, card fingerprints, projections, and the mail and push queues; reads sessions only to find app devices; no staff or content records |
 | `dad_worker_projections` | Projection worker | `DONOR_WORKER_PROJECTIONS_DATABASE_URL` | Reads financial facts; writes projections and queues mail and push; deletes expired referral touches |
 | `dad_worker_login_email` | Login-email worker | `DONOR_WORKER_LOGIN_EMAIL_DATABASE_URL` | Sign-in email queue and the links it issues |
 | `dad_worker_email_changes` | Email-change worker | `DONOR_WORKER_EMAIL_CHANGES_DATABASE_URL` | Email-change proofs |

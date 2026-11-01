@@ -137,7 +137,9 @@ address notifications; they are not credentials. Every revocation clears the ses
 token, which a database check constraint requires of any revocation, and delivery
 skips sessions that have lapsed, so a signed-out or expired installation receives
 nothing more. Registration is app-only, validates the token's form for its platform,
-and moves a token held by another session, since a token names one installation.
+and moves a token held by another session, since a token names one installation. A
+SHA-256 of each registered token is kept against the donor to block self-referral
+credit ([donor domain](donor-domain.md#referrals)); it cannot address a notification.
 Notification text names no one and no amount: it transits Apple's and Google's servers
 and shows on lock screens, so the app fetches detail through the API, which shows a
 referral conversion only as a time and a channel. A token is dropped only when the

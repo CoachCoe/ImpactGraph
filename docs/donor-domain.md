@@ -84,7 +84,13 @@ months after capture, long after its window closed, so retention never changes
 attribution: checkouts and gifts keep their own copy of it.
 
 Self-referral credit is removed when giver and referrer match by account or normalized
-donor email; the gift itself remains allowed. There is no second-level credit.
+donor email, or when they share a card or an app installation; the gift itself remains
+allowed. A card is matched by Stripe's card fingerprint, read once per payment method
+from the subscription it pays; an installation by a SHA-256 of the push token it
+registered. Either signal recorded after a gift was credited brings both donors'
+projections due, so the credit is withdrawn at once. The signals are opaque and are kept
+when an account is deleted, so deleting a second account cannot restore its credit.
+There is no second-level credit.
 
 Sharing requires a claimed account and an explicitly chosen public first name/nickname.
 Do not substitute a billing name or email. Codes are permanent by default and may be

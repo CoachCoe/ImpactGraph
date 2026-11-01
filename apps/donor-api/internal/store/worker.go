@@ -211,6 +211,9 @@ func (w EventWorker) applyCheckoutEvent(
 	if err != nil {
 		return pgtype.UUID{}, err
 	}
+	if err = recordCard(ctx, q, draft.DonorID, facts.card, now); err != nil {
+		return pgtype.UUID{}, err
+	}
 	if err = w.applyLockedCheckoutEvent(ctx, q, event, data, draft, attempt, facts, fetcher, now); err != nil {
 		return pgtype.UUID{}, err
 	}
@@ -235,6 +238,7 @@ func (w EventWorker) retrieveRefund(ctx context.Context, id string) (payments.Ob
 // donor lock is taken.
 type eventFacts struct {
 	subscription *subscriptionSnapshot
+	card         *paymentCard
 }
 
 func (w EventWorker) prefetch(
@@ -272,7 +276,10 @@ func (w EventWorker) prefetch(
 	if err != nil {
 		return facts, err
 	}
-	facts.subscription, err = fetchSubscription(ctx, q, fetcher, attempt.ID, subscription)
+	if facts.subscription, err = fetchSubscription(ctx, q, fetcher, attempt.ID, subscription); err != nil {
+		return facts, err
+	}
+	facts.card, err = subscriptionCard(ctx, q, w.Gateway, facts.subscription.remote)
 	return facts, err
 }
 

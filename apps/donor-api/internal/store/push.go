@@ -121,6 +121,9 @@ func (s PushService) RegisterDevice(ctx context.Context, token string, device Pu
 		if set == 0 {
 			return PushRegistration{}, ErrDenied
 		}
+		if err := recordDevice(ctx, q, user.ID, device.Token, time.Now().UTC()); err != nil {
+			return PushRegistration{}, err
+		}
 		return PushRegistration{Registered: true, Platform: &device.Platform, Environment: textPointer(environment)}, nil
 	})
 }

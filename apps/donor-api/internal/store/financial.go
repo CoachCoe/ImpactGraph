@@ -285,6 +285,9 @@ func projectFacts(ctx context.Context, q *queries.Queries, id pgtype.UUID, now t
 	if err != nil {
 		return projection{SaveProjectionParams: out}, err
 	}
+	if err = withholdSharedReferrals(ctx, q, id, h.Gifts); err != nil {
+		return projection{SaveProjectionParams: out}, err
+	}
 	observations, err := q.RefundObservations(ctx, queries.RefundObservationsParams{DonorID: id, ObservedAt: timestamp(now)})
 	if err != nil {
 		return projection{SaveProjectionParams: out}, err
