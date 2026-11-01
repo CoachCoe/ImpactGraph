@@ -49,6 +49,22 @@ pins its dependency; changing the backend must preserve supported installed clie
 Breaking field removals, type changes, and newly required request fields require a
 coordinated compatibility plan. Do not invent financial values for unknown server states.
 
+## Compatible additions in version 2.8
+
+Version 2.8 adds the donor's referral code to the sharing reads and documents how to save
+one preference. No request, existing field or enum value changes.
+
+- `Sharing.referral_code` (required, string or `null`) is the code inside `link` and
+  `irl_link`, for display and copying. It is `null` exactly when they are (no public name
+  chosen yet) and changes when `saveSharing` replaces the code. It is on `sharing` and
+  `saveSharing`. The invite paths are `/r/{code}` and `/r/{code}?via=irl` on the public
+  origin; use `link` and `irl_link` as given rather than building them.
+- `savePreferences` is optimistic concurrency by design: every save is a numbered record in
+  the consent history, so it names the profile `version` it replaces and answers `409` when
+  that is stale. To change one setting, read the profile, send its `version` and the six
+  required fields from `preferences` unchanged, and change only the one you mean to; leave
+  the optional fields out to keep their saved values.
+
 ## Compatible additions in version 2.7
 
 Version 2.7 closes the gaps native event screens hit. Every addition is a new response

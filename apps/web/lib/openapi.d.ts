@@ -426,7 +426,7 @@ export interface paths {
         put?: never;
         /**
          * Save preferences
-         * @description Saves the donor's notification, rankings, network and volunteer choices. The required fields are always replaced; an optional field left out keeps its saved value. 409 when `version` is stale: re-read the profile and retry.
+         * @description Saves the donor's notification, rankings, network and volunteer choices. The required fields are always replaced; an optional field left out keeps its saved value. `version` is optimistic concurrency, deliberately: every save is a new numbered record in the consent history, so it must name the profile version it replaces. 409 when `version` is stale: re-read the profile and retry. To change a single setting, read the profile, send its current `version` and the six required fields from `preferences` unchanged, and change only the one you mean to; the optional fields can be left out.
          */
         post: operations["savePreferences"];
         delete?: never;
@@ -3154,6 +3154,8 @@ export interface components {
              * @description In-person (QR) referral link.
              */
             irl_link: string | null;
+            /** @description The code in `link` and `irl_link` (their `/r/{code}` path segment), for display and copying; null exactly when they are. Replacing the code changes it. */
+            referral_code: string | null;
         };
         Gift: {
             /** Format: uuid */
