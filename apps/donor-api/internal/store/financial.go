@@ -505,7 +505,7 @@ func applyReferralDelta(
 			if !ruleEarned(rule, referrals) {
 				continue
 			}
-			if err := earnBadge(ctx, q, id, rule.Code, now); err != nil {
+			if err := earnBadge(ctx, q, id, rule.Code, pgtype.Text{}, now); err != nil {
 				return err
 			}
 		}

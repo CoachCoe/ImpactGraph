@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"dad/donor-api/internal/badges"
@@ -31,6 +32,12 @@ type BadgeView struct {
 	Artwork  string     `json:"artwork"`
 	Earned   bool       `json:"earned"`
 	EarnedAt *time.Time `json:"earned_at,omitempty"`
+	// City is the city a city badge was earned in, kept if the donor later
+	// moves; null for every other badge.
+	City *string `json:"city"`
+	// DisplayTitle is the title to show: "Top 50 in Chicago" for an earned
+	// city badge, else Title.
+	DisplayTitle string `json:"display_title"`
 }
 
 // signalsFor assembles the donor's current earning signals: the projection,
@@ -73,6 +80,9 @@ func signalsFor(ctx context.Context, q *queries.Queries, donor queries.Donor, no
 		pct := rank.NationalPercentile
 		s.NationalTopPercent = &pct
 		s.CityRank = rank.CityRank
+		if rank.City != nil {
+			s.City = *rank.City
+		}
 	}
 	pref, err := readPreferences(ctx, q, donor.ID)
 	if err != nil {
@@ -109,17 +119,23 @@ func awardBadges(ctx context.Context, q *queries.Queries, donor queries.Donor, n
 		if !ruleEarned(rule, signals) {
 			continue
 		}
-		if err := earnBadge(ctx, q, donor.ID, rule.Code, now); err != nil {
+		if err := earnBadge(ctx, q, donor.ID, rule.Code, badgeCity(rule.Code, signals.City), now); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// badgeCity is the city recorded with a badge when it is earned: the ranked
+// city for the city badge, none for any other.
+func badgeCity(code, city string) pgtype.Text {
+	return pgtype.Text{String: city, Valid: code == "CITY50" && city != ""}
+}
+
 // earnBadge records one auto-earned badge, queueing its push if it is new. The
 // push is deduped per badge, so retrying after a crash between the two is safe.
-func earnBadge(ctx context.Context, q *queries.Queries, donor pgtype.UUID, code string, now time.Time) error {
-	earned, err := q.EarnBadge(ctx, queries.EarnBadgeParams{DonorID: donor, Code: code, EarnedAt: timestamp(now)})
+func earnBadge(ctx context.Context, q *queries.Queries, donor pgtype.UUID, code string, city pgtype.Text, now time.Time) error {
+	earned, err := q.EarnBadge(ctx, queries.EarnBadgeParams{DonorID: donor, Code: code, EarnedAt: timestamp(now), City: city})
 	if err != nil || earned == 0 {
 		return err
 	}
@@ -145,12 +161,16 @@ func (b BadgeService) Badges(ctx context.Context, token string) ([]BadgeView, er
 			return nil, err
 		}
 		earned := map[string]*time.Time{}
+		cities := map[string]string{}
 		for _, r := range rows {
 			if r.RevokedAt.Valid {
 				continue
 			}
 			at := r.EarnedAt.Time
 			earned[r.Code] = &at
+			if r.City.Valid {
+				cities[r.Code] = r.City.String
+			}
 		}
 		catalog, err := badgeWording(ctx, q)
 		if err != nil {
@@ -161,15 +181,28 @@ func (b BadgeService) Badges(ctx context.Context, token string) ([]BadgeView, er
 			return nil, err
 		}
 		art := map[string]string{}
+		threshold := map[string]int64{}
 		for _, rule := range rules.Badges {
 			art[rule.Code] = rule.Artwork
+			threshold[rule.Code] = rule.Threshold
 		}
 		views := make([]BadgeView, 0, len(catalog))
 		for _, cat := range catalog {
-			v := BadgeView{Artwork: art[cat.Code], Code: cat.Code, Title: cat.Title, Rule: cat.Rule, Perk: string(cat.Perk)}
+			v := BadgeView{
+				Artwork:      art[cat.Code],
+				Code:         cat.Code,
+				Title:        cat.Title,
+				Rule:         cat.Rule,
+				Perk:         string(cat.Perk),
+				DisplayTitle: cat.Title,
+			}
 			if at, ok := earned[cat.Code]; ok {
 				v.Earned = true
 				v.EarnedAt = at
+				if city, ok := cities[cat.Code]; ok {
+					v.City = &city
+					v.DisplayTitle = fmt.Sprintf("Top %d in %s", threshold[cat.Code], city)
+				}
 			}
 			views = append(views, v)
 		}

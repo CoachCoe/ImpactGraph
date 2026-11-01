@@ -1,5 +1,5 @@
 -- name: DonorBadges :many
-SELECT code, source, earned_at, revoked_at FROM donor_badges
+SELECT code, source, earned_at, revoked_at, city FROM donor_badges
 WHERE donor_id=$1
 ORDER BY earned_at, code;
 
@@ -9,8 +9,9 @@ ORDER BY earned_at, code;
 -- re-earned here (a revoke is an admin decision, honoured until an admin grants).
 -- Returns rows affected so the caller fires the badge-earned push only for a
 -- genuinely new earn.
-INSERT INTO donor_badges (donor_id, code, source, earned_at)
-VALUES ($1, $2, 'AUTO', $3)
+-- city is the city a city badge was earned in, NULL for any other badge.
+INSERT INTO donor_badges (donor_id, code, source, earned_at, city)
+VALUES ($1, $2, 'AUTO', $3, sqlc.narg(city)::varchar)
 ON CONFLICT (donor_id, code) DO NOTHING;
 
 -- name: BadgeEarned :one

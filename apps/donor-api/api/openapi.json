@@ -14459,6 +14459,17 @@
      },
      "artwork": {
       "type": "string"
+     },
+     "city": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "The city a city badge (code `CITY50`) was earned in, recorded when it was earned and kept if the donor later moves. Null for every other badge, for a `CITY50` that is not earned, and for one staff granted."
+     },
+     "display_title": {
+      "type": "string",
+      "description": "The title to show: `Top 50 in Chicago` for an earned city badge with a city, otherwise the same as `title`. The code stays `CITY50`."
      }
     },
     "required": [
@@ -14467,7 +14478,9 @@
      "rule",
      "perk",
      "earned",
-     "artwork"
+     "artwork",
+     "city",
+     "display_title"
     ],
     "additionalProperties": false
    },
