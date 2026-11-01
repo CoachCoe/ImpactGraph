@@ -255,8 +255,8 @@ func GivingStreak(
 	if len(elapsed) == 0 {
 		return Streak{Best: previousBest}, nil
 	}
-	last := elapsed[len(elapsed)-1]
-	next, ended := renewalAfter(last.EndsAt, stopped)
+	next := elapsed[len(elapsed)-1].EndsAt
+	ended := stopped[next]
 	renewalDue := !next.After(asOf)
 	if renewalDue && !ended && !asOf.Before(next.Add(Grace)) {
 		return Streak{}, ErrIncomplete
@@ -338,12 +338,6 @@ func renewalBoundaries(stops []time.Time) (map[time.Time]bool, error) {
 	return stopped, nil
 }
 
-// renewalAfter reports the next renewal boundary after due and whether a
-// cancellation ended renewals at it.
-func renewalAfter(due time.Time, stopped map[time.Time]bool) (next time.Time, ended bool) {
-	return due, stopped[due]
-}
-
 func countStreak(
 	elapsed []Period,
 	payments map[string][]Gift,
@@ -354,8 +348,9 @@ func countStreak(
 	result := Streak{}
 	var last, lastPaid time.Time
 	for _, p := range elapsed {
-		next, ended := renewalAfter(last, stopped)
-		if ended || (!last.Equal(p.DueAt) && !next.Equal(p.DueAt)) {
+		// A cancellation that ended renewals at the previous period's end, or a
+		// gap before this period, starts a new run.
+		if stopped[last] || !last.Equal(p.DueAt) {
 			result.Current = 0
 			result.Since = nil
 		}
@@ -410,21 +405,19 @@ type StreakLadder struct {
 	Bar           []bool `json:"bar"`
 }
 
-// nextLadderMilestone returns the first milestone strictly greater than days.
+// nextMilestone returns the first milestone strictly greater than days.
 // Past the fixed set the ladder continues every 365 days (PRD S-3 "+365").
-func nextMilestone(days int64, milestones []int64) (int64, bool) {
+func nextMilestone(days int64, milestones []int64) int64 {
 	for _, m := range milestones {
 		if m > days {
-			return m, true
+			return m
 		}
 	}
 	last := milestones[len(milestones)-1]
-	// Continue at 365-day steps beyond the final fixed milestone.
-	steps := (days-last)/365 + 1
-	return last + steps*365, true
+	return last + ((days-last)/365+1)*365
 }
 
-// lastLadderMilestone returns the highest milestone at or below days, or 0.
+// lastMilestone returns the highest milestone at or below days, or 0.
 func lastMilestone(days int64, milestones []int64) int64 {
 	var reached int64
 	for _, m := range milestones {
@@ -448,6 +441,8 @@ func lastMilestone(days int64, milestones []int64) int64 {
 func (s Streak) Ladder(asOf time.Time, zone *time.Location) StreakLadder {
 	return s.LadderWithMilestones(asOf, zone, LadderMilestones)
 }
+
+// LadderWithMilestones is Ladder over a staff-configured milestone ladder.
 func (s Streak) LadderWithMilestones(asOf time.Time, zone *time.Location, milestones []int64) StreakLadder {
 	if s.Since == nil {
 		next := milestones[0]
@@ -455,11 +450,10 @@ func (s Streak) LadderWithMilestones(asOf time.Time, zone *time.Location, milest
 	}
 	days := max(civilDay(asOf, zone)-civilDay(*s.Since, zone), 0)
 	ladder := StreakLadder{Days: days, LastMilestone: lastMilestone(days, milestones)}
-	if next, ok := nextMilestone(days, milestones); ok {
-		toNext := next - days
-		ladder.NextMilestone = &next
-		ladder.DaysToNext = &toNext
-	}
+	next := nextMilestone(days, milestones)
+	toNext := next - days
+	ladder.NextMilestone = &next
+	ladder.DaysToNext = &toNext
 	bar := make([]bool, ladderBarDays)
 	for i := range bar {
 		// bar[ladderBarDays-1] is today; bar[0] is 29 days ago.
