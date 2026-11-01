@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { RoleChooser } from "@/components/donor/RoleChooser";
 
 export default function DonorHome() {
   return (
@@ -47,6 +48,7 @@ export default function DonorHome() {
         </aside>
       </section>
       <div className="page">
+        <RoleChooser />
         <section className="panel">
           <h2>One generous invitation at a time</h2>
           <ol>
