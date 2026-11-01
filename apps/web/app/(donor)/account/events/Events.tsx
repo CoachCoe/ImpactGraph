@@ -11,6 +11,15 @@ import { resourceMessages, useApiResource } from "@/lib/useApiResource";
 type Event = Schema<"EventView">;
 type Lists = { near: Event[]; invited: Event[] };
 
+const eventTypes: Record<string, string> = {
+  VOLUNTEER: "Volunteer event",
+  COMMUNITY: "Community event",
+  INVITE_ONLY: "Invite-only event",
+};
+
+/** The event's type in words (E-3); a type this client does not know is a plain event. */
+export const eventType = (event: Event) => eventTypes[event.type] ?? "Event";
+
 /** What a donor's place, or the room left, at an event looks like in a list. */
 export function placeSummary(event: Event): string {
   if (event.cancelled) return "Cancelled";
@@ -18,8 +27,8 @@ export function placeSummary(event: Event): string {
   if (event.reservation_status === "WAITLISTED") return "You are on the waitlist";
   if (event.spots_left === null) return "Open to everyone";
   return event.spots_left > 0
-    ? `${event.spots_left} ${event.spots_left === 1 ? "spot" : "spots"} left`
-    : "Full — join the waitlist";
+    ? `${event.spots_left} of ${event.capacity} ${event.capacity === 1 ? "spot" : "spots"} left`
+    : `Full (${event.capacity} ${event.capacity === 1 ? "spot" : "spots"}) — join the waitlist`;
 }
 
 function EventList({ events }: { events: Event[] }) {
@@ -29,7 +38,8 @@ function EventList({ events }: { events: Event[] }) {
         <li key={event.id}>
           <Link href={`/events/${encodeURIComponent(event.id)}`}>{event.title}</Link>
           <p className="note">
-            {formatDateTime(event.starts_at)} · {event.venue}, {event.city} · {placeSummary(event)}
+            {eventType(event)} · {formatDateTime(event.starts_at, event.time_zone)} · {event.venue}, {event.city} ·{" "}
+            {placeSummary(event)}
           </p>
           {event.invitation_note && <p className="note">{event.invitation_note}</p>}
         </li>

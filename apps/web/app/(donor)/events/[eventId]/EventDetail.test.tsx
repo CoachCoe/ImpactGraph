@@ -34,7 +34,9 @@ it("lets a signed-in donor join the waitlist of a full event", async () => {
   });
   vi.stubGlobal("fetch", fetch);
   render(<EventDetail event="e-1" />);
-  expect(await screen.findByText("Full — join the waitlist")).toBeVisible();
+  expect(await screen.findByText("Full (20 spots) — join the waitlist")).toBeVisible();
+  expect(screen.getByText("Volunteer event")).toBeVisible();
+  expect(screen.getByText("Nov 7, 2099, 9:00 AM PST")).toBeVisible();
   expect(screen.getByRole("link", { name: "Add to calendar" })).toHaveAttribute("href", "/api/events/e-1/calendar.ics");
   fireEvent.click(screen.getByRole("button", { name: "Join the waitlist" }));
   await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("You’re on the waitlist."));
@@ -55,7 +57,7 @@ it("falls back to the public listing when signed out", async () => {
   vi.stubGlobal("fetch", fetch);
   render(<EventDetail event="e-1" />);
   expect(await screen.findByRole("link", { name: "Sign in to reserve a spot" })).toBeVisible();
-  expect(screen.getByText("5 spots left")).toBeVisible();
+  expect(screen.getByText("5 of 20 spots left")).toBeVisible();
   expect(screen.queryByRole("button", { name: /Reserve/ })).not.toBeInTheDocument();
 });
 

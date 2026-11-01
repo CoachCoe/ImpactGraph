@@ -29,8 +29,8 @@ const base = {
 
 it("summarizes the donor's place or the room left", () => {
   expect(placeSummary(base)).toBe("Open to everyone");
-  expect(placeSummary({ ...base, spots_left: 1 })).toBe("1 spot left");
-  expect(placeSummary({ ...base, spots_left: 0 })).toBe("Full — join the waitlist");
+  expect(placeSummary({ ...base, capacity: 10, spots_left: 1 })).toBe("1 of 10 spots left");
+  expect(placeSummary({ ...base, capacity: 1, spots_left: 0 })).toBe("Full (1 spot) — join the waitlist");
   expect(placeSummary({ ...base, reservation_status: "WAITLISTED" })).toBe("You are on the waitlist");
   expect(placeSummary({ ...base, reservation_status: "RESERVED", cancelled: true })).toBe("Cancelled");
 });
