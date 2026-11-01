@@ -37,12 +37,13 @@ func (s *checkoutStub) BeginNativeCheckout(
 	session string,
 	key pgtype.UUID,
 	amount int64,
+	visitor *string,
 ) (payments.NativeCheckoutResult, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		panic("unbounded checkout")
 	}
 	s.calls++
-	s.session, s.request.RequestID, s.request.Amount = session, key, amount
+	s.session, s.request.RequestID, s.request.Amount, s.request.Visitor = session, key, amount, visitor
 	return payments.NativeCheckoutResult{
 		ExpiresAt: time.Date(2027, 1, 2, 3, 4, 5, 0, time.UTC),
 		SessionID: "cs_test_native",
@@ -170,6 +171,19 @@ func TestNativeRecurringCheckoutStartsForTheSignedInDonor(t *testing.T) {
 	}
 }
 
+func TestNativeRecurringCheckoutCarriesTheAppsReferral(t *testing.T) {
+	stub := &checkoutStub{}
+	visitor := strings.Repeat("v", 43)
+	response := httptest.NewRecorder()
+	NewServer("", Services{Checkout: stub}).Handler.ServeHTTP(
+		response,
+		nativeCheckoutRequest(`{"amount_minor":6000,"referral_token":"`+visitor+`"}`),
+	)
+	if response.Code != http.StatusCreated || stub.request.Visitor == nil || *stub.request.Visitor != visitor {
+		t.Fatalf("got %d with visitor %v, want 201 carrying the referral token", response.Code, stub.request.Visitor)
+	}
+}
+
 func TestNativeRecurringCheckoutRefusals(t *testing.T) {
 	const key = "8f4f52bb-99f6-490e-8313-5156cc4f8b45"
 	for _, tc := range []struct {
@@ -185,6 +199,8 @@ func TestNativeRecurringCheckoutRefusals(t *testing.T) {
 		{"amount over the ceiling", nil, `{"amount_minor":93000}`, nil, 422},
 		{"missing amount", nil, `{}`, nil, 422},
 		{"email in the body", nil, `{"amount_minor":3000,"email":"other@example.org"}`, nil, 422},
+		{"short referral token", nil, `{"amount_minor":3000,"referral_token":"short"}`, nil, 422},
+		{"null referral token", nil, `{"amount_minor":3000,"referral_token":null}`, nil, 422},
 		{"missing key", func(r *http.Request) { r.Header.Del("Idempotency-Key") }, `{"amount_minor":3000}`, nil, 422},
 		{"anonymous", func(r *http.Request) { r.Header.Del("Authorization") }, `{"amount_minor":3000}`, nil, 401},
 		{"browser request", func(r *http.Request) {

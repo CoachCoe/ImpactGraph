@@ -116,3 +116,39 @@ func TestCompanyAttributionWaitsForAccountProof(t *testing.T) {
 		t.Fatalf("a later code replaced the donor's: %q %v", bound, err)
 	}
 }
+
+func TestAppBindsItsCompanyTouchAfterSignIn(t *testing.T) {
+	pool := database(t)
+	ctx := context.Background()
+	donors := DonorService{DB: as(t, dbroles.API), Origin: "https://donor.example.org"}
+	partnerID := approvedPartner(t, pool, "Hooli", "HOOLI-"+strings.ToUpper(mustNewID(t).String()[:6]), 0, 0)
+	var code string
+	if err := pool.QueryRow(ctx, "SELECT company_code FROM donor_partner_signups WHERE id=$1", partnerID).Scan(&code); err != nil {
+		t.Fatal(err)
+	}
+	capture, err := donors.CaptureCompanyCode(ctx, code, "", time.Now().UTC())
+	if err != nil || capture.Token == "" {
+		t.Fatal(capture, err)
+	}
+	cleanup(t, "DELETE FROM donor_company_touches WHERE token_hash=$1", HashToken(capture.Token))
+	id, _ := donor(t, pool)
+	cleanup(t, "DELETE FROM donor_partner_employees WHERE donor_id=$1", id)
+	token := claimSession(t, pool, id, app).Access
+
+	if _, err := donors.BindCompanyTouch(ctx, strings.Repeat("x", 43), capture.Token); !errors.Is(err, ErrDenied) {
+		t.Fatalf("bound without a session: %v", err)
+	}
+	if bound, err := donors.BindCompanyTouch(ctx, token, strings.Repeat("u", 43)); err != nil || bound {
+		t.Fatalf("an unknown token bound: %v %v", bound, err)
+	}
+	if bound, err := donors.BindCompanyTouch(ctx, token, capture.Token); err != nil || !bound {
+		t.Fatalf("the captured touch did not bind: %v %v", bound, err)
+	}
+	var linked pgtype.UUID
+	var bound string
+	if err := pool.QueryRow(ctx, `SELECT e.partner_id, d.company_code FROM donor_partner_employees e
+		JOIN donors d ON d.id=e.donor_id WHERE e.donor_id=$1`, id).Scan(&linked, &bound); err != nil ||
+		linked != partnerID || bound != code {
+		t.Fatalf("linked %v with code %q (%v), want %v and %q", linked, bound, err, partnerID, code)
+	}
+}

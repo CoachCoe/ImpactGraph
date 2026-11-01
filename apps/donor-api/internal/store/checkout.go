@@ -44,12 +44,14 @@ func (s CheckoutService) BeginCheckout(ctx context.Context, request payments.Che
 // BeginNativeCheckout opens a hosted monthly checkout for the signed-in donor
 // behind token, whose account supplies the email the web flow asks for. It is
 // the same checkout the website begins, so the processor's webhooks complete
-// the gift the same way; only the pages it returns to differ.
+// the gift the same way; only the pages it returns to differ. A referral
+// visitor token the app captured credits its referrer as the web's cookie does.
 func (s CheckoutService) BeginNativeCheckout(
 	ctx context.Context,
 	token string,
 	requestID pgtype.UUID,
 	amount int64,
+	visitor *string,
 ) (payments.NativeCheckoutResult, error) {
 	empty := payments.NativeCheckoutResult{}
 	if s.Gateway == nil {
@@ -70,6 +72,7 @@ func (s CheckoutService) BeginNativeCheckout(
 		Amount:       amount,
 		Frequency:    "MONTHLY",
 		NativeReturn: origin,
+		Visitor:      visitor,
 	})
 	if err != nil {
 		return empty, err
@@ -221,10 +224,18 @@ const (
 // heldCheckout decides what the recurring slot's holder means for a request:
 // the holder itself, a holder to expire, or a conflict. Only an open, unpaid
 // checkout is ever touched; a paid or pending one is the conflict it always
-// was. A signed-in app request may be handed its own open session back. A
-// website request never is: its caller is whoever typed the email, and the
-// session's URL pays on the donor's behalf, so it is expired and replaced.
-func heldCheckout(ctx context.Context, q *queries.Queries, donor queries.Donor, request payments.CheckoutRequest, now time.Time) error {
+// was. A signed-in app request may be handed its own open session back if it
+// credits the same referrer as the request would. A website request never is:
+// its caller is whoever typed the email, and the session's URL pays on the
+// donor's behalf, so it is expired and replaced.
+func heldCheckout(
+	ctx context.Context,
+	q *queries.Queries,
+	donor queries.Donor,
+	request payments.CheckoutRequest,
+	referrer pgtype.UUID,
+	now time.Time,
+) error {
 	held, err := q.ReservedAttempt(ctx, donor.ID)
 	if err != nil || held.Status != "OPEN" || !held.HostedUrl.Valid || !held.StripeSessionID.Valid {
 		return payments.ErrCheckoutConflict
@@ -258,7 +269,8 @@ func heldCheckout(ctx context.Context, q *queries.Queries, donor queries.Donor, 
 		return err
 	}
 	sameReturn := object.Text("success_url") == publicSite(request.NativeReturn).nativeCheckoutReturn()
-	if draft.DonorID == donor.ID && draft.AmountMinor == request.Amount && sameReturn && expires.After(now.Add(reuseMargin)) {
+	if draft.DonorID == donor.ID && draft.AmountMinor == request.Amount && draft.ReferrerID == referrer && sameReturn &&
+		expires.After(now.Add(reuseMargin)) {
 		return openCheckout{held}
 	}
 	return staleCheckout{held}
@@ -374,7 +386,7 @@ func prepareAttempt(
 		}
 		if _, err = q.ReserveRecurring(ctx, queries.ReserveRecurringParams{ID: reservation, DonorID: donor.ID, AttemptID: request.RequestID}); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				return empty, heldCheckout(ctx, q, donor, request, now)
+				return empty, heldCheckout(ctx, q, donor, request, draft.ReferrerID, now)
 			}
 			return empty, err
 		}

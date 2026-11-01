@@ -17,7 +17,7 @@ import (
 
 type CheckoutSource interface {
 	BeginCheckout(context.Context, payments.CheckoutRequest) (payments.CheckoutResult, error)
-	BeginNativeCheckout(context.Context, string, pgtype.UUID, int64) (payments.NativeCheckoutResult, error)
+	BeginNativeCheckout(context.Context, string, pgtype.UUID, int64, *string) (payments.NativeCheckoutResult, error)
 }
 
 // restartRetryAfter is the wait a throttled restart is told; the budget
@@ -93,10 +93,23 @@ func (a *api) beginCheckout(w http.ResponseWriter, r *http.Request) {
 }
 
 type nativeCheckoutBody struct {
-	Amount int64 `json:"amount_minor"`
+	Amount   int64           `json:"amount_minor"`
+	Referral json.RawMessage `json:"referral_token"`
 }
 
-func (b nativeCheckoutBody) valid() bool { return store.ValidGiftAmount(b.Amount) }
+func (b nativeCheckoutBody) valid() bool {
+	referral, ok := optional(b.Referral, "")
+	return store.ValidGiftAmount(b.Amount) && ok && (b.Referral == nil || validToken(referral))
+}
+
+// visitor is the referral token the app kept, if it sent one.
+func (b nativeCheckoutBody) visitor() *string {
+	if b.Referral == nil {
+		return nil
+	}
+	referral, _ := optional(b.Referral, "")
+	return &referral
+}
 
 // startRecurringCheckout opens hosted checkout for the signed-in donor's first
 // monthly gift, which the website's guest checkout cannot do for an app: it
@@ -117,7 +130,7 @@ func (a *api) startRecurringCheckout(w http.ResponseWriter, r *http.Request, ses
 	}
 	ctx, cancel := withTimeout(r, providerTimeout)
 	defer cancel()
-	result, err := a.Checkout.BeginNativeCheckout(ctx, session, key, body.Amount)
+	result, err := a.Checkout.BeginNativeCheckout(ctx, session, key, body.Amount, body.visitor())
 	switch {
 	case errors.Is(err, payments.ErrUnconfigured):
 		paymentsOff.write(w)

@@ -26,7 +26,7 @@ func TestNativeCheckoutOpensTheSignedInDonorsMonthlyGift(t *testing.T) {
 	ctx := context.Background()
 	token := claimSession(t, database(t), id, app).Access
 
-	result, err := service.BeginNativeCheckout(ctx, token, request.RequestID, 6000)
+	result, err := service.BeginNativeCheckout(ctx, token, request.RequestID, 6000, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,18 +45,18 @@ func TestNativeCheckoutOpensTheSignedInDonorsMonthlyGift(t *testing.T) {
 		t.Fatalf("unexpected session %+v", result)
 	}
 
-	repeated, err := service.BeginNativeCheckout(ctx, token, request.RequestID, 6000)
+	repeated, err := service.BeginNativeCheckout(ctx, token, request.RequestID, 6000, nil)
 	if err != nil || repeated != result || len(gateway.calls) != 1 {
 		t.Fatalf("a retry did not reuse the session: %+v %v with %d processor calls", repeated, err, len(gateway.calls))
 	}
-	if _, err = service.BeginNativeCheckout(ctx, token, request.RequestID, 9000); !errors.Is(err, payments.ErrCheckoutConflict) {
+	if _, err = service.BeginNativeCheckout(ctx, token, request.RequestID, 9000, nil); !errors.Is(err, payments.ErrCheckoutConflict) {
 		t.Fatalf("a changed amount reused the key: %v", err)
 	}
 	other, err := NewID()
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := service.BeginNativeCheckout(ctx, token, other, 6000)
+	again, err := service.BeginNativeCheckout(ctx, token, other, 6000, nil)
 	if err != nil || again != result || len(gateway.calls) != 1 || len(gateway.expired) != 0 {
 		t.Fatalf("a new key did not return the open session: %+v %v", again, err)
 	}
@@ -82,7 +82,7 @@ func nativeRestartFixture(t *testing.T) (*workerFixture, *checkoutGateway, strin
 	t.Helper()
 	f := newWorkerFixture(t, "MONTHLY")
 	token := claimSession(t, f.db, f.donorID, app).Access
-	first, err := f.service.BeginNativeCheckout(context.Background(), token, f.request.RequestID, 3000)
+	first, err := f.service.BeginNativeCheckout(context.Background(), token, f.request.RequestID, 3000, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestNativeCheckoutAfterAbandonedPageReturnsTheOpenSession(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		again, err := f.service.BeginNativeCheckout(context.Background(), token, id, 3000)
+		again, err := f.service.BeginNativeCheckout(context.Background(), token, id, 3000, nil)
 		if err != nil || again != first {
 			t.Fatalf("got %+v %v, want %+v", again, err, first)
 		}
@@ -114,7 +114,7 @@ func TestNativeCheckoutWithANewAmountExpiresTheAbandonedSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := f.service.BeginNativeCheckout(ctx, token, id, 6000)
+	second, err := f.service.BeginNativeCheckout(ctx, token, id, 6000, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,10 +134,10 @@ func TestNativeCheckoutWithANewAmountExpiresTheAbandonedSession(t *testing.T) {
 		status != "EXPIRED" {
 		t.Fatalf("old attempt is %q, want EXPIRED (%v)", status, err)
 	}
-	if repeated, err := f.service.BeginNativeCheckout(ctx, token, id, 6000); err != nil || repeated != second {
+	if repeated, err := f.service.BeginNativeCheckout(ctx, token, id, 6000, nil); err != nil || repeated != second {
 		t.Fatalf("retry of the replacement: %+v %v", repeated, err)
 	}
-	if _, err = f.service.BeginNativeCheckout(ctx, token, f.request.RequestID, 3000); !errors.Is(err, payments.ErrCheckoutConflict) {
+	if _, err = f.service.BeginNativeCheckout(ctx, token, f.request.RequestID, 3000, nil); !errors.Is(err, payments.ErrCheckoutConflict) {
 		t.Fatalf("the expired attempt's key reopened it: %v", err)
 	}
 
@@ -178,7 +178,7 @@ func TestNativeCheckoutPaidWhileRestartingIsAnActiveGift(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err = f.service.BeginNativeCheckout(context.Background(), token, id, 6000); !errors.Is(
+			if _, err = f.service.BeginNativeCheckout(context.Background(), token, id, 6000, nil); !errors.Is(
 				err,
 				payments.ErrCheckoutConflict,
 			) {
@@ -199,7 +199,7 @@ func TestNativeCheckoutKeepsTheReservationWhenExpiryFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = f.service.BeginNativeCheckout(ctx, token, id, 6000); !errors.Is(err, payments.ErrProcessorUnavailable) {
+	if _, err = f.service.BeginNativeCheckout(ctx, token, id, 6000, nil); !errors.Is(err, payments.ErrProcessorUnavailable) {
 		t.Fatalf("got %v, want the processor error", err)
 	}
 	var attempts int
@@ -211,7 +211,7 @@ func TestNativeCheckoutKeepsTheReservationWhenExpiryFails(t *testing.T) {
 		t.Fatalf("reservation %q x%d, %d attempts, %d creations", holder, n, attempts, len(gateway.calls))
 	}
 	gateway.expireErr = nil
-	if second, err := f.service.BeginNativeCheckout(ctx, token, id, 6000); err != nil || second.SessionID == first.SessionID {
+	if second, err := f.service.BeginNativeCheckout(ctx, token, id, 6000, nil); err != nil || second.SessionID == first.SessionID {
 		t.Fatalf("retry after the processor recovered: %+v %v", second, err)
 	}
 }
@@ -232,7 +232,7 @@ func TestNativeCheckoutRestartsRaceToOneOpenSession(t *testing.T) {
 		}
 		go func() {
 			<-start
-			result, err := f.service.BeginNativeCheckout(ctx, token, id, 6000)
+			result, err := f.service.BeginNativeCheckout(ctx, token, id, 6000, nil)
 			results <- outcome{result, err}
 		}()
 	}
@@ -270,16 +270,16 @@ func TestNativeCheckoutRefusesAnInvalidAmountOrSession(t *testing.T) {
 	ctx := context.Background()
 	token := claimSession(t, database(t), id, app).Access
 	for _, amount := range []int64{0, 2999, 4500, 93000} {
-		if _, err := service.BeginNativeCheckout(ctx, token, request.RequestID, amount); !errors.Is(err, payments.ErrCheckoutInput) {
+		if _, err := service.BeginNativeCheckout(ctx, token, request.RequestID, amount, nil); !errors.Is(err, payments.ErrCheckoutInput) {
 			t.Errorf("amount %d: %v", amount, err)
 		}
 	}
-	if _, err := service.BeginNativeCheckout(ctx, strings.Repeat("x", 43), request.RequestID, 3000); !errors.Is(err, ErrDenied) {
+	if _, err := service.BeginNativeCheckout(ctx, strings.Repeat("x", 43), request.RequestID, 3000, nil); !errors.Is(err, ErrDenied) {
 		t.Errorf("an unknown session was admitted: %v", err)
 	}
 	unconfigured := service
 	unconfigured.Gateway = nil
-	if _, err := unconfigured.BeginNativeCheckout(ctx, token, request.RequestID, 3000); !errors.Is(err, payments.ErrUnconfigured) {
+	if _, err := unconfigured.BeginNativeCheckout(ctx, token, request.RequestID, 3000, nil); !errors.Is(err, payments.ErrUnconfigured) {
 		t.Errorf("no processor: %v", err)
 	}
 	if len(gateway.calls) != 0 {
@@ -291,7 +291,7 @@ func TestNativeCheckoutReturnsToItsOwnOrigin(t *testing.T) {
 	service, request, id, gateway := checkoutFixture(t)
 	token := claimSession(t, database(t), id, app).Access
 	service.NativeReturnOrigin = "https://app.example.org"
-	if _, err := service.BeginNativeCheckout(context.Background(), token, request.RequestID, 3000); err != nil {
+	if _, err := service.BeginNativeCheckout(context.Background(), token, request.RequestID, 3000, nil); err != nil {
 		t.Fatal(err)
 	}
 	params := nativeCheckoutParams(t, gateway, 0)
@@ -307,7 +307,7 @@ func TestNativeCheckoutCompletesThroughTheWebhook(t *testing.T) {
 	f := newWorkerFixture(t, "MONTHLY")
 	ctx := context.Background()
 	token := claimSession(t, f.db, f.donorID, app).Access
-	started, err := f.service.BeginNativeCheckout(ctx, token, f.request.RequestID, 3000)
+	started, err := f.service.BeginNativeCheckout(ctx, token, f.request.RequestID, 3000, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,14 +336,67 @@ func TestNativeCheckoutCompletesThroughTheWebhook(t *testing.T) {
 	if err != nil || after.Subscription == nil || after.Subscription.Status != "active" || after.Subscription.AmountMinor != 3000 {
 		t.Fatalf("the webhook did not activate the gift: %+v %v", after, err)
 	}
-	if _, err = f.service.BeginNativeCheckout(ctx, token, f.request.RequestID, 3000); !errors.Is(err, payments.ErrCheckoutConflict) {
+	if _, err = f.service.BeginNativeCheckout(ctx, token, f.request.RequestID, 3000, nil); !errors.Is(err, payments.ErrCheckoutConflict) {
 		t.Fatalf("a retry of the completed checkout reopened it: %v", err)
 	}
 	other, err := NewID()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = f.service.BeginNativeCheckout(ctx, token, other, 3000); !errors.Is(err, payments.ErrCheckoutConflict) {
+	if _, err = f.service.BeginNativeCheckout(ctx, token, other, 3000, nil); !errors.Is(err, payments.ErrCheckoutConflict) {
 		t.Fatalf("a donor with an active gift started another: %v", err)
+	}
+}
+
+func TestNativeCheckoutCreditsTheAppsReferral(t *testing.T) {
+	service, request, id, gateway := checkoutFixture(t)
+	pool := database(t)
+	ctx := context.Background()
+	referrer, _ := donor(t, pool)
+	// Registered after referrer cleanup so dependent rows disappear first.
+	t.Cleanup(func() {
+		for _, sql := range []string{
+			"DELETE FROM donor_recurring_reservations WHERE donor_id=$1",
+			"DELETE FROM donor_stripe_checkouts WHERE checkout_id IN (SELECT id FROM donor_checkouts WHERE donor_id=$1)",
+			"DELETE FROM donor_checkouts WHERE donor_id=$1",
+		} {
+			if _, err := pool.Exec(ctx, sql, id); err != nil {
+				t.Error(err)
+			}
+		}
+		if _, err := pool.Exec(ctx, "DELETE FROM donor_referral_touches WHERE referrer_id=$1", referrer); err != nil {
+			t.Error(err)
+		}
+	})
+	visitor := "native-visitor-" + testID(t).String()
+	if _, err := pool.Exec(
+		ctx,
+		`INSERT INTO donor_referral_touches (id,token_hash,referrer_id,kind,touched_at,expires_at) VALUES ($1,$2,$3,'LINK',$4,$5)`,
+		testID(t), HashToken(visitor), referrer, time.Now(), time.Now().Add(time.Hour),
+	); err != nil {
+		t.Fatal(err)
+	}
+	token := claimSession(t, pool, id, app).Access
+	referrerOf := func(call int) any {
+		params := nativeCheckoutParams(t, gateway, call)
+		return params["subscription_data"].(map[string]any)["metadata"].(map[string]any)["dad_referrer_id"]
+	}
+
+	plain, err := service.BeginNativeCheckout(ctx, token, request.RequestID, 3000, nil)
+	if err != nil || referrerOf(0) != nil {
+		t.Fatalf("checkout without a referral: %v credited %v", err, referrerOf(0))
+	}
+	referred, err := service.BeginNativeCheckout(ctx, token, testID(t), 3000, &visitor)
+	if err != nil || referred.SessionID == plain.SessionID || len(gateway.expired) != 1 || referrerOf(1) != referrer.String() {
+		t.Fatalf(
+			"a referred start reused the uncredited session or lost the referrer: %+v %v, expired %d",
+			referred,
+			err,
+			len(gateway.expired),
+		)
+	}
+	again, err := service.BeginNativeCheckout(ctx, token, testID(t), 3000, &visitor)
+	if err != nil || again != referred || len(gateway.calls) != 2 {
+		t.Fatalf("the same referral did not return the open session: %+v %v", again, err)
 	}
 }
