@@ -68,6 +68,9 @@ new; no existing field, status or enum value changes.
 - `bindCompanyTouch` (`POST /donor/me/company-touch`, native only) takes the kept company
   token after sign-in and returns `bound`. It links the donor to the employer as signing in
   does on the web, and never replaces an existing one. Discard the token afterwards.
+- Version 2.10.1 changes no schema. `links.json` sets `referrals_open_web` to `false`:
+  from 2.10 the apps open `/r/{code}` and `/c/{code}` links themselves, as the association
+  files already let them.
 
 ## Compatible additions in version 2.9
 
@@ -342,7 +345,8 @@ Android uses encryption keys protected by Keystore, iOS uses Keychain.
 
 Link handling accepts only the configured HTTPS public origin and approved paths.
 Proof tokens stay in memory and out of logs. Signed-out destinations wait for account
-access; referrals and unsupported product destinations retain their web behavior. Push
+access; referral and company-code links are captured natively, and unsupported product
+destinations retain their web behavior. Push
 payloads select only approved relative destinations, never arbitrary URLs. OS association
 files require the final app identifiers and signing certificates, and a reachable direct
 API ingress is required for a real-device integration test. Neither is fabricated here.

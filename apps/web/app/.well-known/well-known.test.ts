@@ -62,6 +62,7 @@ it("keeps Apple association paths aligned with the shared mobile link policy", a
       ...links.account_paths,
     ].toSorted(),
   );
+  expect(links.referrals_open_web).toBe(false);
 });
 
 it("associates the Android app with its links and passkeys for every signing key", async () => {

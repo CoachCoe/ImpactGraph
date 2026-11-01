@@ -28,5 +28,5 @@
     "/account/gifts",
     "/partner"
   ],
-  "referrals_open_web": true
+  "referrals_open_web": false
 }
