@@ -3800,6 +3800,10 @@ export interface components {
             /** Format: date-time */
             earned_at?: string | null;
             artwork: string;
+            /** @description The city a city badge (code `CITY50`) was earned in, recorded when it was earned and kept if the donor later moves. Null for every other badge, for a `CITY50` that is not earned, and for one staff granted. */
+            city: string | null;
+            /** @description The title to show: `Top 50 in Chicago` for an earned city badge with a city, otherwise the same as `title`. The code stays `CITY50`. */
+            display_title: string;
         };
         BadgeList: {
             badges: components["schemas"]["BadgeView"][];

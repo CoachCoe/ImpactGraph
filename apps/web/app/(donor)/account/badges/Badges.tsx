@@ -33,7 +33,7 @@ export default function Badges() {
                     {earned.map((badge) => (
                       <li key={badge.code} className="metric">
                         {badge.artwork && <Image unoptimized src={badge.artwork} alt="" width={64} height={64} />}
-                        <h3>{badge.title}</h3>
+                        <h3>{badge.display_title}</h3>
                         {badge.earned_at && <p>Earned {formatDate(badge.earned_at)}</p>}
                         {badge.perk && <p>{badge.perk}</p>}
                       </li>
