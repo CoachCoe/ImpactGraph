@@ -32,14 +32,15 @@ func (q *Queries) BadgeEarned(ctx context.Context, arg BadgeEarnedParams) (bool,
 }
 
 const badgeRules = `-- name: BadgeRules :many
-SELECT code,signal,threshold,artwork FROM donor_badge_rules ORDER BY code
+SELECT code,signal,threshold,min_population,artwork FROM donor_badge_rules ORDER BY code
 `
 
 type BadgeRulesRow struct {
-	Code      string `json:"code"`
-	Signal    string `json:"signal"`
-	Threshold int64  `json:"threshold"`
-	Artwork   string `json:"artwork"`
+	Code          string `json:"code"`
+	Signal        string `json:"signal"`
+	Threshold     int64  `json:"threshold"`
+	MinPopulation int64  `json:"min_population"`
+	Artwork       string `json:"artwork"`
 }
 
 func (q *Queries) BadgeRules(ctx context.Context) ([]BadgeRulesRow, error) {
@@ -55,6 +56,7 @@ func (q *Queries) BadgeRules(ctx context.Context) ([]BadgeRulesRow, error) {
 			&i.Code,
 			&i.Signal,
 			&i.Threshold,
+			&i.MinPopulation,
 			&i.Artwork,
 		); err != nil {
 			return nil, err
@@ -370,17 +372,18 @@ func (q *Queries) RevokeBadge(ctx context.Context, arg RevokeBadgeParams) error 
 }
 
 const setBadgeRule = `-- name: SetBadgeRule :exec
-INSERT INTO donor_badge_rules(code,signal,threshold,artwork,updated_at,actor_id) VALUES($1,$2,$3,$4,$5,$6)
-ON CONFLICT(code) DO UPDATE SET signal=EXCLUDED.signal,threshold=EXCLUDED.threshold,artwork=EXCLUDED.artwork,updated_at=EXCLUDED.updated_at,actor_id=EXCLUDED.actor_id
+INSERT INTO donor_badge_rules(code,signal,threshold,min_population,artwork,updated_at,actor_id) VALUES($1,$2,$3,$4,$5,$6,$7)
+ON CONFLICT(code) DO UPDATE SET signal=EXCLUDED.signal,threshold=EXCLUDED.threshold,min_population=EXCLUDED.min_population,artwork=EXCLUDED.artwork,updated_at=EXCLUDED.updated_at,actor_id=EXCLUDED.actor_id
 `
 
 type SetBadgeRuleParams struct {
-	Code      string             `json:"code"`
-	Signal    string             `json:"signal"`
-	Threshold int64              `json:"threshold"`
-	Artwork   string             `json:"artwork"`
-	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
-	ActorID   pgtype.UUID        `json:"actor_id"`
+	Code          string             `json:"code"`
+	Signal        string             `json:"signal"`
+	Threshold     int64              `json:"threshold"`
+	MinPopulation int64              `json:"min_population"`
+	Artwork       string             `json:"artwork"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	ActorID       pgtype.UUID        `json:"actor_id"`
 }
 
 func (q *Queries) SetBadgeRule(ctx context.Context, arg SetBadgeRuleParams) error {
@@ -388,6 +391,7 @@ func (q *Queries) SetBadgeRule(ctx context.Context, arg SetBadgeRuleParams) erro
 		arg.Code,
 		arg.Signal,
 		arg.Threshold,
+		arg.MinPopulation,
 		arg.Artwork,
 		arg.UpdatedAt,
 		arg.ActorID,

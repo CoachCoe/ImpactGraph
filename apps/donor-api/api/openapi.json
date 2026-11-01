@@ -16313,6 +16313,13 @@
       "minimum": 1,
       "maximum": 1000000
      },
+     "min_population": {
+      "type": "integer",
+      "format": "int64",
+      "minimum": 1,
+      "maximum": 1000000,
+      "description": "Fewest ranked donors a rank must be taken among to earn the badge; 1 for a badge that is not a rank."
+     },
      "artwork": {
       "type": "string"
      }
@@ -16321,6 +16328,7 @@
      "code",
      "signal",
      "threshold",
+     "min_population",
      "artwork"
     ]
    },

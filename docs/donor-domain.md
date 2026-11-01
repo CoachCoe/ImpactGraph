@@ -130,6 +130,11 @@ Content staff may change the words on a badge (its title and how-to-earn text) a
 named streak milestone's notification; the yearly milestones after 1,460 days use the
 standard wording. Numeric earning thresholds and badge artwork are editable through content administration; signal types stay fixed, and every change is audited.
 
+Top 2% and Top 50 City are awarded only when the rank was taken among at least 100 ranked
+donors (nationally, or in that city): in a small population every donor would qualify.
+Content staff can change that minimum with the badge's other earning rules. A donor's own
+rank line is shown whatever the population.
+
 Any successful first gift before 2027-01-01 00:00 America/New_York earns Founding Donor
 status. Use the processor's successful-payment timestamp, not checkout start or webhook
 arrival. Website-waitlist sign-ups and earlier website donors (D-6) are Founding Donors too:

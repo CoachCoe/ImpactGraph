@@ -23,6 +23,8 @@ type Ranking struct {
 	City               *string   `json:"city"`
 	CityRank           *int      `json:"city_rank"`
 	ComputedAt         time.Time `json:"computed_at"`
+	nationalPopulation int
+	cityPopulation     int
 }
 
 // Refresh recomputes every eligible donor's rank, prunes donors who dropped out
@@ -49,7 +51,12 @@ func ForDonor(ctx context.Context, q *queries.Queries, donorID pgtype.UUID) (*Ra
 	if err != nil {
 		return nil, err
 	}
-	r := &Ranking{NationalPercentile: int(row.NationalPercentile), ComputedAt: row.ComputedAt.Time}
+	r := &Ranking{
+		NationalPercentile: int(row.NationalPercentile),
+		ComputedAt:         row.ComputedAt.Time,
+		nationalPopulation: int(row.NationalPopulation),
+		cityPopulation:     int(row.CityPopulation),
+	}
 	if row.City.Valid {
 		city := row.City.String
 		r.City = &city

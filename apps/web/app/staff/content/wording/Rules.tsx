@@ -45,7 +45,13 @@ export function Rules() {
                     });
                   }
                   if (f.get(`clear:${b.code}`)) artwork = "";
-                  return { ...b, threshold: Number(f.get(`threshold:${b.code}`)), artwork };
+                  const population = f.get(`population:${b.code}`);
+                  return {
+                    ...b,
+                    threshold: Number(f.get(`threshold:${b.code}`)),
+                    min_population: population === null ? b.min_population : Number(population),
+                    artwork,
+                  };
                 }),
               );
               await api("/donor/staff/content/rules", {
@@ -99,6 +105,19 @@ export function Rules() {
                   required
                 />
               </label>
+              {(b.signal === "city_rank" || b.signal === "national_percentile") && (
+                <label>
+                  Fewest ranked donors before this badge is awarded
+                  <input
+                    name={`population:${b.code}`}
+                    type="number"
+                    min={1}
+                    max={1000000}
+                    defaultValue={b.min_population}
+                    required
+                  />
+                </label>
+              )}
               {b.artwork && <Image unoptimized src={b.artwork} width={64} height={64} alt={`${b.code} artwork`} />}
               <label>
                 Artwork (PNG or JPEG, up to 512 × 512 pixels)

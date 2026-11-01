@@ -73,10 +73,10 @@ SELECT max(reset_at)::timestamptz AS reset_at FROM donor_streak_resets WHERE don
 -- name: InsertStreakReset :exec
 INSERT INTO donor_streak_resets(id,donor_id,reset_at,actor_id,reason) VALUES($1,$2,$3,$4,$5);
 -- name: BadgeRules :many
-SELECT code,signal,threshold,artwork FROM donor_badge_rules ORDER BY code;
+SELECT code,signal,threshold,min_population,artwork FROM donor_badge_rules ORDER BY code;
 -- name: SetBadgeRule :exec
-INSERT INTO donor_badge_rules(code,signal,threshold,artwork,updated_at,actor_id) VALUES($1,$2,$3,$4,$5,$6)
-ON CONFLICT(code) DO UPDATE SET signal=EXCLUDED.signal,threshold=EXCLUDED.threshold,artwork=EXCLUDED.artwork,updated_at=EXCLUDED.updated_at,actor_id=EXCLUDED.actor_id;
+INSERT INTO donor_badge_rules(code,signal,threshold,min_population,artwork,updated_at,actor_id) VALUES($1,$2,$3,$4,$5,$6,$7)
+ON CONFLICT(code) DO UPDATE SET signal=EXCLUDED.signal,threshold=EXCLUDED.threshold,min_population=EXCLUDED.min_population,artwork=EXCLUDED.artwork,updated_at=EXCLUDED.updated_at,actor_id=EXCLUDED.actor_id;
 -- name: MilestoneRules :many
 SELECT days FROM donor_milestone_rules;
 -- name: SetMilestoneRules :exec

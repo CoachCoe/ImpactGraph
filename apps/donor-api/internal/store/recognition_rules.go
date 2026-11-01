@@ -15,7 +15,10 @@ type BadgeRule struct {
 	Code      string `json:"code"`
 	Signal    string `json:"signal"`
 	Threshold int64  `json:"threshold"`
-	Artwork   string `json:"artwork"`
+	// MinPopulation is the fewest donors a rank must be taken among to earn
+	// the badge; it is 1 for a badge that is not a rank.
+	MinPopulation int64  `json:"min_population"`
+	Artwork       string `json:"artwork"`
 }
 type RecognitionRules struct {
 	Badges     []BadgeRule `json:"badges"`
@@ -44,7 +47,11 @@ var defaultBadgeRules = map[string]BadgeRule{
 	"INIT7": {
 		Signal:    "initiatives",
 		Threshold: 7,
-	}, "CITY50": {Signal: "city_rank", Threshold: 50}, "NAT2": {Signal: "national_percentile", Threshold: 2}, "TP": {Signal: "team", Threshold: 1}, "WT": {Signal: "monthly_winner", Threshold: 1},
+	}, "CITY50": {
+		Signal:        "city_rank",
+		Threshold:     50,
+		MinPopulation: badges.MinRankPopulation,
+	}, "NAT2": {Signal: "national_percentile", Threshold: 2, MinPopulation: badges.MinRankPopulation}, "TP": {Signal: "team", Threshold: 1}, "WT": {Signal: "monthly_winner", Threshold: 1},
 }
 
 func recognitionRules(ctx context.Context, q *queries.Queries) (RecognitionRules, error) {
@@ -55,11 +62,12 @@ func recognitionRules(ctx context.Context, q *queries.Queries) (RecognitionRules
 	}
 	custom := map[string]BadgeRule{}
 	for _, row := range rows {
-		custom[row.Code] = BadgeRule{row.Code, row.Signal, row.Threshold, row.Artwork}
+		custom[row.Code] = BadgeRule{row.Code, row.Signal, row.Threshold, row.MinPopulation, row.Artwork}
 	}
 	for _, b := range badges.Catalog {
 		rule := defaultBadgeRules[b.Code]
 		rule.Code = b.Code
+		rule.MinPopulation = max(rule.MinPopulation, 1)
 		if c, ok := custom[b.Code]; ok {
 			rule = c
 		}
@@ -100,9 +108,9 @@ func ruleEarned(r BadgeRule, s badges.Signals) bool {
 	case "initiatives":
 		n = s.DistinctInitiatives
 	case "city_rank":
-		return s.CityRank != nil && int64(*s.CityRank) <= r.Threshold
+		return s.CityRank != nil && int64(*s.CityRank) <= r.Threshold && int64(s.CityPopulation) >= r.MinPopulation
 	case "national_percentile":
-		return s.NationalTopPercent != nil && int64(*s.NationalTopPercent) <= r.Threshold
+		return s.NationalTopPercent != nil && int64(*s.NationalTopPercent) <= r.Threshold && int64(s.NationalPopulation) >= r.MinPopulation
 	case "founding":
 		return s.FoundingQualified
 	case "first_gift":
@@ -149,6 +157,10 @@ func (s WordingService) SetRules(ctx context.Context, token string, in Recogniti
 		if b.Signal == "national_percentile" && b.Threshold > 100 {
 			return ErrStaffInput
 		}
+		ranked := b.Signal == "city_rank" || b.Signal == "national_percentile"
+		if b.MinPopulation < 1 || b.MinPopulation > 1000000 || (!ranked && b.MinPopulation != 1) {
+			return ErrStaffInput
+		}
 		if b.Signal != "streak_days" && b.Signal != "referrals" && b.Signal != "checkins" && b.Signal != "initiatives" &&
 			b.Signal != "city_rank" &&
 			b.Signal != "national_percentile" &&
@@ -174,7 +186,7 @@ func (s WordingService) SetRules(ctx context.Context, token string, in Recogniti
 					png, _ := cleanLogo(art)
 					art = "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)
 				}
-				if err := q.SetBadgeRule(ctx, queries.SetBadgeRuleParams{Code: b.Code, Signal: b.Signal, Threshold: b.Threshold, Artwork: art, UpdatedAt: timestamp(now), ActorID: actor.ID}); err != nil {
+				if err := q.SetBadgeRule(ctx, queries.SetBadgeRuleParams{Code: b.Code, Signal: b.Signal, Threshold: b.Threshold, MinPopulation: b.MinPopulation, Artwork: art, UpdatedAt: timestamp(now), ActorID: actor.ID}); err != nil {
 					return struct{}{}, err
 				}
 			}

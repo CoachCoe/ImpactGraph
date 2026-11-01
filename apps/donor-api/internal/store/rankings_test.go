@@ -162,6 +162,7 @@ func TestRankingRefreshPercentileCityRankAndOptOut(t *testing.T) {
 	optedOut := rankDonor(t, pool, 100, base.AddDate(0, 0, -1000), "Austin", true)
 
 	cleanup(t, "DELETE FROM donor_badges WHERE code IN ('NAT2','CITY50')")
+	rankBadgeRules(t, pool, 1)
 	svc := RankingService{DB: as(t, dbroles.ProjectionWorker)}
 	if err := svc.Refresh(ctx, now); err != nil {
 		t.Fatal(err)
@@ -218,6 +219,69 @@ func TestRankingRefreshPercentileCityRankAndOptOut(t *testing.T) {
 	}
 }
 
+// rankBadgeRules saves the rank badges' default thresholds with minPopulation
+// as the population each must be ranked among, as staff would.
+func rankBadgeRules(t *testing.T, pool *pgxpool.Pool, minPopulation int64) {
+	t.Helper()
+	actor, _ := staffFixture(t, pool, "SUPER_ADMIN")
+	cleanup(t, "DELETE FROM donor_badge_rules WHERE code IN ('NAT2','CITY50')")
+	mustExec(t, pool, `INSERT INTO donor_badge_rules(code,signal,threshold,min_population,updated_at,actor_id)
+VALUES ('NAT2','national_percentile',2,$1,now(),$2),('CITY50','city_rank',50,$1,now(),$2)
+ON CONFLICT (code) DO UPDATE SET min_population=EXCLUDED.min_population`, minPopulation, actor)
+}
+
+// A rank among fewer donors than a rank badge's minimum population is shown
+// but earns nothing, on the rollup or on read; staff can lower the minimum.
+func TestRankBadgesWaitForTheirMinimumPopulation(t *testing.T) {
+	pool := database(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	cleanup(t, "DELETE FROM donor_badges WHERE code IN ('NAT2','CITY50')")
+	cleanup(t, "DELETE FROM donor_rankings")
+	mustExec(t, pool, "DELETE FROM donor_rankings")
+	mustExec(t, pool, "DELETE FROM donor_badge_rules WHERE code IN ('NAT2','CITY50')")
+	id := rankDonor(t, pool, 30, now.Add(-30*24*time.Hour), "Boise", false)
+	_ = rankDonor(t, pool, 3, now.Add(-3*24*time.Hour), "Boise", false)
+	token := sessionFor(t, pool, id)
+	svc := RankingService{DB: as(t, dbroles.ProjectionWorker)}
+	held := func() int {
+		t.Helper()
+		var n int
+		if err := pool.QueryRow(ctx, "SELECT count(*) FROM donor_badges WHERE donor_id=$1 AND code IN ('NAT2','CITY50')", id).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if err := svc.Refresh(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	rank, err := ForDonor(ctx, queries.New(pool), id)
+	if err != nil || rank == nil || rank.NationalPercentile != 1 || rank.CityRank == nil || *rank.CityRank != 1 {
+		t.Fatalf("the rank line is hidden in a small population: %+v %v", rank, err)
+	}
+	views, err := (BadgeService{DB: pool}).Badges(ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if badgeView(t, views, "NAT2").Earned || badgeView(t, views, "CITY50").Earned || held() != 0 {
+		t.Fatal("a rank among two donors earned a rank badge under the default minimum")
+	}
+	rankBadgeRules(t, pool, 3)
+	if err := svc.Refresh(ctx, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if held() != 0 {
+		t.Fatal("a rank among two donors earned a rank badge needing three")
+	}
+	rankBadgeRules(t, pool, 2)
+	if err := svc.Refresh(ctx, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if held() != 2 {
+		t.Fatal("lowering the minimum to the population did not award both rank badges")
+	}
+}
+
 // badgeView finds one badge in the donor's badge list.
 func badgeView(t *testing.T, views []BadgeView, code string) BadgeView {
 	t.Helper()
@@ -238,6 +302,7 @@ func TestCityBadgeRecordsTheCityItWasEarnedIn(t *testing.T) {
 	token := sessionFor(t, pool, id)
 	cleanup(t, "DELETE FROM donor_badges WHERE code IN ('NAT2','CITY50')")
 	cleanup(t, "DELETE FROM donor_rankings")
+	rankBadgeRules(t, pool, 1)
 	if err := (RankingService{DB: as(t, dbroles.ProjectionWorker)}).Refresh(ctx, now); err != nil {
 		t.Fatal(err)
 	}
@@ -276,6 +341,7 @@ func TestCityBadgeEarnedOnReadRecordsTheRankedCity(t *testing.T) {
 	token := sessionFor(t, pool, id)
 	cleanup(t, "DELETE FROM donor_badges WHERE code IN ('NAT2','CITY50')")
 	cleanup(t, "DELETE FROM donor_rankings")
+	rankBadgeRules(t, pool, 1)
 	if err := (RankingService{DB: as(t, dbroles.ProjectionWorker)}).Refresh(ctx, now); err != nil {
 		t.Fatal(err)
 	}

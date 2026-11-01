@@ -79,7 +79,9 @@ func signalsFor(ctx context.Context, q *queries.Queries, donor queries.Donor, no
 	if rank != nil {
 		pct := rank.NationalPercentile
 		s.NationalTopPercent = &pct
+		s.NationalPopulation = rank.nationalPopulation
 		s.CityRank = rank.CityRank
+		s.CityPopulation = rank.cityPopulation
 		if rank.City != nil {
 			s.City = *rank.City
 		}

@@ -7,6 +7,7 @@ import (
 	"dad/donor-api/internal/store/queries"
 	"errors"
 	"github.com/jackc/pgx/v5/pgtype"
+	"slices"
 	"testing"
 	"time"
 )
@@ -139,6 +140,26 @@ func TestRecognitionRulesAndArtwork(t *testing.T) {
 	saved, err := s.Rules(ctx, admin)
 	if err != nil || saved.Milestones[0] != 5 {
 		t.Fatalf("rules not saved: %+v %v", saved, err)
+	}
+	for _, b := range saved.Badges {
+		ranked := b.Code == "NAT2" || b.Code == "CITY50"
+		if ranked != (b.MinPopulation == badges.MinRankPopulation) || (!ranked && b.MinPopulation != 1) {
+			t.Fatalf("badge %s saved minimum population %d", b.Code, b.MinPopulation)
+		}
+	}
+	for _, c := range []struct {
+		code       string
+		population int64
+	}{{"CITY50", 0}, {"NAT2", 1000001}, {"7", 5}} {
+		edited := slices.Clone(saved.Badges)
+		for i := range edited {
+			if edited[i].Code == c.code {
+				edited[i].MinPopulation = c.population
+			}
+		}
+		if err := s.SetRules(ctx, admin, RecognitionRules{Badges: edited, Milestones: saved.Milestones}); !errors.Is(err, ErrStaffInput) {
+			t.Fatalf("%s accepted minimum population %d: %v", c.code, c.population, err)
+		}
 	}
 	if !ruleEarned(BadgeRule{Signal: "referrals", Threshold: 2}, badges.Signals{ConvertedReferrals: 2}) ||
 		ruleEarned(BadgeRule{Signal: "referrals", Threshold: 3}, badges.Signals{ConvertedReferrals: 2}) {

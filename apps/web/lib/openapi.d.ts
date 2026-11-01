@@ -4386,6 +4386,11 @@ export interface components {
             signal: string;
             /** Format: int64 */
             threshold: number;
+            /**
+             * Format: int64
+             * @description Fewest ranked donors a rank must be taken among to earn the badge; 1 for a badge that is not a rank.
+             */
+            min_population: number;
             artwork: string;
         };
         RecognitionRules: {
