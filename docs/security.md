@@ -1,7 +1,8 @@
 # R1 security controls
 
 Donors authenticate through single-use, 15-minute email proof, a passkey they added
-while signed in, a one-time SMS code, or Apple or Google sign-in, and hold hashed,
+while signed in, a password set after account verification, a one-time SMS code,
+or Apple or Google sign-in, and hold hashed,
 revocable sessions: a 30-day cookie in browsers, a rotating token pair in the app. Staff sign in with individual passkeys (WebAuthn, verified by
 go-webauthn) and receive eight-hour hashed sessions. Donor and staff cookies are
 separate, HttpOnly, and Secure on HTTPS. Staff cookies use SameSite=Strict; donor cookies
@@ -41,7 +42,7 @@ stored as public keys and need no encryption key.
 
 Donor passkeys follow the same ceremony rules on the public host, which is their relying
 party; a public origin addressed by IP cannot be one, so such a deployment runs without
-them. Sign-in is usernameless and requires a discoverable, user-verifying passkey; any
+them, and its passkey routes answer 503 `PASSKEYS_UNCONFIGURED`. Sign-in is usernameless and requires a discoverable, user-verifying passkey; any
 answer spends its challenge, refused ones included, and a disabled donor or unknown passkey
 cannot sign in. A passkey sign-in is a session like a claim, recorded in
 `donor_session_events`. Only a signed-in donor can add a passkey: the creation options
@@ -68,8 +69,9 @@ verified. Google must also be authoritative for the address: Gmail or a token wi
 Workspace hosted-domain claim. Google can mark an external mailbox verified without
 proving its current ownership, so that address cannot create a link; use email sign-in
 instead. An established provider-subject link still works without the email claim.
-A verified identity with no account
-fails like a wrong code; accounts are created only by giving. Both methods stay off until
+A first-time verified provider identity creates a donor account if the address
+does not hold another role. Donors may also create accounts through email-verified
+signup before giving. Both SMS and provider sign-in stay off until
 their provider is configured ([operations](operations.md#phone-and-social-sign-in)); the
 recording stubs for development must never be configured in production.
 
@@ -137,7 +139,9 @@ address notifications; they are not credentials. Every revocation clears the ses
 token, which a database check constraint requires of any revocation, and delivery
 skips sessions that have lapsed, so a signed-out or expired installation receives
 nothing more. Registration is app-only, validates the token's form for its platform,
-and moves a token held by another session, since a token names one installation.
+and moves a token held by another session, since a token names one installation. A
+SHA-256 of each registered token is kept against the donor to block self-referral
+credit ([donor domain](donor-domain.md#referrals)); it cannot address a notification.
 Notification text names no one and no amount: it transits Apple's and Google's servers
 and shows on lock screens, so the app fetches detail through the API, which shows a
 referral conversion only as a time and a channel. A token is dropped only when the

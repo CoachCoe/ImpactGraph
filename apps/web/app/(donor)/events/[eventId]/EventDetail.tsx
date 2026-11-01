@@ -6,7 +6,7 @@ import { Page } from "@/components/donor/Page";
 import { ApiError, api, failureMessage, type Schema } from "@/lib/api";
 import { formatDateTime } from "@/lib/dates";
 import { resourceMessages, useApiResource } from "@/lib/useApiResource";
-import { placeSummary } from "../../account/events/Events";
+import { eventType, placeSummary } from "../../account/events/Events";
 
 type Event = Schema<"EventView">;
 type Loaded = { event: Event; signedIn: boolean };
@@ -67,7 +67,7 @@ export default function EventDetail({ event: id }: { event: string }) {
   const opensLater = Boolean(event?.booking_opens_at && new Date(event.booking_opens_at).getTime() > Date.now());
   const canReserve = !opensLater || Boolean(event?.early_booking);
   return (
-    <Page eyebrow="Event" title={event?.title ?? "Event"}>
+    <Page eyebrow={event ? eventType(event) : "Event"} title={event?.title ?? "Event"}>
       {event && (
         <>
           {event.cancelled && (
@@ -75,8 +75,8 @@ export default function EventDetail({ event: id }: { event: string }) {
           )}
           <p className="lead">{event.description}</p>
           <p>
-            <time dateTime={event.starts_at}>{formatDateTime(event.starts_at)}</time> –{" "}
-            <time dateTime={event.ends_at}>{formatDateTime(event.ends_at)}</time>
+            <time dateTime={event.starts_at}>{formatDateTime(event.starts_at, event.time_zone)}</time> –{" "}
+            <time dateTime={event.ends_at}>{formatDateTime(event.ends_at, event.time_zone)}</time>
           </p>
           <p>
             {event.venue}
@@ -89,7 +89,7 @@ export default function EventDetail({ event: id }: { event: string }) {
               {event.early_booking
                 ? "As a Team Captain, you can reserve now, before booking opens on "
                 : "Booking opens "}
-              <time dateTime={event.booking_opens_at}>{formatDateTime(event.booking_opens_at)}</time>.
+              <time dateTime={event.booking_opens_at}>{formatDateTime(event.booking_opens_at, event.time_zone)}</time>.
             </p>
           )}
           {!event.cancelled && !started && data.signedIn && (

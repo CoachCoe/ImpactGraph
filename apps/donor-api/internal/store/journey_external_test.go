@@ -66,6 +66,10 @@ func (g journeyCharges) RetrievePaymentIntent(_ context.Context, id string) (pay
 	return payments.DecodeObject(raw)
 }
 
+func (journeyCharges) RetrievePaymentMethod(context.Context, string) (payments.Object, error) {
+	return nil, payments.ErrProcessorUnavailable
+}
+
 func (journeyCharges) RetrieveRefund(context.Context, string) (payments.Object, error) {
 	return nil, payments.ErrProcessorUnavailable
 }

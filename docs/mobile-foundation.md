@@ -49,6 +49,23 @@ pins its dependency; changing the backend must preserve supported installed clie
 Breaking field removals, type changes, and newly required request fields require a
 coordinated compatibility plan. Do not invent financial values for unknown server states.
 
+## Compatible additions in version 2.9
+
+Version 2.9 puts the city on the Top 50 City badge. The badge `code` stays `CITY50`; it is
+the stable identifier, and the badge's city varies (PRD Appendix A, "Top 50 Chicago"). No
+request, existing field or enum value changes. Both fields are on every `BadgeView` from
+`donorBadges`.
+
+- `city` (required, string or `null`) is the city the badge was earned in. It is recorded
+  when the badge is earned, so it stays that city if the donor later moves. It is `null` on
+  every other badge, on a `CITY50` not yet earned, and on one staff granted. A `CITY50` earned
+  before 2.9 carries the donor's city as of the 2.9 release.
+- `display_title` (required, string) is the title to show. For an earned city badge with a
+  city it reads `Top 50 in {city}` (for example `Top 50 in Chicago`, following the badge's
+  threshold if staff change it); for every other badge it equals `title`. Show it on the
+  earned badge and keep `title` (`Top 50 City`) for the unearned one. A client that composes
+  its own copy should use `Top 50 in {city}`, and fall back to `title` when `city` is `null`.
+
 ## Compatible additions in version 2.8
 
 Version 2.8 adds the donor's referral code to the sharing reads and documents how to save

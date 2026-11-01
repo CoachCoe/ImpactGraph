@@ -180,9 +180,8 @@ type OIDCService struct {
 
 // SignIn verifies a provider id_token and issues a session for the donor it
 // belongs to. A verified identity is matched first by a prior link, then by the
-// verified email of an existing donor (which also records the link); a verified
-// identity with no matching donor returns ErrSignInCode rather than creating an
-// account — account creation happens in the giving flow, as it does for email.
+// verified email (which also records the link). A first-time verified identity
+// creates a donor account, subject to the same email-role checks as signup.
 func (s OIDCService) SignIn(ctx context.Context, provider oidc.Provider, idToken string, client Client) (Tokens, error) {
 	if s.Verifier == nil || !s.Settings.Configured(provider) {
 		return Tokens{}, ErrSignInUnavailable
@@ -223,7 +222,7 @@ func (s OIDCService) SignIn(ctx context.Context, provider oidc.Provider, idToken
 			return Tokens{}, err
 		}
 
-		// Not linked: link to an existing donor by verified email, else refuse.
+		// Not linked: find or create the donor using the verified email.
 		if ident.Email == "" {
 			return Tokens{}, ErrSignInCode
 		}

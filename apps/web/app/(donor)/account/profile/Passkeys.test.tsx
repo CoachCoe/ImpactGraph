@@ -54,6 +54,17 @@ it("lists each passkey with when it was added and last used", async () => {
   expect(screen.getByRole("button", { name: "Add a passkey" })).toBeVisible();
 });
 
+it("leaves passkeys out of the profile where the deployment offers none", async () => {
+  browser();
+  const fetch = serve({
+    "GET /api/donor/me/passkeys": () =>
+      json({ detail: "Passkey sign-in is not set up in this environment", code: "PASSKEYS_UNCONFIGURED" }, 503),
+  });
+  const { container } = render(<Passkeys onSignedOut={vi.fn()} />);
+  await waitFor(() => expect(fetch).toHaveBeenCalled());
+  await waitFor(() => expect(container).toBeEmptyDOMElement());
+});
+
 it("adds a named passkey and shows the list the API returns", async () => {
   const create = browser();
   const fetch = serve({

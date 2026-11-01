@@ -129,8 +129,8 @@ export default function Dashboard() {
                   <p className="metricValue">{data.impact.events_volunteered}</p>
                   <p>Events you checked in at.</p>
                 </article>
-                <TodayInitiative onShown={setShownInitiatives} />
               </div>
+              <TodayInitiative onShown={setShownInitiatives} />
               <div className="metrics pair">
                 <article className="metric">
                   <h2>Link Referrals</h2>

@@ -530,7 +530,7 @@ WHERE g.stripe_object_id=$1`, "in_first_"+f.donorID.String(), HashToken(visitor)
 	if giftReferrer != referrer || checkoutReferrer != referrer || touchReferrer != referrer || giftKind != "LINK" ||
 		checkoutKind != touchKind ||
 		giftKind != touchKind {
-		t.Fatal("payment record lost first-touch attribution")
+		t.Fatal("payment record lost the touch's attribution")
 	}
 	// A renewal charged after the attribution window records no referrer: the
 	// gift captures the checkout snapshot as it stands when the invoice is paid.
@@ -595,6 +595,11 @@ func TestEarlierPaymentCorrectsConversionAndPreservesFoundingAward(t *testing.T)
 		!second.FoundingAwardedAt.Time.Equal(first.FoundingAwardedAt.Time) ||
 		second.NetMinor.Int64 != 6000 {
 		t.Fatalf("incorrect corrected relationship: %+v %v", second, err)
+	}
+	var conversions int
+	if err := tx.QueryRow(ctx, "SELECT count(*) FROM analytics_events WHERE donor_id=$1 AND name='referral_converted' AND source='SERVER'",
+		h.donor("ben")).Scan(&conversions); err != nil || conversions != 1 {
+		t.Fatalf("recorded %d referral conversions, want 1 across the correction: %v", conversions, err)
 	}
 }
 

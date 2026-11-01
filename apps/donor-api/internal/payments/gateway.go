@@ -14,6 +14,7 @@ import (
 
 type FinancialGateway interface {
 	RetrievePaymentIntent(context.Context, string) (Object, error)
+	RetrievePaymentMethod(context.Context, string) (Object, error)
 	RetrieveRefund(context.Context, string) (Object, error)
 	RetrieveSubscription(context.Context, string) (Object, error)
 }
@@ -284,6 +285,19 @@ func (g *StripeGateway) RetrievePaymentIntent(ctx context.Context, id string) (O
 		return nil, err
 	}
 	result, err := g.client.V1PaymentIntents.Retrieve(ctx, id, params)
+	if err != nil {
+		return nil, ErrProcessorUnavailable
+	}
+	return rawObject(result.LastResponse)
+}
+
+// RetrievePaymentMethod reads a payment method, whose card fingerprint names
+// the card across customers.
+func (g *StripeGateway) RetrievePaymentMethod(ctx context.Context, id string) (Object, error) {
+	if err := g.acquire(ctx, BucketWorker); err != nil {
+		return nil, err
+	}
+	result, err := g.client.V1PaymentMethods.Retrieve(ctx, id, nil)
 	if err != nil {
 		return nil, ErrProcessorUnavailable
 	}

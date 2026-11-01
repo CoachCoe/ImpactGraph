@@ -18,6 +18,18 @@ it("separates earned badges from how to earn the rest", async () => {
               perk: "Founders events",
               earned: true,
               earned_at: "2026-10-01T12:00:00Z",
+              city: null,
+              display_title: "Founding Donor",
+            },
+            {
+              code: "CITY50",
+              title: "Top 50 City",
+              rule: "Rank in the top 50 in your city",
+              perk: "",
+              earned: true,
+              earned_at: "2026-10-02T12:00:00Z",
+              city: "Chicago",
+              display_title: "Top 50 in Chicago",
             },
             {
               code: "STREAK_30",
@@ -26,6 +38,8 @@ it("separates earned badges from how to earn the rest", async () => {
               perk: "",
               earned: false,
               earned_at: null,
+              city: null,
+              display_title: "30-day streak",
             },
           ],
         }),
@@ -38,6 +52,8 @@ it("separates earned badges from how to earn the rest", async () => {
   if (!earned || !unearned) throw new Error("Missing sections");
   expect(within(earned).getByText("Founding Donor")).toBeVisible();
   expect(within(earned).getByText("Founders events")).toBeVisible();
+  expect(within(earned).getByText("Top 50 in Chicago")).toBeVisible();
+  expect(within(earned).queryByText("Top 50 City")).not.toBeInTheDocument();
   expect(within(unearned).getByText("Give for 30 days in a row")).toBeVisible();
   expect(within(earned).queryByText("30-day streak")).not.toBeInTheDocument();
 });

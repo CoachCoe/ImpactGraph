@@ -238,6 +238,10 @@ func (g *offlineGateway) RetrievePaymentIntent(context.Context, string) (payment
 	return nil, g.call("RetrievePaymentIntent")
 }
 
+func (g *offlineGateway) RetrievePaymentMethod(context.Context, string) (payments.Object, error) {
+	return nil, g.call("RetrievePaymentMethod")
+}
+
 func (g *offlineGateway) RetrieveRefund(context.Context, string) (payments.Object, error) {
 	return nil, g.call("RetrieveRefund")
 }

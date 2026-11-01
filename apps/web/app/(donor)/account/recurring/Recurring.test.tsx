@@ -88,13 +88,13 @@ it("distinguishes unconfirmed checkout from having no monthly gift", async () =>
   await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
 });
 
-it("describes a subscription Stripe paused without offering changes", async () => {
+it("treats a status the contract does not list as not active and offers no changes", async () => {
   vi.stubGlobal(
     "fetch",
-    vi.fn().mockResolvedValue(response({ state: "ready", subscription: { ...subscription, status: "paused" } })),
+    vi.fn().mockResolvedValue(response({ state: "ready", subscription: { ...subscription, status: "suspended" } })),
   );
   render(<RecurringPage />);
-  expect(await screen.findByText("Your monthly gift is paused.")).toBeVisible();
+  expect(await screen.findByText("Your monthly gift is not active.")).toBeVisible();
   expect(screen.getByRole("link", { name: "Update payment method" })).toBeVisible();
   expect(screen.queryByRole("link", { name: "Change your daily gift" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Cancel monthly giving" })).not.toBeInTheDocument();

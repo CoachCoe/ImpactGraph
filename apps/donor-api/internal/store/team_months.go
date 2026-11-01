@@ -71,7 +71,7 @@ func closeTeamMonth(ctx context.Context, q *queries.Queries, partner pgtype.UUID
 			return false, err
 		}
 		for _, donor := range members {
-			if err := earnBadge(ctx, q, donor, "WT", now); err != nil {
+			if err := earnBadge(ctx, q, donor, "WT", pgtype.Text{}, now); err != nil {
 				return false, err
 			}
 		}

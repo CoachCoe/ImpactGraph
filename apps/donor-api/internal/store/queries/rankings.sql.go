@@ -12,15 +12,22 @@ import (
 )
 
 const awardRankingBadges = `-- name: AwardRankingBadges :exec
-WITH qualifying AS (
-  SELECT donor_id, 'NAT2'::varchar AS code FROM donor_rankings
-  WHERE computed_at = $1::timestamptz AND national_percentile <= coalesce((SELECT threshold FROM donor_badge_rules WHERE code='NAT2'),2)
+WITH rules AS (
+  SELECT coalesce((SELECT threshold FROM donor_badge_rules WHERE code='NAT2'),2) AS nat_threshold,
+         coalesce((SELECT min_population FROM donor_badge_rules WHERE code='NAT2'),100) AS nat_population,
+         coalesce((SELECT threshold FROM donor_badge_rules WHERE code='CITY50'),50) AS city_threshold,
+         coalesce((SELECT min_population FROM donor_badge_rules WHERE code='CITY50'),100) AS city_population
+), qualifying AS (
+  SELECT donor_id, 'NAT2'::varchar AS code, NULL::varchar AS city FROM donor_rankings, rules
+  WHERE computed_at = $1::timestamptz
+    AND national_percentile <= rules.nat_threshold AND national_population >= rules.nat_population
   UNION ALL
-  SELECT donor_id, 'CITY50'::varchar FROM donor_rankings
-  WHERE computed_at = $1::timestamptz AND city_rank <= coalesce((SELECT threshold FROM donor_badge_rules WHERE code='CITY50'),50)
+  SELECT donor_id, 'CITY50'::varchar, donor_rankings.city::varchar FROM donor_rankings, rules
+  WHERE computed_at = $1::timestamptz
+    AND city_rank <= rules.city_threshold AND donor_rankings.city_population >= rules.city_population
 ), earned AS (
-  INSERT INTO donor_badges (donor_id, code, source, earned_at)
-  SELECT donor_id, code, 'AUTO', $1::timestamptz FROM qualifying
+  INSERT INTO donor_badges (donor_id, code, source, earned_at, city)
+  SELECT donor_id, code, 'AUTO', $1::timestamptz, city FROM qualifying
   ON CONFLICT (donor_id, code) DO NOTHING
   RETURNING donor_id, code
 )
@@ -39,7 +46,9 @@ type AwardRankingBadgesParams struct {
 }
 
 // Top 2% and Top 50 City for every donor the rollup just ranked into them,
-// queueing the badge-earned push for each new one, in one pass.
+// queueing the badge-earned push for each new one, in one pass. A rank taken
+// in a population smaller than the rule's minimum awards nothing. The
+// fallbacks match defaultBadgeRules for a rule staff never saved.
 func (q *Queries) AwardRankingBadges(ctx context.Context, arg AwardRankingBadgesParams) error {
 	_, err := q.db.Exec(ctx, awardRankingBadges, arg.ComputedAt, arg.ExpiresAt)
 	return err
@@ -66,7 +75,7 @@ func (q *Queries) ClaimProjectionSchedule(ctx context.Context, arg ClaimProjecti
 }
 
 const donorRanking = `-- name: DonorRanking :one
-SELECT r.national_percentile, r.city, r.city_rank, r.computed_at
+SELECT r.national_percentile, r.city, r.city_rank, r.national_population, r.city_population, r.computed_at
 FROM donor_rankings r
 JOIN donors d ON d.id=r.donor_id
 JOIN donor_metric_projections p ON p.donor_id=r.donor_id
@@ -79,6 +88,8 @@ type DonorRankingRow struct {
 	NationalPercentile int32              `json:"national_percentile"`
 	City               pgtype.Text        `json:"city"`
 	CityRank           pgtype.Int4        `json:"city_rank"`
+	NationalPopulation int32              `json:"national_population"`
+	CityPopulation     int32              `json:"city_population"`
 	ComputedAt         pgtype.Timestamptz `json:"computed_at"`
 }
 
@@ -90,6 +101,8 @@ func (q *Queries) DonorRanking(ctx context.Context, donorID pgtype.UUID) (DonorR
 		&i.NationalPercentile,
 		&i.City,
 		&i.CityRank,
+		&i.NationalPopulation,
+		&i.CityPopulation,
 		&i.ComputedAt,
 	)
 	return i, err
@@ -131,16 +144,20 @@ ranked AS (
          )) AS national_percentile,
          CASE WHEN city IS NOT NULL
               THEN RANK() OVER (PARTITION BY city ORDER BY streak DESC, since ASC)::int
-         END AS city_rank
+         END AS city_rank,
+         (count(*) OVER ())::int AS national_population,
+         CASE WHEN city IS NOT NULL THEN (count(*) OVER (PARTITION BY city))::int ELSE 0 END AS city_population
   FROM eligible
 )
-INSERT INTO donor_rankings (donor_id, national_percentile, city, city_rank, computed_at)
-SELECT donor_id, national_percentile, city, city_rank, $1::timestamptz
+INSERT INTO donor_rankings (donor_id, national_percentile, city, city_rank, national_population, city_population, computed_at)
+SELECT donor_id, national_percentile, city, city_rank, national_population, city_population, $1::timestamptz
 FROM ranked
 ON CONFLICT (donor_id) DO UPDATE SET
   national_percentile = EXCLUDED.national_percentile,
   city = EXCLUDED.city,
   city_rank = EXCLUDED.city_rank,
+  national_population = EXCLUDED.national_population,
+  city_population = EXCLUDED.city_population,
   computed_at = EXCLUDED.computed_at
 `
 
@@ -149,6 +166,7 @@ ON CONFLICT (donor_id) DO UPDATE SET
 // streak who have not opted out; ties break on the earlier streak start, so a
 // longer-standing identical streak ranks higher. national_percentile is the
 // top-percentile bucket (1 = top 1%); city_rank is 1-based within donor.city.
+// Each row also records the size of the population each rank was taken in.
 // Replaces the prior snapshot wholesale.
 func (q *Queries) RefreshRankings(ctx context.Context, computedAt pgtype.Timestamptz) error {
 	_, err := q.db.Exec(ctx, refreshRankings, computedAt)

@@ -19,6 +19,12 @@ Start with these; this file only adds what they do not say.
   `commit && push`; a long commit message can fuse into the push-target safety scan and
   get the push blocked.
 
+## Code comments
+
+- Comments explain **why** (a constraint, a trade-off, a non-obvious behavior), not what the
+  code already says.
+- No commented-out code (git keeps history). A `TODO` names a tracked issue.
+
 ## Gotchas not written in the docs
 
 - **OpenAPI/schema changes fan out.** Adding a field to a Go struct that maps to the

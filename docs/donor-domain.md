@@ -84,7 +84,13 @@ months after capture, long after its window closed, so retention never changes
 attribution: checkouts and gifts keep their own copy of it.
 
 Self-referral credit is removed when giver and referrer match by account or normalized
-donor email; the gift itself remains allowed. There is no second-level credit.
+donor email, or when they share a card or an app installation; the gift itself remains
+allowed. A card is matched by Stripe's card fingerprint, read once per payment method
+from the subscription it pays; an installation by a SHA-256 of the push token it
+registered. Either signal recorded after a gift was credited brings both donors'
+projections due, so the credit is withdrawn at once. The signals are opaque and are kept
+when an account is deleted, so deleting a second account cannot restore its credit.
+There is no second-level credit.
 
 Sharing requires a claimed account and an explicitly chosen public first name/nickname.
 Do not substitute a billing name or email. Codes are permanent by default and may be
@@ -123,6 +129,11 @@ is identified by its first current day; a streak that resets and is rebuilt is a
 Content staff may change the words on a badge (its title and how-to-earn text) and on each
 named streak milestone's notification; the yearly milestones after 1,460 days use the
 standard wording. Numeric earning thresholds and badge artwork are editable through content administration; signal types stay fixed, and every change is audited.
+
+Top 2% and Top 50 City are awarded only when the rank was taken among at least 100 ranked
+donors (nationally, or in that city): in a small population every donor would qualify.
+Content staff can change that minimum with the badge's other earning rules. A donor's own
+rank line is shown whatever the population.
 
 Any successful first gift before 2027-01-01 00:00 America/New_York earns Founding Donor
 status. Use the processor's successful-payment timestamp, not checkout start or webhook

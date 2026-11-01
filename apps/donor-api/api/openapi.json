@@ -4760,7 +4760,7 @@
    "post": {
     "operationId": "beginDonorPasskeySignIn",
     "summary": "Begin a passkey sign-in",
-    "description": "Issues a usernameless WebAuthn challenge that any of the donor's passkeys for the public origin may answer, in a browser or, through its associated domain, the app. Pass `options` to `PublicKeyCredential.parseRequestOptionsFromJSON` and `navigator.credentials.get`, then answer within five minutes. No body.",
+    "description": "Issues a usernameless WebAuthn challenge that any of the donor's passkeys for the public origin may answer, in a browser or, through its associated domain, the app. Pass `options` to `PublicKeyCredential.parseRequestOptionsFromJSON` and `navigator.credentials.get`, then answer within five minutes. No body. 503 `PASSKEYS_UNCONFIGURED` when the deployment offers no donor passkeys, as on an origin that is an IP address.",
     "tags": [
      "Account"
     ],
@@ -5047,7 +5047,7 @@
    "post": {
     "operationId": "finishDonorPasskeySignIn",
     "summary": "Finish a passkey sign-in",
-    "description": "Verifies the assertion (challenge, origin, relying party, user verification, and signature) and signs the donor in, as a claim does. Each ceremony is answered once. 401 covers an unknown passkey, a disabled account, a signature counter that went backwards, and an unknown, expired, or used ceremony alike.",
+    "description": "Verifies the assertion (challenge, origin, relying party, user verification, and signature) and signs the donor in, as a claim does. Each ceremony is answered once. 401 covers an unknown passkey, a disabled account, a signature counter that went backwards, and an unknown, expired, or used ceremony alike. 503 `PASSKEYS_UNCONFIGURED` when the deployment offers no donor passkeys, as on an origin that is an IP address.",
     "tags": [
      "Account"
     ],
@@ -5175,14 +5175,15 @@
      "503": {
       "$ref": "#/components/responses/Unavailable"
      }
-    }
+    },
+    "description": "503 `PASSKEYS_UNCONFIGURED` when the deployment offers no donor passkeys, as on an origin that is an IP address."
    }
   },
   "/donor/me/passkeys/register/options": {
    "post": {
     "operationId": "beginDonorPasskeyRegister",
     "summary": "Begin adding a passkey",
-    "description": "Issues WebAuthn creation options requiring a discoverable, user-verifying passkey, excluding those the donor already holds. Pass `options` to `PublicKeyCredential.parseCreationOptionsFromJSON` and `navigator.credentials.create`, then answer within five minutes. No body.",
+    "description": "Issues WebAuthn creation options requiring a discoverable, user-verifying passkey, excluding those the donor already holds. Pass `options` to `PublicKeyCredential.parseCreationOptionsFromJSON` and `navigator.credentials.create`, then answer within five minutes. No body. 503 `PASSKEYS_UNCONFIGURED` when the deployment offers no donor passkeys, as on an origin that is an IP address.",
     "tags": [
      "Account"
     ],
@@ -5229,7 +5230,7 @@
    "post": {
     "operationId": "finishDonorPasskeyRegister",
     "summary": "Finish adding a passkey",
-    "description": "Verifies the attestation, stores the passkey, and emails the donor an essential notice naming it. 401 covers a rejected attestation, a passkey already registered to any account, a ceremony begun by another donor, and an unknown, expired, or used ceremony alike, as well as a missing session.",
+    "description": "Verifies the attestation, stores the passkey, and emails the donor an essential notice naming it. 401 covers a rejected attestation, a passkey already registered to any account, a ceremony begun by another donor, and an unknown, expired, or used ceremony alike, as well as a missing session. 503 `PASSKEYS_UNCONFIGURED` when the deployment offers no donor passkeys, as on an origin that is an IP address.",
     "tags": [
      "Account"
     ],
@@ -5320,7 +5321,7 @@
    "post": {
     "operationId": "deleteDonorPasskey",
     "summary": "Remove a passkey",
-    "description": "The passkey stops signing in at once. Sessions it already started are not ended; see POST /donor/me/sessions/revoke-others. 404 when the ID is not one of the donor's passkeys.",
+    "description": "The passkey stops signing in at once. Sessions it already started are not ended; see POST /donor/me/sessions/revoke-others. 404 when the ID is not one of the donor's passkeys. 503 `PASSKEYS_UNCONFIGURED` when the deployment offers no donor passkeys, as on an origin that is an IP address.",
     "tags": [
      "Account"
     ],
@@ -11982,6 +11983,9 @@
        "PAYMENTS_UNCONFIGURED",
        "EMAIL_UNCONFIGURED",
        "SOURCE_STORAGE_UNCONFIGURED",
+       "PUSH_UNCONFIGURED",
+       "FOUNDING_CLAIMS_UNCONFIGURED",
+       "PASSKEYS_UNCONFIGURED",
        "CURRENT_PASSWORD_INCORRECT"
       ]
      },
@@ -14459,6 +14463,17 @@
      },
      "artwork": {
       "type": "string"
+     },
+     "city": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "The city a city badge (code `CITY50`) was earned in, recorded when it was earned and kept if the donor later moves. Null for every other badge, for a `CITY50` that is not earned, and for one staff granted."
+     },
+     "display_title": {
+      "type": "string",
+      "description": "The title to show: `Top 50 in Chicago` for an earned city badge with a city, otherwise the same as `title`. The code stays `CITY50`."
      }
     },
     "required": [
@@ -14467,7 +14482,9 @@
      "rule",
      "perk",
      "earned",
-     "artwork"
+     "artwork",
+     "city",
+     "display_title"
     ],
     "additionalProperties": false
    },
@@ -16300,6 +16317,13 @@
       "minimum": 1,
       "maximum": 1000000
      },
+     "min_population": {
+      "type": "integer",
+      "format": "int64",
+      "minimum": 1,
+      "maximum": 1000000,
+      "description": "Fewest ranked donors a rank must be taken among to earn the badge; 1 for a badge that is not a rank."
+     },
      "artwork": {
       "type": "string"
      }
@@ -16308,6 +16332,7 @@
      "code",
      "signal",
      "threshold",
+     "min_population",
      "artwork"
     ]
    },

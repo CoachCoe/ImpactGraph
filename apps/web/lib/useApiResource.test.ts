@@ -24,6 +24,41 @@ it("loads data, reports it once to onLoad, and reloads on request", async () => 
   expect(onLoad).toHaveBeenCalledTimes(2);
 });
 
+it("keeps the loaded data while a reload is in flight, and loads afresh for a new path", async () => {
+  let release: (value: unknown) => void = () => undefined;
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(reply(200, { n: 1 }))
+    .mockReturnValueOnce(new Promise((resolve) => (release = resolve)))
+    .mockResolvedValueOnce(reply(200, { n: 3 }));
+  vi.stubGlobal("fetch", fetch);
+  const { result, rerender } = renderHook(({ path }) => useApiResource<{ n: number }>(path), {
+    initialProps: { path: "/donor/me/thing" },
+  });
+  await waitFor(() => expect(result.current.data).toEqual({ n: 1 }));
+  act(() => result.current.reload());
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(result.current.resource).toEqual({ state: "ready", data: { n: 1 } });
+  await act(async () => release(reply(200, { n: 2 })));
+  await waitFor(() => expect(result.current.data).toEqual({ n: 2 }));
+  rerender({ path: "/donor/me/other" });
+  expect(result.current.resource).toEqual({ state: "loading" });
+  await waitFor(() => expect(result.current.data).toEqual({ n: 3 }));
+});
+
+it("shows a failed reload instead of the data it could not refresh", async () => {
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(reply(200, { n: 1 }))
+    .mockResolvedValueOnce(reply(503));
+  vi.stubGlobal("fetch", fetch);
+  const { result } = renderHook(() => useApiResource<{ n: number }>("/donor/me/thing"));
+  await waitFor(() => expect(result.current.data).toEqual({ n: 1 }));
+  act(() => result.current.reload());
+  await waitFor(() => expect(result.current.resource).toEqual({ state: "error", rateLimited: false }));
+  expect(result.current.data).toBeNull();
+});
+
 it.each([
   [reply(401), { state: "signedOut" }],
   [reply(403), { state: "forbidden" }],

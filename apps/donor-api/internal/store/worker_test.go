@@ -20,6 +20,7 @@ type financialGateway struct {
 	intents             map[string]payments.Object
 	refunds             map[string]payments.Object
 	subscriptions       map[string]payments.Object
+	paymentMethods      map[string]payments.Object
 	sessions            map[string]payments.Object
 	setups              map[string]payments.Object
 	updateKeys          []string
@@ -28,6 +29,14 @@ type financialGateway struct {
 
 func (g *financialGateway) RetrievePaymentIntent(_ context.Context, id string) (payments.Object, error) {
 	value, ok := g.intents[id]
+	if !ok {
+		return nil, payments.ErrProcessorUnavailable
+	}
+	return value, nil
+}
+
+func (g *financialGateway) RetrievePaymentMethod(_ context.Context, id string) (payments.Object, error) {
+	value, ok := g.paymentMethods[id]
 	if !ok {
 		return nil, payments.ErrProcessorUnavailable
 	}

@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 
@@ -160,6 +162,7 @@ func TestRankingRefreshPercentileCityRankAndOptOut(t *testing.T) {
 	optedOut := rankDonor(t, pool, 100, base.AddDate(0, 0, -1000), "Austin", true)
 
 	cleanup(t, "DELETE FROM donor_badges WHERE code IN ('NAT2','CITY50')")
+	rankBadgeRules(t, pool, 1)
 	svc := RankingService{DB: as(t, dbroles.ProjectionWorker)}
 	if err := svc.Refresh(ctx, now); err != nil {
 		t.Fatal(err)
@@ -213,5 +216,187 @@ func TestRankingRefreshPercentileCityRankAndOptOut(t *testing.T) {
 	}
 	if pct != 1 {
 		t.Fatalf("top donor percentile: %d, want 1", pct)
+	}
+}
+
+// rankBadgeRules saves the rank badges' default thresholds with minPopulation
+// as the population each must be ranked among, as staff would.
+func rankBadgeRules(t *testing.T, pool *pgxpool.Pool, minPopulation int64) {
+	t.Helper()
+	actor, _ := staffFixture(t, pool, "SUPER_ADMIN")
+	cleanup(t, "DELETE FROM donor_badge_rules WHERE code IN ('NAT2','CITY50')")
+	mustExec(t, pool, `INSERT INTO donor_badge_rules(code,signal,threshold,min_population,updated_at,actor_id)
+VALUES ('NAT2','national_percentile',2,$1,now(),$2),('CITY50','city_rank',50,$1,now(),$2)
+ON CONFLICT (code) DO UPDATE SET min_population=EXCLUDED.min_population`, minPopulation, actor)
+}
+
+// A rank among fewer donors than a rank badge's minimum population is shown
+// but earns nothing, on the rollup or on read; staff can lower the minimum.
+func TestRankBadgesWaitForTheirMinimumPopulation(t *testing.T) {
+	pool := database(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	cleanup(t, "DELETE FROM donor_badges WHERE code IN ('NAT2','CITY50')")
+	cleanup(t, "DELETE FROM donor_rankings")
+	mustExec(t, pool, "DELETE FROM donor_rankings")
+	mustExec(t, pool, "DELETE FROM donor_badge_rules WHERE code IN ('NAT2','CITY50')")
+	id := rankDonor(t, pool, 30, now.Add(-30*24*time.Hour), "Boise", false)
+	_ = rankDonor(t, pool, 3, now.Add(-3*24*time.Hour), "Boise", false)
+	token := sessionFor(t, pool, id)
+	svc := RankingService{DB: as(t, dbroles.ProjectionWorker)}
+	held := func() int {
+		t.Helper()
+		var n int
+		if err := pool.QueryRow(ctx, "SELECT count(*) FROM donor_badges WHERE donor_id=$1 AND code IN ('NAT2','CITY50')", id).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if err := svc.Refresh(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	rank, err := ForDonor(ctx, queries.New(pool), id)
+	if err != nil || rank == nil || rank.NationalPercentile != 1 || rank.CityRank == nil || *rank.CityRank != 1 {
+		t.Fatalf("the rank line is hidden in a small population: %+v %v", rank, err)
+	}
+	views, err := (BadgeService{DB: pool}).Badges(ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if badgeView(t, views, "NAT2").Earned || badgeView(t, views, "CITY50").Earned || held() != 0 {
+		t.Fatal("a rank among two donors earned a rank badge under the default minimum")
+	}
+	rankBadgeRules(t, pool, 3)
+	if err := svc.Refresh(ctx, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if held() != 0 {
+		t.Fatal("a rank among two donors earned a rank badge needing three")
+	}
+	rankBadgeRules(t, pool, 2)
+	if err := svc.Refresh(ctx, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if held() != 2 {
+		t.Fatal("lowering the minimum to the population did not award both rank badges")
+	}
+}
+
+// badgeView finds one badge in the donor's badge list.
+func badgeView(t *testing.T, views []BadgeView, code string) BadgeView {
+	t.Helper()
+	for _, v := range views {
+		if v.Code == code {
+			return v
+		}
+	}
+	t.Fatalf("badge %s missing from the list", code)
+	return BadgeView{}
+}
+
+func TestCityBadgeRecordsTheCityItWasEarnedIn(t *testing.T) {
+	pool := database(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	id := rankDonor(t, pool, 1, now.Add(-7*24*time.Hour), "Chicago", false)
+	token := sessionFor(t, pool, id)
+	cleanup(t, "DELETE FROM donor_badges WHERE code IN ('NAT2','CITY50')")
+	cleanup(t, "DELETE FROM donor_rankings")
+	rankBadgeRules(t, pool, 1)
+	if err := (RankingService{DB: as(t, dbroles.ProjectionWorker)}).Refresh(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	var stored pgtype.Text
+	if err := pool.QueryRow(ctx, "SELECT city FROM donor_badges WHERE donor_id=$1 AND code='CITY50'", id).Scan(&stored); err != nil {
+		t.Fatalf("the rollup did not award the city badge: %v", err)
+	}
+	if !stored.Valid || stored.String != "Chicago" {
+		t.Fatalf("rollup recorded city %+v, want Chicago", stored)
+	}
+	mustExec(t, pool, "UPDATE donors SET city='Denver' WHERE id=$1", id)
+	b := BadgeService{DB: pool}
+	views, err := b.Badges(ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	city := badgeView(t, views, "CITY50")
+	if !city.Earned || city.City == nil || *city.City != "Chicago" || city.DisplayTitle != "Top 50 in Chicago" || city.Code != "CITY50" {
+		t.Fatalf("after moving, the city badge reads %+v; want it kept as Top 50 in Chicago", city)
+	}
+	for _, v := range views {
+		if v.Code != "CITY50" && v.City != nil {
+			t.Fatalf("badge %s carries city %q; only the city badge has one", v.Code, *v.City)
+		}
+		if v.Code != "CITY50" && v.DisplayTitle != v.Title {
+			t.Fatalf("badge %s display title %q differs from its title %q", v.Code, v.DisplayTitle, v.Title)
+		}
+	}
+}
+
+func TestCityBadgeEarnedOnReadRecordsTheRankedCity(t *testing.T) {
+	pool := database(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	id := rankDonor(t, pool, 1, now.Add(-7*24*time.Hour), "Austin", false)
+	token := sessionFor(t, pool, id)
+	cleanup(t, "DELETE FROM donor_badges WHERE code IN ('NAT2','CITY50')")
+	cleanup(t, "DELETE FROM donor_rankings")
+	rankBadgeRules(t, pool, 1)
+	if err := (RankingService{DB: as(t, dbroles.ProjectionWorker)}).Refresh(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, pool, "DELETE FROM donor_badges WHERE donor_id=$1", id)
+	views, err := (BadgeService{DB: pool}).Badges(ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	city := badgeView(t, views, "CITY50")
+	if !city.Earned || city.City == nil || *city.City != "Austin" || city.DisplayTitle != "Top 50 in Austin" {
+		t.Fatalf("badge earned on read = %+v, want Top 50 in Austin", city)
+	}
+	if first := badgeView(t, views, "NAT2"); first.City != nil {
+		t.Fatalf("a non-city badge carries city %q", *first.City)
+	}
+}
+
+func TestCityBadgeBackfillTakesTheDonorsCurrentCity(t *testing.T) {
+	pool := database(t)
+	ctx := context.Background()
+	migration, err := os.ReadFile("../../db/migrations/0079_badge_city.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(migration)
+	start := strings.Index(text, "UPDATE donor_badges")
+	end := start + strings.Index(text[start:], ";") + 1
+	if start < 0 || end <= start {
+		t.Fatal("backfill statement not found in the migration")
+	}
+	earned := rankDonor(t, pool, 1, time.Now().UTC().Add(-time.Hour), "Boston", false)
+	granted := rankDonor(t, pool, 1, time.Now().UTC().Add(-time.Hour), "Boston", false)
+	other := rankDonor(t, pool, 1, time.Now().UTC().Add(-time.Hour), "Boston", false)
+	cleanup(t, "DELETE FROM donor_badges WHERE donor_id IN ($1,$2,$3)", earned, granted, other)
+	mustExec(
+		t,
+		pool,
+		"INSERT INTO donor_badges(donor_id,code,source,earned_at) VALUES($1,'CITY50','AUTO',now()),($2,'CITY50','GRANT',now()),($3,'7','AUTO',now())",
+		earned,
+		granted,
+		other,
+	)
+	mustExec(t, pool, text[start:end])
+	cities := map[pgtype.UUID]pgtype.Text{}
+	for _, d := range []pgtype.UUID{earned, granted, other} {
+		var c pgtype.Text
+		if err := pool.QueryRow(ctx, "SELECT city FROM donor_badges WHERE donor_id=$1", d).Scan(&c); err != nil {
+			t.Fatal(err)
+		}
+		cities[d] = c
+	}
+	if c := cities[earned]; !c.Valid || c.String != "Boston" {
+		t.Fatalf("auto-earned city badge backfilled to %+v, want Boston", c)
+	}
+	if cities[granted].Valid || cities[other].Valid {
+		t.Fatalf("backfill touched a granted or non-city badge: granted %+v other %+v", cities[granted], cities[other])
 	}
 }

@@ -45,7 +45,7 @@ func TestAppSessionLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		for _, table := range []string{"donor_preference_events", "donor_preferences", "donor_metric_projections", "donor_session_events", "donor_sessions", "donor_login_links"} {
+		for _, table := range []string{"donor_preference_events", "donor_preferences", "donor_metric_projections", "donor_session_events", "donor_sessions", "donor_login_links", "donor_device_marks"} {
 			if _, err := pool.Exec(ctx, "DELETE FROM "+table+" WHERE donor_id=$1", id); err != nil {
 				t.Error(err)
 			}

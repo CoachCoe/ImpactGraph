@@ -99,20 +99,27 @@ func HoldsPerk(earned map[string]bool, perk Perk) bool {
 
 // Signals is the donor's current earning state, assembled by the store.
 type Signals struct {
-	FirstGiftMade       bool  // completed a first gift
-	FoundingQualified   bool  // first gift before the Founding cutoff / waitlist
-	StreakDays          int64 // days since the current run began
-	ComebackReached30   bool  // restarted after a lapse and reached a 30-day run
-	RaisedAmount        bool  // increased their monthly amount at least once
-	ConvertedReferrals  int64 // referrals who completed a gift
-	HasIRLReferral      bool  // someone joined by scanning their IRL code
-	DistinctInitiatives int64 // distinct initiatives funded/shown (A-4)
-	NationalTopPercent  *int  // national percentile rank (1 = top 1%); nil if unranked
-	CityRank            *int  // rank within their city; nil if unranked
-	VolunteerOptIn      bool  // opted in as a volunteer (E-1)
-	EventCheckins       int64 // events the donor has checked in to (E-8)
-	JoinedTeam          bool  // on a company team (EM-4)
+	FirstGiftMade       bool   // completed a first gift
+	FoundingQualified   bool   // first gift before the Founding cutoff / waitlist
+	StreakDays          int64  // days since the current run began
+	ComebackReached30   bool   // restarted after a lapse and reached a 30-day run
+	RaisedAmount        bool   // increased their monthly amount at least once
+	ConvertedReferrals  int64  // referrals who completed a gift
+	HasIRLReferral      bool   // someone joined by scanning their IRL code
+	DistinctInitiatives int64  // distinct initiatives funded/shown (A-4)
+	NationalTopPercent  *int   // national percentile rank (1 = top 1%); nil if unranked
+	NationalPopulation  int    // donors ranked nationally alongside them
+	CityRank            *int   // rank within their city; nil if unranked
+	City                string // the city CityRank is within; empty if unranked
+	CityPopulation      int    // donors ranked in City alongside them
+	VolunteerOptIn      bool   // opted in as a volunteer (E-1)
+	EventCheckins       int64  // events the donor has checked in to (E-8)
+	JoinedTeam          bool   // on a company team (EM-4)
 }
+
+// MinRankPopulation is the fewest ranked donors a rank badge is awarded among
+// by default: a rank among a handful of donors is not an achievement.
+const MinRankPopulation = 100
 
 // streakDayBadges maps the streak-day badges to their thresholds.
 var streakDayBadges = []struct {
@@ -156,10 +163,10 @@ func Evaluate(s Signals) map[string]bool {
 	if s.DistinctInitiatives >= 7 {
 		earned["INIT7"] = true
 	}
-	if s.NationalTopPercent != nil && *s.NationalTopPercent <= 2 {
+	if s.NationalTopPercent != nil && *s.NationalTopPercent <= 2 && s.NationalPopulation >= MinRankPopulation {
 		earned["NAT2"] = true
 	}
-	if s.CityRank != nil && *s.CityRank <= 50 {
+	if s.CityRank != nil && *s.CityRank <= 50 && s.CityPopulation >= MinRankPopulation {
 		earned["CITY50"] = true
 	}
 	if s.VolunteerOptIn {

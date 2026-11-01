@@ -25,6 +25,6 @@ it("shows the network's annual giving, next milestone, and named invitees", asyn
   render(<Network />);
   expect(await screen.findByText("Together your network funds $4,745 a year.")).toBeVisible();
   expect(screen.getByText("2 more to reach Connector (5 active).")).toBeVisible();
-  expect(screen.getByText("Cy D. · Paused")).toBeVisible();
+  expect(screen.getByText("Cy D. · Not giving")).toBeVisible();
   expect(screen.getByText(/1 more person is giving but chose not to be named/)).toBeVisible();
 });

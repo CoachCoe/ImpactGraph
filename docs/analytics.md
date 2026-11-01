@@ -44,7 +44,7 @@ taken while that period was within retention, and state the capture cutoff.
 
 | Metric | Definition and caveats |
 |---|---|
-| Founding donors | Distinct donor IDs whose first successful gift completed before the launch cutoff. A later refund or cancellation does not remove the permanent badge. Account claim is not required. |
+| Founding donors | Distinct donor IDs awarded the Founding Donor badge through a successful gift before the cutoff or a matching imported pre-cutoff website donor/waitlist claim. A later refund or cancellation does not remove the permanent badge. Gift-based awards do not require account claim. |
 | First-gift conversion by source | Distinct eligible landing journeys with a verified first gift divided by eligible landing journeys, separately DIRECT/LINK/IRL. Attribution uses the frozen source of the earliest verified successful payment, with payment ID breaking timestamp ties; delayed verification can correct the projection. Browser campaign parameters cannot override it. Do not substitute checkout requests for landing journeys. |
 | Seven-day share rate | Donors with a confirmed native-share handoff or clipboard copy within seven days of first gift divided by donors whose seven-day observation window has elapsed. Label this a share-action proxy, not verified invitation delivery. Cancellation of a share sheet is not a share. |
 | IRL conversion share | IRL first-gift conversions divided by LINK plus IRL first-gift conversions in the same cohort and observation window. Direct gifts are excluded from this denominator. |
@@ -119,13 +119,16 @@ The first-party endpoint sets a one-day HttpOnly journey cookie for checkout and
 verified-account linkage. No third-party analytics destination is used.
 
 The shared PRD §9 taxonomy is accepted at `/analytics/events` for web and native
-clients. Web observations include app opens, attribution source, signup, checkout
+clients. Web observations include app opens, the home page's donor/partner choice
+(`role_selected`), attribution source, signup, checkout
 start, sharing after a completed share handoff/copy, IRL-code display, settings,
 reservations, and team actions. Native clients must send the same schema and honor
 their own consent choice. Event UUIDs make client retries idempotent. Financial
 completion, failure, recovery and lapse events derive from committed server facts;
-client claims are never used as financial evidence. Badge-earned events are written
-in the same transaction as awards. The server source is distinct from client sources.
+client claims are never used as financial evidence. `referral_converted` is recorded
+once per referred donor, against that donor, when their first gift carries a referrer; a
+later attribution correction moves the credit without counting a second conversion.
+Badge-earned events are written in the same transaction as awards. The server source is distinct from client sources.
 
 Events contain only allowlisted names/properties, platform, timestamps, optional
 internal donor and journey IDs, and deduplication keys. Never send names, emails,

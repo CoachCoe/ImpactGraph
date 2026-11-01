@@ -42,10 +42,12 @@ func TestEvaluateLiveRuleBoundaries(t *testing.T) {
 		{"irl", Signals{HasIRLReferral: true}, []string{"IRL"}, nil},
 		{"7 initiatives", Signals{DistinctInitiatives: 7}, []string{"INIT7"}, nil},
 		{"6 initiatives not yet", Signals{DistinctInitiatives: 6}, nil, []string{"INIT7"}},
-		{"national top 2", Signals{NationalTopPercent: &top2}, []string{"NAT2"}, nil},
-		{"national top 3 not 2%", Signals{NationalTopPercent: &top3}, nil, []string{"NAT2"}},
-		{"city 50", Signals{CityRank: &city50}, []string{"CITY50"}, nil},
-		{"city 51 not top 50", Signals{CityRank: &city51}, nil, []string{"CITY50"}},
+		{"national top 2", Signals{NationalTopPercent: &top2, NationalPopulation: 100}, []string{"NAT2"}, nil},
+		{"national top 3 not 2%", Signals{NationalTopPercent: &top3, NationalPopulation: 100}, nil, []string{"NAT2"}},
+		{"national top 2 of 99", Signals{NationalTopPercent: &top2, NationalPopulation: 99}, nil, []string{"NAT2"}},
+		{"city 50", Signals{CityRank: &city50, CityPopulation: 100}, []string{"CITY50"}, nil},
+		{"city 51 not top 50", Signals{CityRank: &city51, CityPopulation: 100}, nil, []string{"CITY50"}},
+		{"city 50 of 99", Signals{CityRank: &city50, CityPopulation: 99}, nil, []string{"CITY50"}},
 	}
 	for _, c := range cases {
 		got := Evaluate(c.s)
@@ -69,6 +71,7 @@ func TestWinningTeamIsNotAwardedFromSignals(t *testing.T) {
 		FirstGiftMade: true, FoundingQualified: true, StreakDays: 100000,
 		ComebackReached30: true, RaisedAmount: true, ConvertedReferrals: 1000,
 		HasIRLReferral: true, DistinctInitiatives: 1000, NationalTopPercent: &top, CityRank: &rank,
+		NationalPopulation: MinRankPopulation, CityPopulation: MinRankPopulation,
 		VolunteerOptIn: true, EventCheckins: 1000, JoinedTeam: true,
 	}
 	got := Evaluate(all)

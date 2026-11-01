@@ -4,6 +4,7 @@
 -- streak who have not opted out; ties break on the earlier streak start, so a
 -- longer-standing identical streak ranks higher. national_percentile is the
 -- top-percentile bucket (1 = top 1%); city_rank is 1-based within donor.city.
+-- Each row also records the size of the population each rank was taken in.
 -- Replaces the prior snapshot wholesale.
 WITH eligible AS (
   SELECT d.id AS donor_id, d.city AS city,
@@ -29,16 +30,20 @@ ranked AS (
          )) AS national_percentile,
          CASE WHEN city IS NOT NULL
               THEN RANK() OVER (PARTITION BY city ORDER BY streak DESC, since ASC)::int
-         END AS city_rank
+         END AS city_rank,
+         (count(*) OVER ())::int AS national_population,
+         CASE WHEN city IS NOT NULL THEN (count(*) OVER (PARTITION BY city))::int ELSE 0 END AS city_population
   FROM eligible
 )
-INSERT INTO donor_rankings (donor_id, national_percentile, city, city_rank, computed_at)
-SELECT donor_id, national_percentile, city, city_rank, sqlc.arg(computed_at)::timestamptz
+INSERT INTO donor_rankings (donor_id, national_percentile, city, city_rank, national_population, city_population, computed_at)
+SELECT donor_id, national_percentile, city, city_rank, national_population, city_population, sqlc.arg(computed_at)::timestamptz
 FROM ranked
 ON CONFLICT (donor_id) DO UPDATE SET
   national_percentile = EXCLUDED.national_percentile,
   city = EXCLUDED.city,
   city_rank = EXCLUDED.city_rank,
+  national_population = EXCLUDED.national_population,
+  city_population = EXCLUDED.city_population,
   computed_at = EXCLUDED.computed_at;
 
 -- name: PruneStaleRankings :exec
@@ -48,7 +53,7 @@ DELETE FROM donor_rankings WHERE computed_at < $1;
 
 -- name: DonorRanking :one
 -- A donor's own ranking row (K-3: only ever their own position).
-SELECT r.national_percentile, r.city, r.city_rank, r.computed_at
+SELECT r.national_percentile, r.city, r.city_rank, r.national_population, r.city_population, r.computed_at
 FROM donor_rankings r
 JOIN donors d ON d.id=r.donor_id
 JOIN donor_metric_projections p ON p.donor_id=r.donor_id
@@ -67,16 +72,25 @@ ON CONFLICT(id) DO UPDATE SET next_run_at=EXCLUDED.next_run_at;
 
 -- name: AwardRankingBadges :exec
 -- Top 2% and Top 50 City for every donor the rollup just ranked into them,
--- queueing the badge-earned push for each new one, in one pass.
-WITH qualifying AS (
-  SELECT donor_id, 'NAT2'::varchar AS code FROM donor_rankings
-  WHERE computed_at = sqlc.arg(computed_at)::timestamptz AND national_percentile <= coalesce((SELECT threshold FROM donor_badge_rules WHERE code='NAT2'),2)
+-- queueing the badge-earned push for each new one, in one pass. A rank taken
+-- in a population smaller than the rule's minimum awards nothing. The
+-- fallbacks match defaultBadgeRules for a rule staff never saved.
+WITH rules AS (
+  SELECT coalesce((SELECT threshold FROM donor_badge_rules WHERE code='NAT2'),2) AS nat_threshold,
+         coalesce((SELECT min_population FROM donor_badge_rules WHERE code='NAT2'),100) AS nat_population,
+         coalesce((SELECT threshold FROM donor_badge_rules WHERE code='CITY50'),50) AS city_threshold,
+         coalesce((SELECT min_population FROM donor_badge_rules WHERE code='CITY50'),100) AS city_population
+), qualifying AS (
+  SELECT donor_id, 'NAT2'::varchar AS code, NULL::varchar AS city FROM donor_rankings, rules
+  WHERE computed_at = sqlc.arg(computed_at)::timestamptz
+    AND national_percentile <= rules.nat_threshold AND national_population >= rules.nat_population
   UNION ALL
-  SELECT donor_id, 'CITY50'::varchar FROM donor_rankings
-  WHERE computed_at = sqlc.arg(computed_at)::timestamptz AND city_rank <= coalesce((SELECT threshold FROM donor_badge_rules WHERE code='CITY50'),50)
+  SELECT donor_id, 'CITY50'::varchar, donor_rankings.city::varchar FROM donor_rankings, rules
+  WHERE computed_at = sqlc.arg(computed_at)::timestamptz
+    AND city_rank <= rules.city_threshold AND donor_rankings.city_population >= rules.city_population
 ), earned AS (
-  INSERT INTO donor_badges (donor_id, code, source, earned_at)
-  SELECT donor_id, code, 'AUTO', sqlc.arg(computed_at)::timestamptz FROM qualifying
+  INSERT INTO donor_badges (donor_id, code, source, earned_at, city)
+  SELECT donor_id, code, 'AUTO', sqlc.arg(computed_at)::timestamptz, city FROM qualifying
   ON CONFLICT (donor_id, code) DO NOTHING
   RETURNING donor_id, code
 )

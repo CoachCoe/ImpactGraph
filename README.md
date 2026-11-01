@@ -135,7 +135,10 @@ use the nonce-based CSP, as do partner-portal pages. Next allows
 one dev server per checkout, so stop any running `make web` first. Staff pages are tested
 on `DONOR_STAFF_ORIGIN` (default http://staff.localhost:3000) with Chromium's virtual
 authenticator; the staff journey provisions or recovers `e2e.administrator@example.org`
-with `cmd/staff`, so point `DONOR_GO_DATABASE_URL` at a synthetic database.
+with `cmd/staff`, so point `DONOR_GO_DATABASE_URL` at a synthetic database. The signed-in
+donor and partner journeys run against the real API: `cmd/browserfixture` stands in for
+the inbox, creating an account in that database and printing the sign-in link its email
+would carry.
 
 `make test` checks Go formatting, vet, race-enabled tests, compilation, frontend lint and formatting,
 unit tests, generated route types, TypeScript, and the production build. Browser tests
