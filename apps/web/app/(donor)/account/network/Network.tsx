@@ -43,7 +43,7 @@ export default function Network() {
                     // Names are not unique, and the list carries no identifiers by design.
                     // biome-ignore lint/suspicious/noArrayIndexKey: the list is replaced whole on each load
                     <li key={index}>
-                      {person.name} · {person.active ? "Giving" : "Paused"}
+                      {person.name} · {person.active ? "Giving" : "Not giving"}
                     </li>
                   ))}
                 </ul>

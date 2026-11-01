@@ -245,10 +245,8 @@ it("names Stripe statuses in words", async () => {
   for (const [status, words] of [
     ["past_due", "Payment overdue"],
     ["unpaid", "Payment overdue"],
-    ["paused", "Paused"],
     ["canceled", "Cancelled"],
     ["incomplete", "Setting up"],
-    ["trialing", "Setting up"],
   ]) {
     serve({
       "/donor/staff/donors/donor-1": reply(200, { ...detail, subscription: { ...detail.subscription, status } }),

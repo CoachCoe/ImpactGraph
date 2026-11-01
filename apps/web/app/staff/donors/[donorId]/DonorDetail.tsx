@@ -14,11 +14,9 @@ const statusWords: Record<string, string> = {
   active: "Active",
   past_due: "Payment overdue",
   unpaid: "Payment overdue",
-  paused: "Paused",
   canceled: "Cancelled",
   incomplete_expired: "Cancelled",
   incomplete: "Setting up",
-  trialing: "Setting up",
 };
 
 export default function DonorDetail({ donor }: { donor: string }) {
