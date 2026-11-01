@@ -49,6 +49,29 @@ pins its dependency; changing the backend must preserve supported installed clie
 Breaking field removals, type changes, and newly required request fields require a
 coordinated compatibility plan. Do not invent financial values for unknown server states.
 
+## Compatible additions in version 2.10
+
+Version 2.10 lets the apps carry referral and company-code attribution from a link that
+opens the app, as a browser's cookies carry it on the web. Every addition is optional or
+new; no existing field, status or enum value changes.
+
+- `captureReferral` and `captureCompany` (`POST /donor/referrals/{code}`,
+  `POST /donor/company/{code}`) admit native requests. Call them when the app opens a
+  `/r/{code}` or `/c/{code}` link, sending the optional request `token` kept from the last
+  capture of the same kind. The response adds `token` (string or `null`, native responses
+  only): keep a string, and discard any kept token on `null`. A token lasts 30 days from
+  its latest touch; the latest valid link wins.
+- `startRecurringCheckout` takes an optional `referral_token`: the kept referral token.
+  The referrer is credited exactly as on the web, so a token past its window or naming the
+  donor themself is ignored rather than refused. Repeat it on a retry under the same
+  `Idempotency-Key`; an open checkout is handed back only if it credits the same referrer.
+- `bindCompanyTouch` (`POST /donor/me/company-touch`, native only) takes the kept company
+  token after sign-in and returns `bound`. It links the donor to the employer as signing in
+  does on the web, and never replaces an existing one. Discard the token afterwards.
+- Version 2.10.1 changes no schema. `links.json` sets `referrals_open_web` to `false`:
+  from 2.10 the apps open `/r/{code}` and `/c/{code}` links themselves, as the association
+  files already let them.
+
 ## Compatible additions in version 2.9
 
 Version 2.9 puts the city on the Top 50 City badge. The badge `code` stays `CITY50`; it is
@@ -322,7 +345,8 @@ Android uses encryption keys protected by Keystore, iOS uses Keychain.
 
 Link handling accepts only the configured HTTPS public origin and approved paths.
 Proof tokens stay in memory and out of logs. Signed-out destinations wait for account
-access; referrals and unsupported product destinations retain their web behavior. Push
+access; referral and company-code links are captured natively, and unsupported product
+destinations retain their web behavior. Push
 payloads select only approved relative destinations, never arbitrary URLs. OS association
 files require the final app identifiers and signing certificates, and a reachable direct
 API ingress is required for a real-device integration test. Neither is fabricated here.

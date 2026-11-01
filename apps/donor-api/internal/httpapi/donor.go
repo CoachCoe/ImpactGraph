@@ -36,6 +36,7 @@ type DonorSource interface {
 	ReferrerName(context.Context, string) (string, error)
 	CaptureReferral(context.Context, string, string, string, time.Time) (store.ReferralCapture, error)
 	CaptureCompanyCode(context.Context, string, string, time.Time) (store.CompanyCapture, error)
+	BindCompanyTouch(context.Context, string, string) (bool, error)
 	Gifts(context.Context, string, int64) (store.GiftsPage, error)
 	Receipt(context.Context, string, pgtype.UUID) (store.Receipt, error)
 	AnnualSummary(context.Context, string, int) (store.AnnualSummary, error)
@@ -297,13 +298,15 @@ func (a *api) captureReferral(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Kind json.RawMessage `json:"kind"`
+		Kind  json.RawMessage `json:"kind"`
+		Token json.RawMessage `json:"token"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
 	kind, ok := optional(body.Kind, "LINK")
-	if !ok || (kind != "LINK" && kind != "IRL") {
+	visitor, visitorOK := visitorToken(r, referralCookie, body.Token)
+	if !ok || (kind != "LINK" && kind != "IRL") || !visitorOK {
 		invalidFields(w, r)
 		return
 	}
@@ -312,25 +315,33 @@ func (a *api) captureReferral(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := withTimeout(r, readTimeout)
 	defer cancel()
-	result, err := a.Donor.CaptureReferral(ctx, code, kind, cookieValue(r, referralCookie), time.Now().UTC())
+	result, err := a.Donor.CaptureReferral(ctx, code, kind, visitor, time.Now().UTC())
 	if err != nil {
 		respond(w, r, nil, err, donorStatus)
 		return
 	}
-	age := referralCookieAge
-	if result.Token == "" {
-		age = -1
-	}
-	a.setCookie(w, referralCookie, result.Token, age, http.SameSiteLaxMode)
-	writeJSON(w, http.StatusOK, map[string]any{"captured": result.Token != "", "public_name": result.PublicName})
+	response := map[string]any{"captured": result.Token != "", "public_name": result.PublicName}
+	a.keepVisitor(w, r, referralCookie, result.Token, response)
+	writeJSON(w, http.StatusOK, response)
 }
 
 // captureCompany records a pre-signup company-code visit on an anonymous
-// visitor cookie, mirroring referral capture. The response never reveals whether
+// visitor token, mirroring referral capture. The response never reveals whether
 // the code resolves to a partner. Account ownership is proved before linking it.
 func (a *api) captureCompany(w http.ResponseWriter, r *http.Request) {
 	code, ok := referralCode(w, r)
 	if !ok {
+		return
+	}
+	var body struct {
+		Token json.RawMessage `json:"token"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	visitor, ok := visitorToken(r, companyCookie, body.Token)
+	if !ok {
+		invalidFields(w, r)
 		return
 	}
 	if !a.donor().available(w, r) {
@@ -338,18 +349,63 @@ func (a *api) captureCompany(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := withTimeout(r, readTimeout)
 	defer cancel()
-	result, err := a.Donor.CaptureCompanyCode(ctx, code, cookieValue(r, companyCookie), time.Now().UTC())
+	result, err := a.Donor.CaptureCompanyCode(ctx, code, visitor, time.Now().UTC())
 	if err != nil {
 		respond(w, r, nil, err, donorStatus)
 		return
 	}
+	response := map[string]any{"captured": result.Token != ""}
+	a.keepVisitor(w, r, companyCookie, result.Token, response)
+	writeJSON(w, http.StatusOK, response)
+}
+
+// visitorToken is the caller's earlier capture token: the cookie of a
+// browser, or the token the app kept from its last capture response. Only the
+// app may name one in the body; a browser's stays HttpOnly.
+func visitorToken(r *http.Request, cookie string, raw json.RawMessage) (string, bool) {
+	if !native(r) {
+		return cookieValue(r, cookie), raw == nil
+	}
+	token, ok := optional(raw, "")
+	return token, ok && (token == "" || validToken(token))
+}
+
+// keepVisitor hands a capture's token back where visitorToken reads it: a
+// cookie for a browser, cleared when nothing was captured, or the response
+// body for the app, as null when nothing was captured.
+func (a *api) keepVisitor(w http.ResponseWriter, r *http.Request, cookie, token string, response map[string]any) {
+	if native(r) {
+		response["token"] = nil
+		if token != "" {
+			response["token"] = token
+		}
+		return
+	}
 	age := referralCookieAge
-	if result.Token == "" {
+	if token == "" {
 		age = -1
 	}
-	a.setCookie(w, companyCookie, result.Token, age, http.SameSiteLaxMode)
-	writeJSON(w, http.StatusOK, map[string]any{"captured": result.Token != ""})
+	a.setCookie(w, cookie, token, age, http.SameSiteLaxMode)
 }
+
+// bindCompanyTouch binds a company code the app captured before sign-in, as a
+// browser's company cookie binds when it signs in.
+func (a *api) bindCompanyTouch(w http.ResponseWriter, r *http.Request, session string) {
+	body, ok := decodeValid[companyTouchBody](w, r)
+	if !ok {
+		return
+	}
+	a.donor().serve(w, r, func(ctx context.Context) (any, error) {
+		bound, err := a.Donor.BindCompanyTouch(ctx, session, body.Token)
+		return map[string]bool{"bound": bound}, err
+	})
+}
+
+type companyTouchBody struct {
+	Token string `json:"token"`
+}
+
+func (b companyTouchBody) valid() bool { return validToken(b.Token) }
 
 func (a *api) gifts(w http.ResponseWriter, r *http.Request, session string) {
 	offset, ok := offsetParam(r, "offset")

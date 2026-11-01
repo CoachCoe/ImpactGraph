@@ -126,9 +126,10 @@ unrelated to any token, and an ID that is not theirs is not found. Sign-ins and
 sign-outs of other sessions are recorded in `donor_session_events`. Native requests are
 rate limited in the same classes, refreshes in the account class rather than the
 sign-in budget. Only donor account routes admit the app (sign-in, claim, passkey sign-in,
-refresh, email-change confirmation, sign-out, `/donor/me/*`); giving, referral capture, partner
-signup, and all staff routes stay browser-only, and staff sessions are never accepted as
-bearer tokens. The app must keep its tokens in the platform keychain/keystore and send
+refresh, email-change confirmation, sign-out, `/donor/me/*`) and referral and company-code
+link capture, which hands the app the visitor token a browser keeps as an HttpOnly cookie;
+guest giving, partner signup, and all staff routes stay browser-only, and staff sessions are
+never accepted as bearer tokens. The app must keep its tokens in the platform keychain/keystore and send
 one refresh at a time. The Next proxy does not forward `Authorization` or
 `X-DAD-Client`, so the app calls the API host directly. The bundled nginx serves only the
 web hosts; an API host needs its own ingress, listed in `DONOR_TRUSTED_PROXY_CIDRS`, that

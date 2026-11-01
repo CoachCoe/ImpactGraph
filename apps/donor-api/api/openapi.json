@@ -7,7 +7,7 @@
    "name": "MIT",
    "identifier": "MIT"
   },
-  "description": "The DAD (Dynamic Aid Delivery) donor API, serving the web app, the donor iOS/Android app, and the staff back office.\n\n## Clients and authentication\n- **Browsers** authenticate with HttpOnly cookies. Every mutation must carry the exact configured `Origin`; this is the CSRF defense. The API sends no CORS headers.\n- **The donor app** sends `X-DAD-Client: native` on every request, never sends `Origin` or cookies, and authenticates with `Authorization: Bearer <access token>`. A request with Origin or cookies is a browser request whatever else it carries. Sign in by calling POST /donor/login, opening the emailed `/account/claim#token=\u2026` link in the app, and sending the fragment's token to POST /donor/claim as a native request, which returns a 15-minute access token and a rotating refresh token. Exchange the refresh token at POST /donor/refresh when the access token expires or a request answers 401; send one refresh at a time and keep only the newest tokens. Routes that admit the app list `native` in `x-clients`, and POST /donor/refresh and the push-device routes admit nothing else; giving, referral capture, partner applications, and every staff route are web-only.\n- **Partner portal** users are separate from donors (P-5). They sign in by calling POST /donor/partner/sign-in and opening the emailed `/partner/accept#token=\u2026` link, whose token POST /donor/partner/accept-invite exchanges for a 12-hour session: an HttpOnly cookie for a browser, or a bearer token for a native request, sent like the donor app's.\n- Staff routes are browser-only and never accept bearer tokens. The back office runs on its own host (`DONOR_STAFF_ORIGIN`): staff mutations require that exact `Origin`, and donor and public mutations require the public one, so neither site can act on the other.\n\n## Rate limits\nMutations are rate limited per client address and class (`x-rate-limit`): auth 10/min, visitor 60/min, account 30/min, staff 60/min, with bursts up to the same size. Exceeding one answers 429 with `Retry-After`. Reads are not rate limited by the API.\n\n## Conventions\n- Errors are always `application/json` `{\"detail\": \"\u2026\"}` with the status below; the detail is safe to display. A 503 for a feature the deployment has not configured adds a stable `code` and should not be retried. Unknown routes and malformed record IDs answer 404, wrong methods 405 with `Allow`.\n- Request bodies are one JSON object with exactly the documented fields (unknown fields, trailing data, NUL characters, and `null` for a defaulted field are 422), at most 256 KiB unless stated (larger is 413).\n- Money is integer USD cents in fields ending `_minor`; the API shows the same numbers on every client.\n- Timestamps are RFC 3339 strings, UTC, possibly with fractional seconds (`2026-10-06T14:03:00Z`, `\u2026+00:00` in gift records). Dates are `YYYY-MM-DD`.\n- Lists page by `offset`, 50 rows per page; a response's `next_offset` (or `next_<list>_offset`) is the next page's offset, or null on the last page.\n- Commands that reach the payment processor or deliver email require an `Idempotency-Key`; retry with the same key after a timeout or 503.\n- Every response is `Cache-Control: no-store` except published content.\n"
+  "description": "The DAD (Dynamic Aid Delivery) donor API, serving the web app, the donor iOS/Android app, and the staff back office.\n\n## Clients and authentication\n- **Browsers** authenticate with HttpOnly cookies. Every mutation must carry the exact configured `Origin`; this is the CSRF defense. The API sends no CORS headers.\n- **The donor app** sends `X-DAD-Client: native` on every request, never sends `Origin` or cookies, and authenticates with `Authorization: Bearer <access token>`. A request with Origin or cookies is a browser request whatever else it carries. Sign in by calling POST /donor/login, opening the emailed `/account/claim#token=\u2026` link in the app, and sending the fragment's token to POST /donor/claim as a native request, which returns a 15-minute access token and a rotating refresh token. Exchange the refresh token at POST /donor/refresh when the access token expires or a request answers 401; send one refresh at a time and keep only the newest tokens. Routes that admit the app list `native` in `x-clients`, and POST /donor/refresh, the push-device routes, POST /donor/me/company-touch, and POST /donor/me/recurring/checkout admit nothing else. The app may record referral and company-code link visits, keeping the returned token in place of the browser's cookie. Guest giving, partner applications, and every staff route are web-only.\n- **Partner portal** users are separate from donors (P-5). They sign in by calling POST /donor/partner/sign-in and opening the emailed `/partner/accept#token=\u2026` link, whose token POST /donor/partner/accept-invite exchanges for a 12-hour session: an HttpOnly cookie for a browser, or a bearer token for a native request, sent like the donor app's.\n- Staff routes are browser-only and never accept bearer tokens. The back office runs on its own host (`DONOR_STAFF_ORIGIN`): staff mutations require that exact `Origin`, and donor and public mutations require the public one, so neither site can act on the other.\n\n## Rate limits\nMutations are rate limited per client address and class (`x-rate-limit`): auth 10/min, visitor 60/min, account 30/min, staff 60/min, with bursts up to the same size. Exceeding one answers 429 with `Retry-After`. Reads are not rate limited by the API.\n\n## Conventions\n- Errors are always `application/json` `{\"detail\": \"\u2026\"}` with the status below; the detail is safe to display. A 503 for a feature the deployment has not configured adds a stable `code` and should not be retried. Unknown routes and malformed record IDs answer 404, wrong methods 405 with `Allow`.\n- Request bodies are one JSON object with exactly the documented fields (unknown fields, trailing data, NUL characters, and `null` for a defaulted field are 422), at most 256 KiB unless stated (larger is 413).\n- Money is integer USD cents in fields ending `_minor`; the API shows the same numbers on every client.\n- Timestamps are RFC 3339 strings, UTC, possibly with fractional seconds (`2026-10-06T14:03:00Z`, `\u2026+00:00` in gift records). Dates are `YYYY-MM-DD`.\n- Lists page by `offset`, 50 rows per page; a response's `next_offset` (or `next_<list>_offset`) is the next page's offset, or null on the last page.\n- Commands that reach the payment processor or deliver email require an `Idempotency-Key`; retry with the same key after a timeout or 503.\n- Every response is `Cache-Control: no-store` except published content.\n"
  },
  "servers": [
   {
@@ -388,14 +388,15 @@
    "post": {
     "operationId": "captureReferral",
     "summary": "Record a referral visit",
-    "description": "Web only. Sets or clears the HttpOnly `dad_referral` cookie (30 days); the first valid touch wins.",
+    "description": "Records a visit through a referral link; the latest valid touch wins for 30 days. A browser keeps the visitor token in the HttpOnly `dad_referral` cookie, which this sets or clears. The app, opening the same link, sends the `token` from its previous capture, if any, and keeps the one returned to send as `referral_token` when it starts a monthly gift.",
     "tags": [
      "Public"
     ],
     "security": [],
     "x-rate-limit": "visitor",
     "x-clients": [
-     "browser"
+     "browser",
+     "native"
     ],
     "parameters": [
      {
@@ -423,6 +424,12 @@
            "LINK",
            "IRL"
           ]
+         },
+         "token": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 128,
+          "description": "Native requests only: the token this app kept from its last referral capture. A browser sending it is 422."
          }
         },
         "required": [],
@@ -448,6 +455,13 @@
             "string",
             "null"
            ]
+          },
+          "token": {
+           "type": [
+            "string",
+            "null"
+           ],
+           "description": "Native responses only: the visitor token to keep, or null when nothing was captured, in which case discard any kept token."
           }
          },
          "required": [
@@ -487,14 +501,15 @@
    "post": {
     "operationId": "captureCompany",
     "summary": "Record a company-code visit",
-    "description": "Web only. Records a pre-signup visit through an employer's company code on the HttpOnly `dad_company` cookie (30 days, last touch wins). It binds when the donor proves account ownership in that browser; a guest checkout cannot change an employer based on email alone. The code is normalised to upper case. The response never reveals whether the code resolves to a partner. This browser cookie alone does not survive an app install; native clients can enter the code after sign-in.",
+    "description": "Records a pre-signup visit through an employer's company code (30 days, last touch wins). A browser keeps the visitor token in the HttpOnly `dad_company` cookie, which binds when the donor proves account ownership in that browser. The app, opening the same link, sends the `token` from its previous capture, if any, and after sign-in sends the one returned to POST /donor/me/company-touch. A guest checkout cannot change an employer based on email alone. The code is normalised to upper case. The response never reveals whether the code resolves to a partner.",
     "tags": [
      "Public"
     ],
     "security": [],
     "x-rate-limit": "visitor",
     "x-clients": [
-     "browser"
+     "browser",
+     "native"
     ],
     "parameters": [
      {
@@ -514,7 +529,14 @@
       "application/json": {
        "schema": {
         "type": "object",
-        "properties": {},
+        "properties": {
+         "token": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 128,
+          "description": "Native requests only: the token this app kept from its last company-code capture. A browser sending it is 422."
+         }
+        },
         "additionalProperties": false
        }
       }
@@ -531,6 +553,13 @@
           "captured": {
            "type": "boolean",
            "description": "False when the visit did not start or keep a company-code window."
+          },
+          "token": {
+           "type": [
+            "string",
+            "null"
+           ],
+           "description": "Native responses only: the visitor token to keep, or null when nothing was captured, in which case discard any kept token."
           }
          },
          "required": [
@@ -1920,6 +1949,92 @@
     }
    }
   },
+  "/donor/me/company-touch": {
+   "post": {
+    "operationId": "bindCompanyTouch",
+    "summary": "Bind a company code the app captured before sign-in",
+    "description": "Native requests only. Binds the company code captured on `token` by POST /donor/company/{code} to the signed-in donor and links them to the employer it names, as signing in binds a browser's `dad_company` cookie. It never replaces an employer or code the donor already has. `bound` is false when the token names no unexpired touch; either way the app may discard the token.",
+    "tags": [
+     "Account"
+    ],
+    "security": [
+     {
+      "cookieAuth": []
+     },
+     {
+      "bearerAuth": []
+     }
+    ],
+    "x-rate-limit": "account",
+    "x-clients": [
+     "native"
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "token": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 128,
+          "description": "The token from the app's latest company-code capture."
+         }
+        },
+        "required": [
+         "token"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "bound": {
+           "type": "boolean"
+          }
+         },
+         "required": [
+          "bound"
+         ],
+         "additionalProperties": false
+        }
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/Unauthorized"
+     },
+     "403": {
+      "$ref": "#/components/responses/Forbidden"
+     },
+     "413": {
+      "$ref": "#/components/responses/PayloadTooLarge"
+     },
+     "415": {
+      "$ref": "#/components/responses/UnsupportedMediaType"
+     },
+     "422": {
+      "$ref": "#/components/responses/Unprocessable"
+     },
+     "429": {
+      "$ref": "#/components/responses/TooManyRequests"
+     },
+     "503": {
+      "$ref": "#/components/responses/Unavailable"
+     }
+    }
+   }
+  },
   "/donor/me/conversions": {
    "get": {
     "operationId": "conversions",
@@ -2680,6 +2795,12 @@
           "minimum": 3000,
           "maximum": 90000,
           "multipleOf": 3000
+         },
+         "referral_token": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 128,
+          "description": "The token from the app's latest referral capture (POST /donor/referrals/{code}). The referrer is credited if the touch is unexpired and is not the donor's own; otherwise it is ignored. A retry under the same `Idempotency-Key` must repeat it."
          }
         },
         "required": [

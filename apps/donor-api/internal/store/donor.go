@@ -681,6 +681,16 @@ func (s DonorService) CaptureCompanyCode(ctx context.Context, code, visitor stri
 	})
 }
 
+// BindCompanyTouch binds the company code the app captured on visitor before
+// the donor behind token signed in, as signing in binds a browser's touch. It
+// reports whether an unexpired touch was found.
+func (s DonorService) BindCompanyTouch(ctx context.Context, token, visitor string) (bool, error) {
+	return donorWrite(ctx, s.DB, donorOwner(token), func(tx pgx.Tx, d queries.Donor, now time.Time) (bool, error) {
+		code, err := bindCompanyCode(ctx, queries.New(tx), d.ID, visitor, now)
+		return code != "", err
+	})
+}
+
 // bindCompanyCode binds the company code captured for visitor to donor when
 // the donor proves account ownership (D-3, D-4), and links them to the
 // partner it resolves to, so their giving rolls up to the employer (EM-2). It

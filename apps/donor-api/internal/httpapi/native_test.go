@@ -349,8 +349,8 @@ func TestAppLogoutRevokesBearerWithoutCookies(t *testing.T) {
 	}
 }
 
-// The app may call donor account and partner portal routes only; giving,
-// referral capture, partner applications, and the back office stay on the web.
+// The app may call donor account, partner portal, and link capture routes
+// only; guest giving, partner applications, and the back office stay on the web.
 func TestOnlyDonorAccountRoutesAdmitTheApp(t *testing.T) {
 	entries := map[string]bool{
 		"POST /donor/signup":                   true,
@@ -367,6 +367,8 @@ func TestOnlyDonorAccountRoutesAdmitTheApp(t *testing.T) {
 		"POST /donor/logout":                   true,
 		"POST /donor/logout-all":               true,
 		"POST /analytics/events":               true,
+		"POST /donor/referrals/{code}":         true,
+		"POST /donor/company/{code}":           true,
 		"POST /donor/partner/sign-in":          true,
 		"POST /donor/partner/accept-invite":    true,
 	}

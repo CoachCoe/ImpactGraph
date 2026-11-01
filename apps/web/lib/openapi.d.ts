@@ -111,7 +111,7 @@ export interface paths {
         put?: never;
         /**
          * Record a referral visit
-         * @description Web only. Sets or clears the HttpOnly `dad_referral` cookie (30 days); the first valid touch wins.
+         * @description Records a visit through a referral link; the latest valid touch wins for 30 days. A browser keeps the visitor token in the HttpOnly `dad_referral` cookie, which this sets or clears. The app, opening the same link, sends the `token` from its previous capture, if any, and keeps the one returned to send as `referral_token` when it starts a monthly gift.
          */
         post: operations["captureReferral"];
         delete?: never;
@@ -131,7 +131,7 @@ export interface paths {
         put?: never;
         /**
          * Record a company-code visit
-         * @description Web only. Records a pre-signup visit through an employer's company code on the HttpOnly `dad_company` cookie (30 days, last touch wins). It binds when the donor proves account ownership in that browser; a guest checkout cannot change an employer based on email alone. The code is normalised to upper case. The response never reveals whether the code resolves to a partner. This browser cookie alone does not survive an app install; native clients can enter the code after sign-in.
+         * @description Records a pre-signup visit through an employer's company code (30 days, last touch wins). A browser keeps the visitor token in the HttpOnly `dad_company` cookie, which binds when the donor proves account ownership in that browser. The app, opening the same link, sends the `token` from its previous capture, if any, and after sign-in sends the one returned to POST /donor/me/company-touch. A guest checkout cannot change an employer based on email alone. The code is normalised to upper case. The response never reveals whether the code resolves to a partner.
          */
         post: operations["captureCompany"];
         delete?: never;
@@ -469,6 +469,26 @@ export interface paths {
          * @description Native requests only. Removes the calling session's push token, if any; the session stays signed in.
          */
         post: operations["unregisterPushDevice"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/donor/me/company-touch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bind a company code the app captured before sign-in
+         * @description Native requests only. Binds the company code captured on `token` by POST /donor/company/{code} to the signed-in donor and links them to the employer it names, as signing in binds a browser's `dad_company` cookie. It never replaces an employer or code the donor already has. `bound` is false when the token names no unexpired touch; either way the app may discard the token.
+         */
+        post: operations["bindCompanyTouch"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4797,6 +4817,8 @@ export interface operations {
                      * @enum {string}
                      */
                     kind?: "LINK" | "IRL";
+                    /** @description Native requests only: the token this app kept from its last referral capture. A browser sending it is 422. */
+                    token?: string;
                 };
             };
         };
@@ -4811,6 +4833,8 @@ export interface operations {
                         /** @description False when the visit did not start or keep a referral window. */
                         captured: boolean;
                         public_name: string | null;
+                        /** @description Native responses only: the visitor token to keep, or null when nothing was captured, in which case discard any kept token. */
+                        token?: string | null;
                     };
                 };
             };
@@ -4835,7 +4859,10 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": Record<string, unknown>;
+                "application/json": {
+                    /** @description Native requests only: the token this app kept from its last company-code capture. A browser sending it is 422. */
+                    token?: string;
+                };
             };
         };
         responses: {
@@ -4848,6 +4875,8 @@ export interface operations {
                     "application/json": {
                         /** @description False when the visit did not start or keep a company-code window. */
                         captured: boolean;
+                        /** @description Native responses only: the visitor token to keep, or null when nothing was captured, in which case discard any kept token. */
+                        token?: string | null;
                     };
                 };
             };
@@ -5475,6 +5504,42 @@ export interface operations {
             503: components["responses"]["Unavailable"];
         };
     };
+    bindCompanyTouch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description The token from the app's latest company-code capture. */
+                    token: string;
+                };
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        bound: boolean;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            413: components["responses"]["PayloadTooLarge"];
+            415: components["responses"]["UnsupportedMediaType"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["TooManyRequests"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
     conversions: {
         parameters: {
             query?: {
@@ -5861,6 +5926,8 @@ export interface operations {
                      * @description The monthly charge in integer USD cents: a whole number of dollars a day from $1 to $30, times 30 (3000 to 90000 in steps of 3000).
                      */
                     amount_minor: number;
+                    /** @description The token from the app's latest referral capture (POST /donor/referrals/{code}). The referrer is credited if the touch is unexpired and is not the donor's own; otherwise it is ignored. A retry under the same `Idempotency-Key` must repeat it. */
+                    referral_token?: string;
                 };
             };
         };

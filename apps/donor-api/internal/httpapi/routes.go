@@ -24,7 +24,8 @@ type route struct {
 // routes is the complete API surface. Reads are unguarded because they cannot
 // change state. Mutations pass the Origin and rate-limit guard: donor and
 // public routes admit the public origin, and the native donor app on donor
-// account routes only, of which app entry routes admit nothing else; staff
+// account routes and link capture only, of which app entry routes admit
+// nothing else; staff
 // routes admit only the staff origin, and refuse any request a browser reports
 // as started elsewhere. The Stripe webhook is authenticated by its signature
 // instead.
@@ -36,8 +37,8 @@ func (a *api) routes() []route {
 		{"POST /donor/stripe/webhook", stripeAuth, a.stripeWebhook},
 		a.visitor("POST /donor/checkouts", a.beginCheckout),
 		a.public("GET /donor/referrals/{code}", a.referrer),
-		a.visitor("POST /donor/referrals/{code}", a.captureReferral),
-		a.visitor("POST /donor/company/{code}", a.captureCompany),
+		a.capture("POST /donor/referrals/{code}", a.captureReferral),
+		a.capture("POST /donor/company/{code}", a.captureCompany),
 		{"POST /analytics/events", noAuth, a.guarded(a.Origin, analyticsLimit, true, a.ingestAnalytics)},
 		a.visitor("POST /donor/public/partner-apply", a.partnerApply),
 		a.visitor("POST /donor/partner/applications", a.applyWithReceipt),
@@ -74,6 +75,7 @@ func (a *api) routes() []route {
 		a.donorWrite("POST /donor/me/preferences", a.savePreferences),
 		a.appWrite("POST /donor/me/push-device", a.registerPushDevice),
 		a.appWrite("POST /donor/me/push-device/unregister", a.unregisterPushDevice),
+		a.appWrite("POST /donor/me/company-touch", a.bindCompanyTouch),
 		a.donorRead("GET /donor/me/conversions", a.conversions),
 		a.donorRead("GET /donor/me/today-initiative", a.todayInitiative),
 		a.donorRead("GET /donor/me/badges", a.donorBadges),
@@ -223,6 +225,12 @@ func (a *api) public(pattern string, handler http.HandlerFunc) route {
 // visitor routes are anonymous browser mutations on the public site.
 func (a *api) visitor(pattern string, handler http.HandlerFunc) route {
 	return route{pattern, noAuth, a.guarded(a.Origin, visitorLimit, false, handler)}
+}
+
+// capture routes record an anonymous referral or company-code visit, in a
+// browser cookie or, for the app opening the same link, a token it keeps.
+func (a *api) capture(pattern string, handler http.HandlerFunc) route {
+	return route{pattern, noAuth, a.guarded(a.Origin, visitorLimit, true, handler)}
 }
 
 // donorEntry routes exchange an emailed proof, from a browser or the app.
