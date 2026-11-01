@@ -1254,7 +1254,7 @@ export interface paths {
         put?: never;
         /**
          * Begin a passkey sign-in
-         * @description Issues a usernameless WebAuthn challenge that any of the donor's passkeys for the public origin may answer, in a browser or, through its associated domain, the app. Pass `options` to `PublicKeyCredential.parseRequestOptionsFromJSON` and `navigator.credentials.get`, then answer within five minutes. No body.
+         * @description Issues a usernameless WebAuthn challenge that any of the donor's passkeys for the public origin may answer, in a browser or, through its associated domain, the app. Pass `options` to `PublicKeyCredential.parseRequestOptionsFromJSON` and `navigator.credentials.get`, then answer within five minutes. No body. 503 `PASSKEYS_UNCONFIGURED` when the deployment offers no donor passkeys, as on an origin that is an IP address.
          */
         post: operations["beginDonorPasskeySignIn"];
         delete?: never;
@@ -1334,7 +1334,7 @@ export interface paths {
         put?: never;
         /**
          * Finish a passkey sign-in
-         * @description Verifies the assertion (challenge, origin, relying party, user verification, and signature) and signs the donor in, as a claim does. Each ceremony is answered once. 401 covers an unknown passkey, a disabled account, a signature counter that went backwards, and an unknown, expired, or used ceremony alike.
+         * @description Verifies the assertion (challenge, origin, relying party, user verification, and signature) and signs the donor in, as a claim does. Each ceremony is answered once. 401 covers an unknown passkey, a disabled account, a signature counter that went backwards, and an unknown, expired, or used ceremony alike. 503 `PASSKEYS_UNCONFIGURED` when the deployment offers no donor passkeys, as on an origin that is an IP address.
          */
         post: operations["finishDonorPasskeySignIn"];
         delete?: never;
@@ -1350,7 +1350,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The donor's passkeys */
+        /**
+         * The donor's passkeys
+         * @description 503 `PASSKEYS_UNCONFIGURED` when the deployment offers no donor passkeys, as on an origin that is an IP address.
+         */
         get: operations["donorPasskeys"];
         put?: never;
         post?: never;
@@ -1371,7 +1374,7 @@ export interface paths {
         put?: never;
         /**
          * Begin adding a passkey
-         * @description Issues WebAuthn creation options requiring a discoverable, user-verifying passkey, excluding those the donor already holds. Pass `options` to `PublicKeyCredential.parseCreationOptionsFromJSON` and `navigator.credentials.create`, then answer within five minutes. No body.
+         * @description Issues WebAuthn creation options requiring a discoverable, user-verifying passkey, excluding those the donor already holds. Pass `options` to `PublicKeyCredential.parseCreationOptionsFromJSON` and `navigator.credentials.create`, then answer within five minutes. No body. 503 `PASSKEYS_UNCONFIGURED` when the deployment offers no donor passkeys, as on an origin that is an IP address.
          */
         post: operations["beginDonorPasskeyRegister"];
         delete?: never;
@@ -1391,7 +1394,7 @@ export interface paths {
         put?: never;
         /**
          * Finish adding a passkey
-         * @description Verifies the attestation, stores the passkey, and emails the donor an essential notice naming it. 401 covers a rejected attestation, a passkey already registered to any account, a ceremony begun by another donor, and an unknown, expired, or used ceremony alike, as well as a missing session.
+         * @description Verifies the attestation, stores the passkey, and emails the donor an essential notice naming it. 401 covers a rejected attestation, a passkey already registered to any account, a ceremony begun by another donor, and an unknown, expired, or used ceremony alike, as well as a missing session. 503 `PASSKEYS_UNCONFIGURED` when the deployment offers no donor passkeys, as on an origin that is an IP address.
          */
         post: operations["finishDonorPasskeyRegister"];
         delete?: never;
@@ -1411,7 +1414,7 @@ export interface paths {
         put?: never;
         /**
          * Remove a passkey
-         * @description The passkey stops signing in at once. Sessions it already started are not ended; see POST /donor/me/sessions/revoke-others. 404 when the ID is not one of the donor's passkeys.
+         * @description The passkey stops signing in at once. Sessions it already started are not ended; see POST /donor/me/sessions/revoke-others. 404 when the ID is not one of the donor's passkeys. 503 `PASSKEYS_UNCONFIGURED` when the deployment offers no donor passkeys, as on an origin that is an IP address.
          */
         post: operations["deleteDonorPasskey"];
         delete?: never;
@@ -2935,7 +2938,7 @@ export interface components {
              * @description Present on a 503 for a feature this deployment has deliberately not configured (not transient: do not retry; show the feature as unavailable), and on the 422 of POST /donor/me/password when `current_password` is missing or wrong.
              * @enum {string}
              */
-            code?: "PAYMENTS_UNCONFIGURED" | "EMAIL_UNCONFIGURED" | "SOURCE_STORAGE_UNCONFIGURED" | "CURRENT_PASSWORD_INCORRECT";
+            code?: "PAYMENTS_UNCONFIGURED" | "EMAIL_UNCONFIGURED" | "SOURCE_STORAGE_UNCONFIGURED" | "PUSH_UNCONFIGURED" | "FOUNDING_CLAIMS_UNCONFIGURED" | "PASSKEYS_UNCONFIGURED" | "CURRENT_PASSWORD_INCORRECT";
             /** @description Present only on a 422 from POST /donor/staff/founding-claims: every problem found, up to 100. */
             errors?: components["schemas"]["PublicationProblem"][];
         };

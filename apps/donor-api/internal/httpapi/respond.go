@@ -49,6 +49,7 @@ var (
 	sourceStorageOff  = featureOff{"SOURCE_STORAGE_UNCONFIGURED", "Source document storage is not set up in this environment"}
 	pushOff           = featureOff{"PUSH_UNCONFIGURED", "App notifications are not set up for this platform in this environment"}
 	foundingClaimsOff = featureOff{"FOUNDING_CLAIMS_UNCONFIGURED", "Waitlist imports are not set up in this environment"}
+	passkeysOff       = featureOff{"PASSKEYS_UNCONFIGURED", "Passkey sign-in is not set up in this environment"}
 )
 
 func (f featureOff) write(w http.ResponseWriter) {

@@ -26,6 +26,17 @@ func (a *api) donorPasskeys() service {
 	return service{a.DonorPasskeys != nil, donorPasskeyUnavailable, readTimeout, donorPasskeyStatus}
 }
 
+// serveDonorPasskeys answers with s, or with a stable code when this
+// deployment offers no donor passkeys: a relying party needs a host name, so
+// an origin that is an IP address leaves them off for good.
+func (a *api) serveDonorPasskeys(w http.ResponseWriter, r *http.Request, s service, call func(context.Context) (any, error)) {
+	if a.DonorPasskeys == nil {
+		passkeysOff.write(w)
+		return
+	}
+	s.serve(w, r, call)
+}
+
 func donorPasskeyStatus(err error) (int, string) {
 	switch {
 	case errors.Is(err, store.ErrPasskeyDenied):
@@ -38,7 +49,7 @@ func donorPasskeyStatus(err error) (int, string) {
 }
 
 func (a *api) beginDonorPasskeySignIn(w http.ResponseWriter, r *http.Request) {
-	a.donorPasskeys().serve(w, r, func(ctx context.Context) (any, error) {
+	a.serveDonorPasskeys(w, r, a.donorPasskeys(), func(ctx context.Context) (any, error) {
 		return a.DonorPasskeys.BeginSignIn(ctx)
 	})
 }
@@ -73,7 +84,7 @@ func (a *api) finishDonorPasskeySignIn(w http.ResponseWriter, r *http.Request) {
 	if native(r) {
 		client, _ = body.client()
 	}
-	a.donorPasskeys().serve(w, r, func(ctx context.Context) (any, error) {
+	a.serveDonorPasskeys(w, r, a.donorPasskeys(), func(ctx context.Context) (any, error) {
 		tokens, err := a.DonorPasskeys.FinishSignIn(ctx, body.Ceremony, body.Credential, client)
 		if err != nil {
 			return nil, err
@@ -87,7 +98,7 @@ func (a *api) finishDonorPasskeySignIn(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) beginDonorPasskeyRegister(w http.ResponseWriter, r *http.Request, session string) {
-	a.donorPasskeys().serve(w, r, func(ctx context.Context) (any, error) {
+	a.serveDonorPasskeys(w, r, a.donorPasskeys(), func(ctx context.Context) (any, error) {
 		return a.DonorPasskeys.BeginRegister(ctx, session)
 	})
 }
@@ -118,13 +129,13 @@ func (a *api) finishDonorPasskeyRegister(w http.ResponseWriter, r *http.Request,
 	if body.Name != nil {
 		name = *body.Name
 	}
-	a.donorPasskeys().serve(w, r, func(ctx context.Context) (any, error) {
+	a.serveDonorPasskeys(w, r, a.donorPasskeys(), func(ctx context.Context) (any, error) {
 		return a.DonorPasskeys.FinishRegister(ctx, session, body.Ceremony, body.Credential, name)
 	})
 }
 
 func (a *api) listDonorPasskeys(w http.ResponseWriter, r *http.Request, session string) {
-	a.donorPasskeys().serve(w, r, func(ctx context.Context) (any, error) {
+	a.serveDonorPasskeys(w, r, a.donorPasskeys(), func(ctx context.Context) (any, error) {
 		return a.DonorPasskeys.ListPasskeys(ctx, session)
 	})
 }
@@ -134,7 +145,7 @@ func (a *api) deleteDonorPasskey(w http.ResponseWriter, r *http.Request, session
 	if !ok {
 		return
 	}
-	a.donorPasskeys().missing("Passkey not found").serve(w, r, func(ctx context.Context) (any, error) {
+	a.serveDonorPasskeys(w, r, a.donorPasskeys().missing("Passkey not found"), func(ctx context.Context) (any, error) {
 		return a.DonorPasskeys.DeletePasskey(ctx, session, id)
 	})
 }

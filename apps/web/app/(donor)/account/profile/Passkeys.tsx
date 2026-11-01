@@ -135,6 +135,8 @@ export function Passkeys({ onSignedOut }: { onSignedOut: () => void }) {
     reload();
   };
 
+  // A deployment without passkeys offers none to add or manage.
+  if (resource.state === "unconfigured") return null;
   return (
     <section aria-labelledby="passkeys-heading">
       <h2 id="passkeys-heading" ref={heading} tabIndex={-1}>

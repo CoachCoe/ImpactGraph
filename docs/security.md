@@ -41,7 +41,7 @@ stored as public keys and need no encryption key.
 
 Donor passkeys follow the same ceremony rules on the public host, which is their relying
 party; a public origin addressed by IP cannot be one, so such a deployment runs without
-them. Sign-in is usernameless and requires a discoverable, user-verifying passkey; any
+them, and its passkey routes answer 503 `PASSKEYS_UNCONFIGURED`. Sign-in is usernameless and requires a discoverable, user-verifying passkey; any
 answer spends its challenge, refused ones included, and a disabled donor or unknown passkey
 cannot sign in. A passkey sign-in is a session like a claim, recorded in
 `donor_session_events`. Only a signed-in donor can add a passkey: the creation options
