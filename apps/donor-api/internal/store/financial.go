@@ -399,6 +399,13 @@ func projectFacts(ctx context.Context, q *queries.Queries, id pgtype.UUID, now t
 	if err = applyReferralDelta(ctx, q, old, out, now); err != nil {
 		return projection{SaveProjectionParams: out}, err
 	}
+	// A donor converts at most one referral (R-3), so a later attribution
+	// correction moves the credit without counting a second conversion.
+	if out.ReferrerID.Valid {
+		if err = recordServerEvent(ctx, q, id, "referral_converted", "referral:"+id.String(), now); err != nil {
+			return projection{SaveProjectionParams: out}, err
+		}
+	}
 	if old.FirstGiftID.Valid &&
 		(old.FirstGiftID != out.FirstGiftID || old.ReferrerID != out.ReferrerID || old.ReferralKind != out.ReferralKind) {
 		if err = q.InsertReferralCorrection(ctx, queries.InsertReferralCorrectionParams{

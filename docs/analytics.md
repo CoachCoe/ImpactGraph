@@ -124,8 +124,10 @@ start, sharing after a completed share handoff/copy, IRL-code display, settings,
 reservations, and team actions. Native clients must send the same schema and honor
 their own consent choice. Event UUIDs make client retries idempotent. Financial
 completion, failure, recovery and lapse events derive from committed server facts;
-client claims are never used as financial evidence. Badge-earned events are written
-in the same transaction as awards. The server source is distinct from client sources.
+client claims are never used as financial evidence. `referral_converted` is recorded
+once per referred donor, against that donor, when their first gift carries a referrer; a
+later attribution correction moves the credit without counting a second conversion.
+Badge-earned events are written in the same transaction as awards. The server source is distinct from client sources.
 
 Events contain only allowlisted names/properties, platform, timestamps, optional
 internal donor and journey IDs, and deduplication keys. Never send names, emails,
