@@ -23,6 +23,8 @@ const event = {
   cancelled: false,
   booking_opens_at: null,
   early_booking: false,
+  time_zone: "America/Los_Angeles",
+  checked_in_at: null,
 };
 
 it("lets a signed-in donor join the waitlist of a full event", async () => {

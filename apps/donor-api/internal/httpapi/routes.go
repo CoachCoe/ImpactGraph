@@ -102,6 +102,7 @@ func (a *api) routes() []route {
 		a.donorRead("GET /donor/me/recurring", recurringRead(a, RecurringSource.Details)),
 		a.donorRead("GET /donor/me/recurring/amount", recurringRead(a, RecurringSource.AmountOptions)),
 		a.donorRead("GET /donor/me/payment-method", recurringRead(a, RecurringSource.PaymentMethodStatus)),
+		a.appWrite("POST /donor/me/recurring/checkout", a.startRecurringCheckout),
 		a.donorWrite("POST /donor/me/recurring/cancel", recurringCommand(a, cancelRecurring)),
 		a.donorWrite("POST /donor/me/recurring/amount", recurringCommand(a, changeAmount)),
 		a.donorWrite("POST /donor/me/payment-method/setup", a.beginPaymentUpdate),

@@ -23,6 +23,8 @@ const base = {
   cancelled: false,
   booking_opens_at: null,
   early_booking: false,
+  time_zone: "America/Los_Angeles",
+  checked_in_at: null,
 };
 
 it("summarizes the donor's place or the room left", () => {

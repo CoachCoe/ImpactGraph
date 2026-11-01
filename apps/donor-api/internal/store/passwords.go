@@ -6,6 +6,7 @@ import (
 	"dad/donor-api/internal/identity"
 	"dad/donor-api/internal/store/queries"
 	"errors"
+	"fmt"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
@@ -15,6 +16,10 @@ import (
 )
 
 var ErrPassword = errors.New("use a password of 12 to 72 bytes")
+
+// ErrCurrentPassword means the signed-in donor's proof for a password change was missing or wrong. It
+// wraps ErrDenied so existing callers still match, while the API can tell it from a bad session.
+var ErrCurrentPassword = fmt.Errorf("current password incorrect: %w", ErrDenied)
 
 type PasswordService struct {
 	DB             *pgxpool.Pool
@@ -89,7 +94,7 @@ func (s PasswordService) Set(ctx context.Context, token, current, password strin
 			return e
 		}
 		if !verified && (err != nil || bcrypt.CompareHashAndPassword([]byte(old), []byte(current)) != nil) {
-			return ErrDenied
+			return ErrCurrentPassword
 		}
 		if !u.ClaimedAt.Valid {
 			return ErrDenied

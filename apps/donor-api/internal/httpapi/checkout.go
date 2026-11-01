@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
+	"time"
 	"unicode/utf8"
+
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"dad/donor-api/internal/payments"
 	"dad/donor-api/internal/store"
@@ -13,7 +17,12 @@ import (
 
 type CheckoutSource interface {
 	BeginCheckout(context.Context, payments.CheckoutRequest) (payments.CheckoutResult, error)
+	BeginNativeCheckout(context.Context, string, pgtype.UUID, int64) (payments.NativeCheckoutResult, error)
 }
+
+// restartRetryAfter is the wait a throttled restart is told; the budget
+// refills within the hour and an unpaid checkout lapses in one.
+const restartRetryAfter = 10 * time.Minute
 
 type checkoutBody struct {
 	Name      string          `json:"name,omitempty"`
@@ -60,11 +69,62 @@ func (a *api) beginCheckout(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, payments.ErrUnconfigured):
 		paymentsOff.write(w)
 	case errors.Is(err, payments.ErrCheckoutConflict):
-		writeError(w, r, http.StatusConflict, "Checkout conflicts with an existing request", nil)
+		writeError(
+			w,
+			r,
+			http.StatusConflict,
+			"A monthly gift for this email is already active or was started moments ago. Wait a few seconds and try again.",
+			nil,
+		)
+	case errors.Is(err, payments.ErrCheckoutThrottled):
+		w.Header().Set("Retry-After", strconv.Itoa(int(restartRetryAfter.Seconds())))
+		writeError(w, r, http.StatusTooManyRequests, "Too many checkouts were started for this email. Try again later.", nil)
 	case errors.Is(err, store.ErrDenied):
 		writeError(w, r, http.StatusForbidden, "Giving is unavailable for this account", nil)
 	case errors.Is(err, store.EmailRoleError{}):
 		writeError(w, r, http.StatusConflict, "This email signs in to a DAD partner or staff account. Give with a different email.", nil)
+	case errors.Is(err, payments.ErrCheckoutInput):
+		invalidFields(w, r)
+	case err != nil:
+		writeError(w, r, http.StatusServiceUnavailable, unavailable, err)
+	default:
+		writeJSON(w, http.StatusCreated, result)
+	}
+}
+
+type nativeCheckoutBody struct {
+	Amount int64 `json:"amount_minor"`
+}
+
+func (b nativeCheckoutBody) valid() bool { return store.ValidGiftAmount(b.Amount) }
+
+// startRecurringCheckout opens hosted checkout for the signed-in donor's first
+// monthly gift, which the website's guest checkout cannot do for an app: it
+// is keyed by an email the account already holds and returns to a web page.
+func (a *api) startRecurringCheckout(w http.ResponseWriter, r *http.Request, session string) {
+	const unavailable = "Checkout is temporarily unavailable; retry the same request"
+	key, ok := idempotencyKey(w, r)
+	if !ok {
+		return
+	}
+	body, ok := decodeValid[nativeCheckoutBody](w, r)
+	if !ok {
+		return
+	}
+	if a.Checkout == nil {
+		writeError(w, r, http.StatusServiceUnavailable, unavailable, nil)
+		return
+	}
+	ctx, cancel := withTimeout(r, providerTimeout)
+	defer cancel()
+	result, err := a.Checkout.BeginNativeCheckout(ctx, session, key, body.Amount)
+	switch {
+	case errors.Is(err, payments.ErrUnconfigured):
+		paymentsOff.write(w)
+	case errors.Is(err, payments.ErrCheckoutConflict):
+		writeError(w, r, http.StatusConflict, "A monthly gift is already active or in progress", nil)
+	case errors.Is(err, store.ErrDenied):
+		writeError(w, r, http.StatusUnauthorized, "Sign in required", nil)
 	case errors.Is(err, payments.ErrCheckoutInput):
 		invalidFields(w, r)
 	case err != nil:

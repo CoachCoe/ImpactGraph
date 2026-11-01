@@ -2,6 +2,7 @@ package payments
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -176,5 +177,50 @@ func TestSubscriptionMutationsNeverProrate(t *testing.T) {
 	}
 	if !reflect.DeepEqual(forms, want) {
 		t.Fatalf("got %v\nwant %v", forms, want)
+	}
+}
+
+func TestExpireCheckoutReportsWhoWonTheRace(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/checkout/sessions/cs_test_open/expire":
+			_, _ = w.Write([]byte(`{"id":"cs_test_open","object":"checkout.session","status":"expired","livemode":false}`))
+		case "/v1/checkout/sessions/cs_test_paid/expire":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","message":"not open"}}`))
+		case "/v1/checkout/sessions/cs_test_paid":
+			_, _ = w.Write([]byte(`{"id":"cs_test_paid","object":"checkout.session","status":"complete","livemode":false}`))
+		case "/v1/checkout/sessions/cs_test_gone/expire":
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	backends := stripe.NewBackendsWithConfig(
+		&stripe.BackendConfig{
+			URL:               stripe.String(server.URL),
+			HTTPClient:        server.Client(),
+			MaxNetworkRetries: stripe.Int64(0),
+			LeveledLogger:     &stripe.LeveledLogger{Level: stripe.LevelNull},
+		},
+	)
+	gateway := &StripeGateway{client: stripe.NewClient("sk_test_public_fixture", stripe.WithBackends(backends))}
+	ctx := context.Background()
+	if status, err := gateway.ExpireCheckout(ctx, "cs_test_open", "key"); err != nil || status != "expired" {
+		t.Fatalf("open session: %q %v", status, err)
+	}
+	if status, err := gateway.ExpireCheckout(ctx, "cs_test_paid", "key"); err != nil || status != "complete" {
+		t.Fatalf("paid session: %q %v", status, err)
+	}
+	if _, err := gateway.ExpireCheckout(ctx, "cs_test_gone", "key"); !errors.Is(err, ErrProcessorUnavailable) {
+		t.Fatalf("unreadable session: %v", err)
+	}
+	if len(paths) != 5 || paths[0] != "POST /v1/checkout/sessions/cs_test_open/expire" ||
+		paths[2] != "GET /v1/checkout/sessions/cs_test_paid" {
+		t.Fatalf("unexpected requests %v", paths)
 	}
 }

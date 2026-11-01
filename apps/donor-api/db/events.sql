@@ -1,13 +1,13 @@
 -- name: InsertEvent :exec
 INSERT INTO donor_events
   (id, slug, title, type, description, venue, address, city, zip, starts_at, ends_at, capacity, qualifying_perk, created_at, updated_at,
-   booking_opens_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15);
+   booking_opens_at, time_zone)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15,$16);
 
 -- name: UpdateEvent :exec
 UPDATE donor_events
 SET title=$2, type=$3, description=$4, venue=$5, address=$6, city=$7, zip=$8,
-    starts_at=$9, ends_at=$10, capacity=$11, qualifying_perk=$12, updated_at=$13, booking_opens_at=$14
+    starts_at=$9, ends_at=$10, capacity=$11, qualifying_perk=$12, updated_at=$13, booking_opens_at=$14, time_zone=$15
 WHERE id=$1;
 
 -- name: PublishEvent :exec
@@ -86,7 +86,7 @@ GROUP BY event_id;
 
 -- name: DonorReservationsForEvents :many
 -- The signed-in donor's active reservation status per event, for the list.
-SELECT event_id, status FROM donor_event_reservations
+SELECT event_id, status, checked_in_at FROM donor_event_reservations
 WHERE donor_id=$1 AND event_id = ANY(sqlc.arg(event_ids)::uuid[])
   AND status IN ('RESERVED', 'WAITLISTED');
 

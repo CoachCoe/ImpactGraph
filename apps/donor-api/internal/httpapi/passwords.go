@@ -8,6 +8,9 @@ import (
 	"net/http"
 )
 
+// codeCurrentPassword marks a 422 whose only fault is the current password given to change a password.
+const codeCurrentPassword = "CURRENT_PASSWORD_INCORRECT"
+
 type PasswordSource interface {
 	Signup(context.Context, store.SignupInput) error
 	Set(context.Context, string, string, string) error
@@ -44,13 +47,15 @@ func (a *api) signup(w http.ResponseWriter, r *http.Request) {
 }
 func (a *api) passwordSignIn(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email    string  `json:"email"`
+		Password string  `json:"password"`
+		Device   *string `json:"device_name"`
+		Platform *string `json:"platform"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	client, ok := signInClient(r, nil, nil)
+	client, ok := signInClient(r, body.Device, body.Platform)
 	if !ok {
 		invalidFields(w, r)
 		return
@@ -71,7 +76,17 @@ func (a *api) setPassword(w http.ResponseWriter, r *http.Request, token string) 
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	a.passwords().serve(w, r, func(ctx context.Context) (any, error) {
-		return map[string]bool{"saved": true}, a.Passwords.Set(ctx, token, body.Current, body.Password)
-	})
+	svc := a.passwords()
+	if !svc.available(w, r) {
+		return
+	}
+	ctx, cancel := withTimeout(r, svc.timeout)
+	defer cancel()
+	err := a.Passwords.Set(ctx, token, body.Current, body.Password)
+	if errors.Is(err, store.ErrCurrentPassword) {
+		// The session is valid; only the supplied current password is wrong. A 401 here would read as signed out.
+		writeJSON(w, http.StatusUnprocessableEntity, problem{Detail: "The email or password is incorrect", Code: codeCurrentPassword})
+		return
+	}
+	respond(w, r, map[string]bool{"saved": true}, err, svc.classify)
 }

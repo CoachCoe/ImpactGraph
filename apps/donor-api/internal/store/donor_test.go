@@ -93,7 +93,7 @@ func TestSharingRotationAppliesLastTouchAndExpiry(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 	before, err := first.Sharing(ctx, token)
-	if err != nil || before.PublicName != nil || before.Link != nil || before.IRLLink != nil {
+	if err != nil || before.PublicName != nil || before.Link != nil || before.IRLLink != nil || before.ReferralCode != nil {
 		t.Fatal(before, err)
 	}
 	for _, name := range []string{" ", "email@example.org", "name\ncontrol", strings.Repeat("x", 81)} {
@@ -113,6 +113,9 @@ func TestSharingRotationAppliesLastTouchAndExpiry(t *testing.T) {
 		t.Fatal("wrong share links")
 	}
 	code := strings.TrimPrefix(*a.Link, first.Origin+"/r/")
+	if a.ReferralCode == nil || *a.ReferralCode != code {
+		t.Fatalf("referral_code %v is not the link's code %q", a.ReferralCode, code)
+	}
 	touch, err := first.CaptureReferral(ctx, code, "LINK", "", now)
 	if err != nil || touch.Token == "" || *touch.PublicName != "First" {
 		t.Fatal(touch, err)

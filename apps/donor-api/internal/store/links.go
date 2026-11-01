@@ -67,3 +67,16 @@ func (s publicSite) checkoutReturn(amount int64, frequency string) string {
 		10,
 	) + "&frequency=" + frequency
 }
+
+// nativeReturnPath is where a native client's hosted checkout returns. The page
+// answers a browser with a short "return to the app" notice; the app watches
+// for the address itself or, once its association covers the path, opens from it.
+const nativeReturnPath = "/app/return"
+
+func (s publicSite) nativeCheckoutReturn() string {
+	return string(s) + nativeReturnPath + "?result=success&session_id={CHECKOUT_SESSION_ID}"
+}
+
+func (s publicSite) nativeCheckoutCancel() string {
+	return string(s) + nativeReturnPath + "?result=cancel"
+}

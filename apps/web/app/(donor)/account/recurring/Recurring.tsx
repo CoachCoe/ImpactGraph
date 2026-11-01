@@ -15,8 +15,9 @@ type Subscription = Schema<"Subscription">;
 
 const cancellable = (status: string) => ["active", "past_due", "unpaid"].includes(status);
 const settingUp = (status: string) => ["incomplete", "trialing"].includes(status);
-// Stripe's own `paused` status follows a trial that ended without a card.
-const paused = (subscription: Subscription) => subscription.status === "paused";
+// Stripe's own `paused` status follows a trial that ended without a card. The API's documented
+// statuses omit it, so it is read as a plain string and an unexpected value still shows.
+const paused = (status: string) => status === "paused";
 const preparingCopy = "We’re confirming your new monthly gift with Stripe. This usually takes a few seconds.";
 const date = (instant: string) => <time dateTime={instant}>{formatDate(instant)}</time>;
 const endingCopy = (stops: string) =>
@@ -30,7 +31,7 @@ function Status({ subscription }: { subscription: Subscription }) {
         charged.
       </p>
     );
-  if (paused(subscription)) return <p>Your monthly gift is paused.</p>;
+  if (paused(subscription.status)) return <p>Your monthly gift is paused.</p>;
   if (settingUp(subscription.status)) return <p>Your monthly gift is still being set up. Refresh in a moment.</p>;
   return <p>Next renewal: {date(subscription.period_end)}.</p>;
 }
@@ -95,7 +96,8 @@ export default function RecurringGiving() {
   }
   const subscription = data?.subscription;
   const preparing = data?.state === "preparing";
-  const changeable = subscription && !subscription.stops_at && !paused(subscription) && !settingUp(subscription.status);
+  const changeable =
+    subscription && !subscription.stops_at && !paused(subscription.status) && !settingUp(subscription.status);
   return (
     <Page
       eyebrow="My account"

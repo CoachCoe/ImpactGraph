@@ -526,10 +526,31 @@ func TestEventCheckIn(t *testing.T) {
 	if _, err := res.CheckIn(ctx, donorTok, token+"x"); !errors.Is(err, ErrCheckIn) {
 		t.Fatalf("forged token accepted: %v", err)
 	}
+	// A token of the wrong length is refused even with a valid prefix.
+	if _, err := res.CheckIn(ctx, donorTok, token[:len(token)-1]); !errors.Is(err, ErrCheckIn) {
+		t.Fatalf("truncated token accepted: %v", err)
+	}
+	if len(token) != checkInTokenLength {
+		t.Fatalf("token is %d characters, documented as %d", len(token), checkInTokenLength)
+	}
+	reader := EventReader{DB: pool}
+	if v, err := reader.DetailForDonor(ctx, donorTok, eventID); err != nil || v.CheckedInAt != nil ||
+		v.ReservationStatus == nil || *v.ReservationStatus != reservationReserved {
+		t.Fatalf("before check-in: %+v %v", v, err)
+	}
 	// Valid check-in.
 	r, err := res.CheckIn(ctx, donorTok, token)
 	if err != nil || !r.CheckedIn || r.AlreadyIn {
 		t.Fatalf("check-in: %+v %v", r, err)
+	}
+	// A later read shows the check-in, on the detail and on the list rows.
+	v, err := reader.DetailForDonor(ctx, donorTok, eventID)
+	if err != nil || v.CheckedInAt == nil || v.ReservationStatus == nil || *v.ReservationStatus != reservationReserved {
+		t.Fatalf("after check-in: %+v %v", v, err)
+	}
+	if views, err := reader.donorViews(ctx, queries.New(pool), donorID, []queries.DonorEvent{mustEvent(t, pool, eventID)}); err != nil ||
+		len(views) != 1 || views[0].CheckedInAt == nil || !views[0].CheckedInAt.Equal(*v.CheckedInAt) {
+		t.Fatalf("list row after check-in: %+v %v", views, err)
 	}
 	// Second scan is an idempotent no-op success.
 	r, err = res.CheckIn(ctx, donorTok, token)
@@ -902,5 +923,90 @@ func TestTeamCaptainsBookEarly(t *testing.T) {
 	backwards.BookingOpensAt = time.Now().UTC().Add(48 * time.Hour).Format(time.RFC3339)
 	if _, err := events.Create(ctx, adminToken, backwards); !errors.Is(err, ErrStaffInput) {
 		t.Fatalf("booking opening after the start: %v; want ErrStaffInput", err)
+	}
+}
+
+func mustEvent(t *testing.T, pool *pgxpool.Pool, id pgtype.UUID) queries.DonorEvent {
+	t.Helper()
+	e, err := queries.New(pool).EventByID(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+func TestEventTimeZone(t *testing.T) {
+	pool := database(t)
+	api := as(t, dbroles.API)
+	ctx := context.Background()
+	cleanEvents(t, pool)
+	_, adminToken := staffFixture(t, pool, "SUPER_ADMIN")
+	s := EventService{Staff: &StaffService{DB: api}}
+	reader := EventReader{DB: pool}
+
+	for name, in := range map[string]EventInput{
+		"unknown zone": func() EventInput {
+			i := eventInput("tz-a", "SF", "94103", "VOLUNTEER", 48*time.Hour)
+			i.TimeZone = "Mars/Olympus"
+			return i
+		}(),
+		"local": func() EventInput {
+			i := eventInput("tz-b", "SF", "94103", "VOLUNTEER", 48*time.Hour)
+			i.TimeZone = "Local"
+			return i
+		}(),
+		"injection": func() EventInput {
+			i := eventInput("tz-c", "SF", "94103", "VOLUNTEER", 48*time.Hour)
+			i.TimeZone = "../etc/passwd"
+			return i
+		}(),
+		"offset string": func() EventInput {
+			i := eventInput("tz-d", "SF", "94103", "VOLUNTEER", 48*time.Hour)
+			i.TimeZone = "UTC-5 "
+			return i
+		}(),
+	} {
+		if _, err := s.Create(ctx, adminToken, in); !errors.Is(err, ErrStaffInput) {
+			t.Fatalf("%s accepted: %v", name, err)
+		}
+	}
+
+	want := map[string]string{"explicit": "Pacific/Honolulu", "from-zip": "America/Los_Angeles", "fallback": defaultEventTimeZone}
+	for slug, in := range map[string]EventInput{
+		"explicit": func() EventInput {
+			i := eventInput("explicit", "Honolulu", "96813", "VOLUNTEER", 48*time.Hour)
+			i.TimeZone = "Pacific/Honolulu"
+			return i
+		}(),
+		"from-zip": eventInput("from-zip", "SF", "94103", "VOLUNTEER", 48*time.Hour),
+		"fallback": eventInput("fallback", "Nowhere", "", "VOLUNTEER", 48*time.Hour),
+	} {
+		id, err := s.Create(ctx, adminToken, in)
+		if err != nil {
+			t.Fatalf("%s: %v", slug, err)
+		}
+		if err = s.Publish(ctx, adminToken, id); err != nil {
+			t.Fatal(err)
+		}
+		view, err := reader.Detail(ctx, id)
+		if err != nil || view.TimeZone != want[slug] {
+			t.Fatalf("%s: zone %q, want %q (%v)", slug, view.TimeZone, want[slug], err)
+		}
+		staff, err := s.Detail(ctx, adminToken, id)
+		if err != nil || staff.TimeZone != want[slug] {
+			t.Fatalf("%s staff detail: zone %q (%v)", slug, staff.TimeZone, err)
+		}
+		// Updating with the zone the staff screen echoed back keeps it.
+		in2 := staff.EventInput
+		if err = s.Update(ctx, adminToken, id, in2); err != nil {
+			t.Fatalf("%s update: %v", slug, err)
+		}
+		in2.TimeZone = "America/Chicago"
+		if err = s.Update(ctx, adminToken, id, in2); err != nil {
+			t.Fatalf("%s update zone: %v", slug, err)
+		}
+		if view, err = reader.Detail(ctx, id); err != nil || view.TimeZone != "America/Chicago" {
+			t.Fatalf("%s after update: %q %v", slug, view.TimeZone, err)
+		}
 	}
 }

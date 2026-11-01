@@ -2,11 +2,15 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"dad/donor-api/internal/payments"
 	"dad/donor-api/internal/store"
@@ -15,6 +19,7 @@ import (
 type checkoutStub struct {
 	calls   int
 	request payments.CheckoutRequest
+	session string
 	err     error
 }
 
@@ -25,6 +30,24 @@ func (s *checkoutStub) BeginCheckout(ctx context.Context, r payments.CheckoutReq
 	s.calls++
 	s.request = r
 	return payments.CheckoutResult{CheckoutID: r.RequestID.String(), URL: "https://checkout.stripe.com/c/test"}, s.err
+}
+
+func (s *checkoutStub) BeginNativeCheckout(
+	ctx context.Context,
+	session string,
+	key pgtype.UUID,
+	amount int64,
+) (payments.NativeCheckoutResult, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		panic("unbounded checkout")
+	}
+	s.calls++
+	s.session, s.request.RequestID, s.request.Amount = session, key, amount
+	return payments.NativeCheckoutResult{
+		ExpiresAt: time.Date(2027, 1, 2, 3, 4, 5, 0, time.UTC),
+		SessionID: "cs_test_native",
+		URL:       "https://checkout.stripe.com/c/test",
+	}, s.err
 }
 
 func checkoutRequest(body string) *http.Request {
@@ -106,12 +129,104 @@ func TestCheckoutErrorsArePrivate(t *testing.T) {
 	for _, tc := range []struct {
 		err    error
 		status int
-	}{{payments.ErrCheckoutConflict, 409}, {payments.ErrCheckoutInput, 422}, {store.ErrDenied, 403}, {errors.New("private processor details"), 503}} {
+	}{{payments.ErrCheckoutConflict, 409}, {payments.ErrCheckoutThrottled, 429}, {payments.ErrCheckoutInput, 422}, {store.ErrDenied, 403}, {errors.New("private processor details"), 503}} {
 		server := NewServer("", Services{Checkout: &checkoutStub{err: tc.err}})
 		response := httptest.NewRecorder()
 		server.Handler.ServeHTTP(response, checkoutRequest(`{"email":"donor@example.org","amount_minor":3000}`))
 		if response.Code != tc.status || strings.Contains(response.Body.String(), "private processor") {
 			t.Errorf("%v: got %d %s, want %d without processor detail", tc.err, response.Code, response.Body, tc.status)
 		}
+	}
+}
+
+func TestThrottledCheckoutRestartTellsTheClientWhenToRetry(t *testing.T) {
+	server := NewServer("", Services{Checkout: &checkoutStub{err: payments.ErrCheckoutThrottled}})
+	response := httptest.NewRecorder()
+	server.Handler.ServeHTTP(response, checkoutRequest(`{"email":"donor@example.org","amount_minor":3000}`))
+	if response.Code != 429 || response.Header().Get("Retry-After") != "600" {
+		t.Fatalf("got %d with Retry-After %q, want 429 and 600", response.Code, response.Header().Get("Retry-After"))
+	}
+}
+
+func nativeCheckoutRequest(body string) *http.Request {
+	r := appRequest("POST", "/donor/me/recurring/checkout", body)
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Idempotency-Key", "8f4f52bb-99f6-490e-8313-5156cc4f8b45")
+	return r
+}
+
+func TestNativeRecurringCheckoutStartsForTheSignedInDonor(t *testing.T) {
+	stub := &checkoutStub{}
+	response := httptest.NewRecorder()
+	NewServer("", Services{Checkout: stub}).Handler.ServeHTTP(response, nativeCheckoutRequest(`{"amount_minor":6000}`))
+	if response.Code != http.StatusCreated || stub.session != appSession || stub.request.Amount != 6000 ||
+		stub.request.RequestID.String() != "8f4f52bb-99f6-490e-8313-5156cc4f8b45" {
+		t.Fatalf("got %d %s for session %q, request %+v", response.Code, response.Body, stub.session, stub.request)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || len(body) != 3 || body["session_id"] != "cs_test_native" ||
+		body["url"] != "https://checkout.stripe.com/c/test" || body["expires_at"] != "2027-01-02T03:04:05Z" {
+		t.Fatalf("unexpected body %s", response.Body)
+	}
+}
+
+func TestNativeRecurringCheckoutRefusals(t *testing.T) {
+	const key = "8f4f52bb-99f6-490e-8313-5156cc4f8b45"
+	for _, tc := range []struct {
+		name   string
+		mutate func(*http.Request)
+		body   string
+		err    error
+		status int
+	}{
+		{"fractional amount", nil, `{"amount_minor":3000.0}`, nil, 422},
+		{"amount off the daily grid", nil, `{"amount_minor":4500}`, nil, 422},
+		{"amount under the minimum", nil, `{"amount_minor":2999}`, nil, 422},
+		{"amount over the ceiling", nil, `{"amount_minor":93000}`, nil, 422},
+		{"missing amount", nil, `{}`, nil, 422},
+		{"email in the body", nil, `{"amount_minor":3000,"email":"other@example.org"}`, nil, 422},
+		{"missing key", func(r *http.Request) { r.Header.Del("Idempotency-Key") }, `{"amount_minor":3000}`, nil, 422},
+		{"anonymous", func(r *http.Request) { r.Header.Del("Authorization") }, `{"amount_minor":3000}`, nil, 401},
+		{"browser request", func(r *http.Request) {
+			r.Header.Del("X-DAD-Client")
+			r.Header.Del("Authorization")
+			r.Header.Set("Origin", "http://localhost:3000")
+			r.AddCookie(&http.Cookie{Name: donorCookie, Value: appSession})
+		}, `{"amount_minor":3000}`, nil, 403},
+		{"gift already active", nil, `{"amount_minor":3000}`, payments.ErrCheckoutConflict, 409},
+		{"session ended", nil, `{"amount_minor":3000}`, store.ErrDenied, 401},
+		{"no processor", nil, `{"amount_minor":3000}`, payments.ErrUnconfigured, 503},
+		{"processor failure", nil, `{"amount_minor":3000}`, errors.New("private processor details"), 503},
+	} {
+		stub := &checkoutStub{err: tc.err}
+		r := nativeCheckoutRequest(tc.body)
+		r.Header.Set("Idempotency-Key", key)
+		if tc.mutate != nil {
+			tc.mutate(r)
+		}
+		response := httptest.NewRecorder()
+		NewServer("", Services{Checkout: stub}).Handler.ServeHTTP(response, r)
+		if response.Code != tc.status || strings.Contains(response.Body.String(), "private") {
+			t.Errorf("%s: got %d %s, want %d", tc.name, response.Code, response.Body, tc.status)
+		}
+		if tc.err == nil && stub.calls != 0 {
+			t.Errorf("%s: reached the processor", tc.name)
+		}
+	}
+}
+
+func TestNativeRecurringCheckoutIsRateLimited(t *testing.T) {
+	server := NewServer("", Services{Checkout: &checkoutStub{}})
+	limited := false
+	for range 200 {
+		response := httptest.NewRecorder()
+		server.Handler.ServeHTTP(response, nativeCheckoutRequest(`{"amount_minor":3000}`))
+		if response.Code == http.StatusTooManyRequests {
+			limited = true
+			break
+		}
+	}
+	if !limited {
+		t.Fatal("the account budget did not apply to native checkout")
 	}
 }

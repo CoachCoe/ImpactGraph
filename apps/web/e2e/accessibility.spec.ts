@@ -7,6 +7,8 @@ for (const path of [
   "/donate",
   "/donate/thanks",
   "/donate/thanks?session_id=cs_test&amount_minor=3000&frequency=MONTHLY",
+  "/app/return?result=success&session_id=cs_test",
+  "/app/return?result=cancel",
   "/initiatives",
   "/spend",
   "/how-it-works",

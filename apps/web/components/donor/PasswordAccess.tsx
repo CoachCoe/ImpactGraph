@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { api, failureMessage } from "@/lib/api";
+import { ApiError, api, failureMessage } from "@/lib/api";
 import { Announcer } from "./Announcer";
 export function PasswordAccess({ setup = false }: { setup?: boolean }) {
   const [busy, setBusy] = useState(false),
@@ -29,7 +29,12 @@ export function PasswordAccess({ setup = false }: { setup?: boolean }) {
             if (setup) setStatus("Password saved.");
             else window.location.assign("/account/dashboard");
           } catch (c) {
-            setError(failureMessage(c, "Account access could not be completed."));
+            // A wrong current password is a 422 with this code (older servers answered 401): the donor stays signed in.
+            setError(
+              setup && c instanceof ApiError && c.code === "CURRENT_PASSWORD_INCORRECT"
+                ? "Your current password is incorrect. Check it and try again."
+                : failureMessage(c, "Account access could not be completed."),
+            );
           } finally {
             setBusy(false);
           }

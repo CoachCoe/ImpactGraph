@@ -130,6 +130,7 @@ type DonorEvent struct {
 	QualifyingPerk string             `json:"qualifying_perk"`
 	CancelledAt    pgtype.Timestamptz `json:"cancelled_at"`
 	BookingOpensAt pgtype.Timestamptz `json:"booking_opens_at"`
+	TimeZone       string             `json:"time_zone"`
 }
 
 type DonorEventAlertJob struct {

@@ -115,6 +115,10 @@ func configure(ctx context.Context, getenv func(string) string) (httpapi.Service
 	if err = payments.ValidateOrigin(services.Origin); err != nil {
 		return services, release, fmt.Errorf("DONOR_PUBLIC_ORIGIN %w", err)
 	}
+	nativeReturnOrigin := cmp.Or(getenv("DONOR_NATIVE_RETURN_ORIGIN"), services.Origin)
+	if err = payments.ValidateOrigin(nativeReturnOrigin); err != nil {
+		return services, release, fmt.Errorf("DONOR_NATIVE_RETURN_ORIGIN %w", err)
+	}
 	if services.Wallet, err = wallet.FromEnvironment(getenv, services.Origin); err != nil {
 		return services, release, err
 	}
@@ -239,7 +243,13 @@ func configure(ctx context.Context, getenv func(string) string) (httpapi.Service
 	if verifier := oidc.NewVerifier(oidcSettings); verifier != nil {
 		services.OIDCSignIn = store.OIDCService{DB: pool, Verifier: verifier, Settings: oidcSettings}
 	}
-	services.Checkout = store.CheckoutService{DB: pool, Gateway: gateway, Origin: services.Origin, FoundingClaims: foundingClaims}
+	services.Checkout = store.CheckoutService{
+		DB:                 pool,
+		Gateway:            gateway,
+		Origin:             services.Origin,
+		NativeReturnOrigin: nativeReturnOrigin,
+		FoundingClaims:     foundingClaims,
+	}
 	services.Recurring = store.RecurringService{DB: pool, Gateway: gateway, Origin: services.Origin}
 	services.Push = store.PushService{DB: pool, Platforms: platforms}
 	services.PartnerPush = store.PartnerPushService{DB: pool, Platforms: platforms}

@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -27,6 +28,30 @@ type checkoutGateway struct {
 	fail   bool
 	remote *payments.RemoteCheckout
 	pool   *pgxpool.Pool
+	// expired lists the sessions ExpireCheckout was asked to close. It reports
+	// expireStatus, "expired" when unset, or expireErr if that is set. Each
+	// beforeExpire hook runs first, once, as the processor call begins.
+	expired      []string
+	expireStatus string
+	expireErr    error
+	beforeExpire func()
+}
+
+func (g *checkoutGateway) ExpireCheckout(_ context.Context, session, _ string) (string, error) {
+	g.mu.Lock()
+	hook := g.beforeExpire
+	g.beforeExpire = nil
+	g.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.expired = append(g.expired, session)
+	if g.expireErr != nil {
+		return "", g.expireErr
+	}
+	return cmp.Or(g.expireStatus, "expired"), nil
 }
 
 func (g *checkoutGateway) CreateCheckout(ctx context.Context, params []byte, key string) (payments.RemoteCheckout, error) {
@@ -122,7 +147,14 @@ func TestCheckoutRetriesAndReservations(t *testing.T) {
 	changed = request
 	changed.RequestID = testID(t)
 	if _, err = service.BeginCheckout(ctx, changed); !errors.Is(err, payments.ErrCheckoutConflict) {
-		t.Fatal("second recurring checkout allowed")
+		t.Fatal("a checkout begun moments ago was expired")
+	}
+	// Once abandoned, a restart replaces the session rather than being refused
+	// or handed the earlier session's URL.
+	mustExec(t, database(t), "UPDATE donor_stripe_checkouts SET created_at=now()-interval '1 minute' WHERE id=$1", request.RequestID)
+	replacement, err := service.BeginCheckout(ctx, changed)
+	if err != nil || replacement == result || len(gateway.expired) != 1 || len(gateway.calls) != 3 {
+		t.Fatalf("restart did not replace the session: %+v %v, expired %v", replacement, err, gateway.expired)
 	}
 }
 

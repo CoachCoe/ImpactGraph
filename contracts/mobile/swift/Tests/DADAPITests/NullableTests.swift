@@ -67,18 +67,23 @@ final class NullableTests: XCTestCase {
             "starts_at": "2026-11-26T12:00:00Z", "ends_at": "2026-11-26T14:00:00Z", "capacity": 0,
             "spots_left": NSNull(), "reservation_status": NSNull(), "invitation_note": NSNull(),
             "report_issue_url": NSNull(), "cancelled": false, "booking_opens_at": NSNull(), "early_booking": false,
+            "time_zone": "America/New_York", "checked_in_at": NSNull(),
         ]
         let open = try decode(Components.Schemas.EventView.self, body)
         XCTAssertNil(open.spots_left)
         XCTAssertNil(open.reservation_status)
         XCTAssertNil(open.booking_opens_at)
+        XCTAssertNil(open.checked_in_at)
+        XCTAssertEqual(open.time_zone, "America/New_York")
         body["spots_left"] = 5
         body["reservation_status"] = "RESERVED"
         body["booking_opens_at"] = "2026-11-01T12:00:00Z"
+        body["checked_in_at"] = "2026-11-26T12:05:00Z"
         let reserved = try decode(Components.Schemas.EventView.self, body)
         XCTAssertEqual(reserved.spots_left, 5)
         XCTAssertEqual(reserved.reservation_status?.rawValue, "RESERVED")
         XCTAssertNotNil(reserved.booking_opens_at)
+        XCTAssertNotNil(reserved.checked_in_at)
         body["reservation_status"] = "INVENTED"
         XCTAssertThrowsError(try decode(Components.Schemas.EventView.self, body))
     }

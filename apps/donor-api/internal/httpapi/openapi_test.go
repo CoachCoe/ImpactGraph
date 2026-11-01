@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -142,6 +143,57 @@ func TestContractClientsMatchTheGuard(t *testing.T) {
 	}
 }
 
+// Statuses the typed wrappers produce before any handler runs must be
+// documented: an anonymous request, a foreign origin, a cross-site staff read,
+// an app-only route reached from a browser, and an exhausted rate budget.
+func TestContractDocumentsWrapperStatuses(t *testing.T) {
+	ops := loadContract(t).operations()
+	for _, route := range allRoutes() {
+		op, ok := ops[route.pattern]
+		if !ok || route.auth == stripeAuth {
+			continue
+		}
+		if route.auth != noAuth && route.auth != staffAuth && route.pattern != "POST /donor/logout" {
+			// Reads take no limiter here, but the ingress rejects floods before the API.
+			for _, status := range []string{"401", "429"} {
+				if _, documented := op.Responses[status]; !documented {
+					t.Errorf("%s: authenticated route does not document %s", route.pattern, status)
+				}
+			}
+		}
+		origin := originFor(route.pattern)
+		probes := map[string]func(*http.Request){
+			"browser": func(r *http.Request) { r.Header.Set("Origin", origin) },
+			"foreign": func(r *http.Request) { r.Header.Set("Origin", "https://evil.example.org") },
+			"app":     func(r *http.Request) { r.Header.Set("X-DAD-Client", "native") },
+			"cross-site": func(r *http.Request) {
+				r.Header.Set("Origin", origin)
+				r.Header.Set("Sec-Fetch-Site", "cross-site")
+			},
+		}
+		server := NewServer("", Services{})
+		for name, mark := range probes {
+			rounds := 1
+			if name == "browser" || name == "app" {
+				rounds = 130
+			}
+			for range rounds {
+				r := routeRequest(route.pattern, "{}")
+				mark(r)
+				response := httptest.NewRecorder()
+				server.Handler.ServeHTTP(response, r)
+				switch response.Code {
+				case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
+					if _, documented := op.Responses[strconv.Itoa(response.Code)]; !documented {
+						t.Errorf("%s: %s request got %d, which is not documented", route.pattern, name, response.Code)
+						rounds = 0
+					}
+				}
+			}
+		}
+	}
+}
+
 func TestContractReferencesResolve(t *testing.T) {
 	c := loadContract(t)
 	var walk func(any)
@@ -201,6 +253,7 @@ func TestContractSchemasMatchGoTypes(t *testing.T) {
 		"GET /donor/me/recurring":                                    store.RecurringDetails{},
 		"GET /donor/me/recurring/amount":                             store.AmountOptions{},
 		"GET /donor/me/payment-method":                               store.PaymentMethodStatus{},
+		"POST /donor/me/recurring/checkout":                          payments.NativeCheckoutResult{},
 		"POST /donor/me/recurring/cancel":                            store.RecurringDetails{},
 		"POST /donor/me/recurring/amount":                            store.AmountChange{},
 		"POST /donor/me/payment-method/setup":                        store.PaymentUpdate{},
@@ -259,6 +312,7 @@ func TestContractSchemasMatchGoTypes(t *testing.T) {
 		"POST /donor/passkeys/sign-in":                               donorPasskeySignInBody{},
 		"POST /donor/me/passkeys/register":                           registerPasskeyBody{},
 		"POST /donor/checkouts":                                      checkoutBody{},
+		"POST /donor/me/recurring/checkout":                          nativeCheckoutBody{},
 		"POST /donor/me/recurring/cancel":                            cancelBody{},
 		"POST /donor/me/recurring/amount":                            amountBody{},
 		"POST /donor/staff/sign-in":                                  passkeyBody{},

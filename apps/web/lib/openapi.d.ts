@@ -90,7 +90,7 @@ export interface paths {
         put?: never;
         /**
          * Start a guest Stripe Checkout
-         * @description Web only: giving stays on the website. Reads the `dad_referral` cookie for attribution. 403 also means giving is unavailable for this account. 503 `PAYMENTS_UNCONFIGURED` when the deployment has no payment processor. Refused with 409 when the email signs in to a DAD partner or staff account: one email holds one role, so such a person gives with a different email.
+         * @description Web only: giving stays on the website. Reads the `dad_referral` cookie for attribution. 403 also means giving is unavailable for this account. 503 `PAYMENTS_UNCONFIGURED` when the deployment has no payment processor. Refused with 409 when the email signs in to a DAD partner or staff account: one email holds one role, so such a person gives with a different email. The email is not authenticated, so an earlier open, unpaid checkout for it is never handed back: starting again, with any new key, expires that session at Stripe (outside any database lock) and returns a new one for the requested amount, whether the amount is the same or not. A checkout begun in the last 15 seconds is left alone and answers `409`, as does one paid just as the request arrives or a monthly gift that is already active. At most 10 checkouts can be begun for one email in an hour: beyond that the answer is `429` with `Retry-After`. If expiring the earlier session fails the answer is a retryable `503` and nothing changes. Retrying with the same `Idempotency-Key` returns the same session; the key of a replaced checkout answers `409`.
          */
         post: operations["beginCheckout"];
         delete?: never;
@@ -426,7 +426,7 @@ export interface paths {
         put?: never;
         /**
          * Save preferences
-         * @description Saves the donor's notification, rankings, network and volunteer choices. The required fields are always replaced; an optional field left out keeps its saved value. 409 when `version` is stale: re-read the profile and retry.
+         * @description Saves the donor's notification, rankings, network and volunteer choices. The required fields are always replaced; an optional field left out keeps its saved value. `version` is optimistic concurrency, deliberately: every save is a new numbered record in the consent history, so it must name the profile version it replaces. 409 when `version` is stale: re-read the profile and retry. To change a single setting, read the profile, send its current `version` and the six required fields from `preferences` unchanged, and change only the one you mean to; the optional fields can be left out.
          */
         post: operations["savePreferences"];
         delete?: never;
@@ -682,6 +682,26 @@ export interface paths {
          * @description Idempotent. Echo the values the matching GET returned; 409 when they no longer match current billing. 503 `PAYMENTS_UNCONFIGURED` when the deployment has no payment processor.
          */
         post: operations["changeAmount"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/donor/me/recurring/checkout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start a monthly gift in Stripe-hosted Checkout
+         * @description For a signed-in donor with no active or pending monthly gift. The donor's account supplies the email, so the body carries only the amount. Idempotent: retry with the same `Idempotency-Key` and amount to get the same session; a different amount under a used key is 409. Open `url` in the system browser (ASWebAuthenticationSession or a Custom Tab). Checkout returns to `<DONOR_NATIVE_RETURN_ORIGIN>/app/return?result=success&session_id=<session_id>` after payment, or `?result=cancel` if the donor backs out; the app may watch for that address. The gift becomes active only when Stripe's verified webhook arrives, so after returning poll GET /donor/me/recurring until `subscription` is present. Starting again while the donor's own earlier checkout is still open and unpaid, as when they closed the hosted page, does not lock them out: the same amount returns that session (201, same `url`, `session_id` and `expires_at`); a different amount expires it at Stripe and returns a new session. 409 means a monthly gift is active, the earlier checkout was paid just as this request arrived, or another start for this donor is mid-flight (retry). 503 also covers a failure to expire the earlier session: nothing changed, retry. 503 `PAYMENTS_UNCONFIGURED` when the deployment has no payment processor.
+         */
+        post: operations["startRecurringCheckout"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2820,7 +2840,7 @@ export interface paths {
         put?: never;
         /**
          * /donor/signup
-         * @description 503 `EMAIL_UNCONFIGURED` when the deployment has no email. Never reveals whether the address exists. The link (`/account/claim#token=…`) is single-use and expires after 15 minutes; the app should handle it as a universal/app link and call POST /donor/claim.
+         * @description Starts account creation by emailing a verification link; no session is issued here. Answers 200 `{"sent":true}` whether or not the address already has an account, so it never reveals which. 503 `EMAIL_UNCONFIGURED` when the deployment has no email. The link (`/account/claim#token=…`) is single-use and expires after 15 minutes; the app should handle it as a universal/app link and call POST /donor/claim, which takes the optional `device_name` and `platform` that label the resulting session.
          */
         post: operations["postDonorSignup"];
         delete?: never;
@@ -2840,7 +2860,7 @@ export interface paths {
         put?: never;
         /**
          * /donor/password/sign-in
-         * @description Verifies the SMS code and signs the donor in. 401 covers a wrong, expired, or over-tried code and a phone with no account alike, so none reveals whether an account exists. 503 when no SMS provider is configured.
+         * @description Signs in with an email and password. 401 covers a wrong password, an unknown email, an unclaimed account and a disabled account alike, so none reveals whether an account exists. A browser request receives an HttpOnly cookie; a native request (`X-DAD-Client: native`, no Origin, no cookies) receives NativeSession and may describe its device so the donor can recognize the session later.
          */
         post: operations["postDonorPasswordSignIn"];
         delete?: never;
@@ -2860,7 +2880,7 @@ export interface paths {
         put?: never;
         /**
          * /donor/me/password
-         * @description Saves the donor's notification, rankings, network and volunteer choices. The required fields are always replaced; an optional field left out keeps its saved value. 409 when `version` is stale: re-read the profile and retry.
+         * @description Sets or changes the signed-in donor's password. `current_password` is required unless the session proved its password within the last 15 minutes; leave it empty when setting a first password right after signing in by email link. 401 means the session is missing, expired or revoked: sign in again. 422 with `code` `CURRENT_PASSWORD_INCORRECT` means the session is fine but `current_password` was missing or wrong: keep the donor signed in and let them retry (attempts are rate limited). Contract versions before 2.4 answered 401 with the same `detail` ("The email or password is incorrect"); a client that must still talk to such a server should treat that 401 on this route as a wrong current password when the access token is otherwise valid.
          */
         post: operations["postDonorMePassword"];
         delete?: never;
@@ -2912,10 +2932,10 @@ export interface components {
             /** @description Human-readable explanation, safe to show to the user. Never contains credentials, donor data, or internal error text. */
             detail: string;
             /**
-             * @description Present only on a 503 for a feature this deployment has deliberately not configured. Such a 503 is not transient: do not retry; show the feature as unavailable.
+             * @description Present on a 503 for a feature this deployment has deliberately not configured (not transient: do not retry; show the feature as unavailable), and on the 422 of POST /donor/me/password when `current_password` is missing or wrong.
              * @enum {string}
              */
-            code?: "PAYMENTS_UNCONFIGURED" | "EMAIL_UNCONFIGURED" | "SOURCE_STORAGE_UNCONFIGURED";
+            code?: "PAYMENTS_UNCONFIGURED" | "EMAIL_UNCONFIGURED" | "SOURCE_STORAGE_UNCONFIGURED" | "CURRENT_PASSWORD_INCORRECT";
             /** @description Present only on a 422 from POST /donor/staff/founding-claims: every problem found, up to 100. */
             errors?: components["schemas"]["PublicationProblem"][];
         };
@@ -3134,6 +3154,8 @@ export interface components {
              * @description In-person (QR) referral link.
              */
             irl_link: string | null;
+            /** @description The code in `link` and `irl_link` (their `/r/{code}` path segment), for display and copying; null exactly when they are. Replacing the code changes it. */
+            referral_code: string | null;
         };
         Gift: {
             /** Format: uuid */
@@ -3272,7 +3294,11 @@ export interface components {
             id: string;
             /** Format: date-time */
             period_end: string;
-            status: string;
+            /**
+             * @description Stripe's subscription status. `active`, `past_due` and `unpaid` renew; `incomplete` awaits the first payment; `canceled` and `incomplete_expired` have ended. Clients must tolerate a value not listed here and treat it as not active.
+             * @enum {string}
+             */
+            status: "active" | "past_due" | "unpaid" | "incomplete" | "canceled" | "incomplete_expired";
             /** Format: date-time */
             stops_at: string | null;
         };
@@ -3358,6 +3384,20 @@ export interface components {
             /**
              * Format: uri
              * @description Stripe-hosted Checkout page.
+             */
+            url: string;
+        };
+        NativeCheckout: {
+            /**
+             * Format: date-time
+             * @description When the hosted page stops accepting payment; after this a new Idempotency-Key starts a new checkout.
+             */
+            expires_at: string;
+            /** @description The Stripe Checkout session, echoed back on the return address. */
+            session_id: string;
+            /**
+             * Format: uri
+             * @description Stripe-hosted Checkout page. Open it in the system browser.
              */
             url: string;
         };
@@ -3824,7 +3864,10 @@ export interface components {
             id: string;
             slug: string;
             title: string;
-            /** @enum {string} */
+            /**
+             * @description Event kind. Clients must tolerate a value not listed here.
+             * @enum {string}
+             */
             type: "VOLUNTEER" | "COMMUNITY" | "INVITE_ONLY";
             description: string;
             venue: string;
@@ -3834,6 +3877,8 @@ export interface components {
             starts_at: string;
             /** Format: date-time */
             ends_at: string;
+            /** @description IANA time zone of the venue, such as `America/New_York`. Show `starts_at` and `ends_at` in this zone, not the device's. */
+            time_zone: string;
             /**
              * Format: int32
              * @description Number of spots; 0 means uncapped.
@@ -3841,8 +3886,10 @@ export interface components {
             capacity: number;
             /** @description Spots remaining (capacity minus reserved), floored at 0; null when uncapped. */
             spots_left: number | null;
-            /** @description The signed-in donor's own status for this event; null on an anonymous read or no active reservation. */
+            /** @description The signed-in donor's own status for this event; null on an anonymous read or no active reservation. Clients must tolerate a value not listed here. */
             reservation_status: ("RESERVED" | "WAITLISTED") | null;
+            /** @description When the signed-in donor checked in (E-8); null until they do, and on an anonymous read. `reservation_status` stays `RESERVED` after check-in. */
+            checked_in_at: string | null;
             /** @description "Invitation earned at ..." for an INVITE_ONLY event unlocked by a badge perk (E-5); null otherwise. */
             invitation_note: string | null;
             /** @description mailto link to report an issue about this event to DAD (E-10); null when no support email is configured. */
@@ -3856,7 +3903,10 @@ export interface components {
         };
         /** @description The outcome of a reserve or cancel (E-4). */
         ReservationResult: {
-            /** @enum {string} */
+            /**
+             * @description The donor's place after the call. Clients must tolerate a value not listed here.
+             * @enum {string}
+             */
             status: "RESERVED" | "WAITLISTED" | "CANCELLED";
         };
         /** @description The outcome of a QR check-in (E-8). */
@@ -3889,6 +3939,8 @@ export interface components {
             qualifying_perk?: "" | "FOUNDING_EVENTS" | "MILESTONE_EVENTS" | "TEAM_CAPTAIN";
             /** @description When reservations open to everyone (RFC 3339, before starts_at), or empty for when the event is published. Team Captains may reserve from 48 hours earlier (B-3). */
             booking_opens_at?: string;
+            /** @description IANA time zone of the venue, such as `America/New_York`. Empty takes the zone of `zip`, else `America/New_York`; an unknown name is rejected. */
+            time_zone?: string;
         };
         ReportMetric: {
             /** @description Whether the server can compute this metric. */
@@ -4187,6 +4239,8 @@ export interface components {
             qualifying_perk: "" | "FOUNDING_EVENTS" | "MILESTONE_EVENTS" | "TEAM_CAPTAIN";
             /** @description When reservations open to everyone (RFC 3339, before starts_at), or empty for when the event is published. Team Captains may reserve from 48 hours earlier (B-3). */
             booking_opens_at: string;
+            /** @description IANA time zone of the venue, such as `America/New_York`. Empty takes the zone of `zip`, else `America/New_York`; an unknown name is rejected. */
+            time_zone: string;
             /** Format: uuid */
             id: string;
             /** @enum {string} */
@@ -4241,6 +4295,8 @@ export interface components {
             qualifying_perk: "" | "FOUNDING_EVENTS" | "MILESTONE_EVENTS" | "TEAM_CAPTAIN";
             /** @description When reservations open to everyone (RFC 3339, before starts_at), or empty for when the event is published. Team Captains may reserve from 48 hours earlier (B-3). */
             booking_opens_at: string;
+            /** @description IANA time zone of the venue, such as `America/New_York`. Empty takes the zone of `zip`, else `America/New_York`; an unknown name is rejected. */
+            time_zone: string;
             /** Format: uuid */
             id: string;
             /** @enum {string} */
@@ -4376,6 +4432,28 @@ export interface components {
             /** @description Cursor of the next page, or null on the last page. */
             next_cursor: string | null;
         };
+        SignupSent: {
+            /** @constant */
+            sent: true;
+        };
+        PartnerSignInLinkSent: {
+            message: string;
+        };
+        PartnerSaved: {
+            /** @constant */
+            saved: true;
+        };
+        PartnerSignedOut: {
+            /** @constant */
+            signed_out: true;
+        };
+        InviteOnlyEvents: {
+            events: components["schemas"]["EventView"][];
+        };
+        SignInResult: {
+            /** @constant */
+            signed_in: true;
+        } | components["schemas"]["NativeSession"];
     };
     responses: {
         /** @description Signed in. */
@@ -4386,10 +4464,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "application/json": {
-                    /** @constant */
-                    signed_in: true;
-                } | components["schemas"]["NativeSession"];
+                "application/json": components["schemas"]["SignInResult"];
             };
         };
         /** @description The request could not be verified. */
@@ -4483,6 +4558,13 @@ export interface components {
             content: {
                 "application/json": components["schemas"]["Problem"];
             };
+        };
+        /** @description The ingress rate limit rejected the request before it reached the API. The body is not guaranteed to be JSON and `Retry-After` may be absent. Back off and retry. */
+        RateLimitedByIngress: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content?: never;
         };
     };
     parameters: {
@@ -5051,6 +5133,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -5164,6 +5247,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -5186,6 +5270,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -5401,6 +5486,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -5423,6 +5509,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -5481,6 +5568,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             409: components["responses"]["Conflict"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -5507,6 +5595,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -5535,6 +5624,7 @@ export interface operations {
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
             422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -5562,6 +5652,7 @@ export interface operations {
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
             422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -5587,6 +5678,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -5662,6 +5754,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -5684,6 +5777,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -5737,6 +5831,47 @@ export interface operations {
             503: components["responses"]["Unavailable"];
         };
     };
+    startRecurringCheckout: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description A fresh version 4 UUID per distinct command. Retrying with the same key and body returns the original outcome and never repeats the effect; the same key with a different body is a 409. */
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /**
+                     * Format: int64
+                     * @description The monthly charge in integer USD cents: a whole number of dollars a day from $1 to $30, times 30 (3000 to 90000 in steps of 3000).
+                     */
+                    amount_minor: number;
+                };
+            };
+        };
+        responses: {
+            /** @description Created; open `url` in the system browser. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NativeCheckout"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            415: components["responses"]["UnsupportedMediaType"];
+            422: components["responses"]["Unprocessable"];
+            429: components["responses"]["TooManyRequests"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
     paymentMethod: {
         parameters: {
             query?: never;
@@ -5756,6 +5891,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -6893,10 +7029,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        /** @constant */
-                        signed_in: true;
-                    } | components["schemas"]["NativeSession"];
+                    "application/json": components["schemas"]["SignInResult"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -6927,6 +7060,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -7429,6 +7563,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -7597,6 +7732,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -7694,7 +7830,7 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": {
-                    /** @description The event's QR check-in token. */
+                    /** @description The event's QR check-in token, exactly as the QR code encodes it: 66 characters, `<22 base64url characters>.<43 base64url characters>` (alphabet `A-Z a-z 0-9 - _`, one `.`), the event id then its HMAC-SHA256 signature. The same code serves every attendee. Pass it through unchanged; any other length or shape answers 422, as does a token for an event that is cancelled, not yet started, ended, or where the donor holds no seat. */
                     token: string;
                 };
             };
@@ -7710,6 +7846,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             415: components["responses"]["UnsupportedMediaType"];
             422: components["responses"]["Unprocessable"];
             429: components["responses"]["TooManyRequests"];
@@ -7731,12 +7868,11 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        events: components["schemas"]["EventView"][];
-                    };
+                    "application/json": components["schemas"]["InviteOnlyEvents"];
                 };
             };
             401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -7762,6 +7898,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -7786,8 +7923,10 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            429: components["responses"]["TooManyRequests"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -7812,8 +7951,10 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            429: components["responses"]["TooManyRequests"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -7836,6 +7977,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -7858,6 +8000,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -7995,9 +8138,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        message: string;
-                    };
+                    "application/json": components["schemas"]["PartnerSignInLinkSent"];
                 };
             };
             403: components["responses"]["Forbidden"];
@@ -8087,6 +8228,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -8140,6 +8282,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -8169,6 +8312,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -8199,6 +8343,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -8273,6 +8418,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -8296,6 +8442,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -8319,6 +8466,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -8377,10 +8525,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        /** @constant */
-                        signed_out: true;
-                    };
+                    "application/json": components["schemas"]["PartnerSignedOut"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -8642,6 +8787,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -8713,6 +8859,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -8738,6 +8885,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -8797,10 +8945,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        /** @constant */
-                        saved: true;
-                    };
+                    "application/json": components["schemas"]["PartnerSaved"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -9241,6 +9386,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -9265,6 +9411,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -9290,10 +9437,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        /** @constant */
-                        saved: true;
-                    };
+                    "application/json": components["schemas"]["PartnerSaved"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -9470,6 +9614,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -9606,6 +9751,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimitedByIngress"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -9792,15 +9938,13 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Accepted, whether or not the address has an account. */
-            202: {
+            /** @description Link emailed (or silently not, for an address that already has a donor profile). */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        message: string;
-                    };
+                    "application/json": components["schemas"]["SignupSent"];
                 };
             };
             403: components["responses"]["Forbidden"];
@@ -9823,6 +9967,13 @@ export interface operations {
                 "application/json": {
                     email: string;
                     password: string;
+                    /** @description Native requests only, optional: the device's user-visible name, shown to the donor in their session list. Ignored for browser requests. */
+                    device_name?: string;
+                    /**
+                     * @description Native requests only, optional. Ignored for browser requests.
+                     * @enum {string}
+                     */
+                    platform?: "IOS" | "ANDROID";
                 };
             };
         };
@@ -9869,7 +10020,15 @@ export interface operations {
             409: components["responses"]["Conflict"];
             413: components["responses"]["PayloadTooLarge"];
             415: components["responses"]["UnsupportedMediaType"];
-            422: components["responses"]["Unprocessable"];
+            /** @description The body or password is invalid (12 to 72 bytes), or `code` is `CURRENT_PASSWORD_INCORRECT` for a missing or wrong `current_password`. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
             429: components["responses"]["TooManyRequests"];
             503: components["responses"]["Unavailable"];
         };

@@ -166,6 +166,35 @@ func (g *StripeGateway) CreateCheckout(ctx context.Context, raw []byte, key stri
 	return result, nil
 }
 
+// ExpireCheckout expires an open Checkout Session. If Stripe refuses because
+// the session is no longer open, the session is read back so a payment that
+// won the race is reported as "complete" rather than as a failure.
+func (g *StripeGateway) ExpireCheckout(ctx context.Context, sessionID, key string) (string, error) {
+	params := &stripe.CheckoutSessionExpireParams{}
+	params.SetIdempotencyKey(key)
+	if err := g.acquire(ctx, BucketCheckout); err != nil {
+		return "", err
+	}
+	session, err := g.client.V1CheckoutSessions.Expire(ctx, sessionID, params)
+	if err != nil {
+		if err = g.acquire(ctx, BucketCheckout); err != nil {
+			return "", err
+		}
+		session, err = g.client.V1CheckoutSessions.Retrieve(ctx, sessionID, nil)
+		if err != nil {
+			return "", ErrProcessorUnavailable
+		}
+	}
+	raw, err := rawObject(session.LastResponse)
+	if err != nil || !raw.BoolIs("livemode", false) || raw.Text("id") != sessionID {
+		return "", ErrProcessorUnavailable
+	}
+	if status := raw.Text("status"); status == "expired" || status == "complete" {
+		return status, nil
+	}
+	return "", ErrProcessorUnavailable
+}
+
 // Recurring changes never prorate: a new amount or cancellation takes
 // effect at a renewal boundary.
 func (g *StripeGateway) mutateSubscription(ctx context.Context, id string, params *stripe.SubscriptionUpdateParams, key string) error {

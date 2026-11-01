@@ -27,6 +27,25 @@ func (q *Queries) AcknowledgeCheckout(ctx context.Context, arg AcknowledgeChecko
 	return err
 }
 
+const countRecentCheckoutAttempts = `-- name: CountRecentCheckoutAttempts :one
+SELECT count(*)::bigint FROM donor_stripe_checkouts a JOIN donor_checkouts c ON c.id=a.checkout_id
+WHERE c.donor_id=$1 AND a.created_at>$2
+`
+
+type CountRecentCheckoutAttemptsParams struct {
+	DonorID   pgtype.UUID        `json:"donor_id"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+// Hosted checkouts begun for the donor since the cutoff, the budget that
+// bounds how often anyone can make the website expire the donor's open one.
+func (q *Queries) CountRecentCheckoutAttempts(ctx context.Context, arg CountRecentCheckoutAttemptsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countRecentCheckoutAttempts, arg.DonorID, arg.CreatedAt)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const insertCheckout = `-- name: InsertCheckout :exec
 INSERT INTO donor_checkouts (id,donor_id,amount_minor,currency,frequency,referrer_id,referral_kind,referral_expires_at,created_at)
 VALUES ($1,$2,$3,'USD',$4,$5,$6,$7,$8)
@@ -118,6 +137,29 @@ func (q *Queries) ReserveRecurring(ctx context.Context, arg ReserveRecurringPara
 	var id pgtype.UUID
 	err := row.Scan(&id)
 	return id, err
+}
+
+const reservedAttempt = `-- name: ReservedAttempt :one
+SELECT a.checkout_id, a.request_hash, a.request_params, a.stripe_session_id, a.stripe_subscription_id, a.hosted_url, a.status, a.id, a.created_at FROM donor_recurring_reservations r JOIN donor_stripe_checkouts a ON a.id=r.attempt_id
+WHERE r.donor_id=$1 FOR UPDATE OF a
+`
+
+// The checkout attempt holding the donor's recurring slot, locked.
+func (q *Queries) ReservedAttempt(ctx context.Context, donorID pgtype.UUID) (DonorStripeCheckout, error) {
+	row := q.db.QueryRow(ctx, reservedAttempt, donorID)
+	var i DonorStripeCheckout
+	err := row.Scan(
+		&i.CheckoutID,
+		&i.RequestHash,
+		&i.RequestParams,
+		&i.StripeSessionID,
+		&i.StripeSubscriptionID,
+		&i.HostedUrl,
+		&i.Status,
+		&i.ID,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const stripeCheckout = `-- name: StripeCheckout :one

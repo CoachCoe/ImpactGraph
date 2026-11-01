@@ -28,6 +28,10 @@ import (
 
 type journeyGateway struct{}
 
+func (journeyGateway) ExpireCheckout(context.Context, string, string) (string, error) {
+	return "expired", nil
+}
+
 func (journeyGateway) CreateCheckout(_ context.Context, _ []byte, key string) (payments.RemoteCheckout, error) {
 	live := false
 	return payments.RemoteCheckout{

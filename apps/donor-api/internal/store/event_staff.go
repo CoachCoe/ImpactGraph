@@ -60,7 +60,7 @@ func staffEvent(e queries.DonorEvent) StaffEvent {
 		EventInput: EventInput{
 			Slug: e.Slug, Title: e.Title, Type: e.Type, Description: e.Description, Venue: e.Venue, Address: e.Address,
 			City: e.City, Zip: e.Zip, StartsAt: e.StartsAt.Time.UTC().Format(time.RFC3339), EndsAt: e.EndsAt.Time.UTC().Format(time.RFC3339),
-			Capacity: e.Capacity, QualifyingPerk: e.QualifyingPerk, BookingOpensAt: rfc3339(e.BookingOpensAt),
+			Capacity: e.Capacity, QualifyingPerk: e.QualifyingPerk, BookingOpensAt: rfc3339(e.BookingOpensAt), TimeZone: e.TimeZone,
 		},
 		ID: e.ID.String(), PublishState: e.PublishState, CancelledAt: e.CancelledAt,
 	}

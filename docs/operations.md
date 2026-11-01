@@ -654,6 +654,60 @@ when they change. Apple's CDN caches the iOS file for up to a day, so allow that
 after a change before testing on a device. The iOS app needs the Associated Domains
 entitlement with `applinks:` and `webcredentials:` entries for the public host.
 
+## Starting a monthly gift from the app
+
+`POST /donor/me/recurring/checkout` opens Stripe-hosted Checkout for a signed-in donor with
+no active or pending monthly gift. It is the website's guest checkout run for the donor's own
+account, so the same verified webhooks complete the gift; only the pages Checkout returns to
+differ. They are `/app/return?result=success&session_id=…` after payment and
+`/app/return?result=cancel` if the donor backs out, both served by the web app, which shows
+a short "return to the app" notice. The app watches for that address, or opens from it once
+the association below covers the path.
+
+| Variable | Meaning |
+|---|---|
+| `DONOR_NATIVE_RETURN_ORIGIN` | Optional. The exact HTTPS origin (HTTP on localhost) the return pages are served from. Defaults to `DONOR_PUBLIC_ORIGIN`; set it only if the web app's `/app/return` page lives on another origin. A path, trailing slash or plain-HTTP remote host stops the API at startup. |
+
+The return address is frozen into each Checkout session when it is created, so a change
+applies to checkouts begun afterwards. To have the installed app open from the return page
+rather than watch for it, add `/app/return` to the Apple association's `components` and the
+Android intent filter's path list, then redeploy the web image; the associations in the
+section above do not cover it today.
+
+A donor who closes the hosted page without paying keeps their recurring reservation until
+the session lapses (an hour). Starting again from the app does not wait for that. Under the
+donor's row lock the API finds the open session holding the reservation: if the amount and
+return pages match and it has more than five minutes left, it returns that session; otherwise
+it expires the session at Stripe (outside any database lock), then marks the attempt
+`EXPIRED`, releases the reservation and creates the replacement. If Stripe reports the session
+already paid, the answer is `409` and the webhook activates the gift; if the expiry call
+fails, the reservation is untouched and the app retries. The `checkout.session.expired` webhook
+for a replaced session is harmless: it releases only the reservation of its own attempt.
+
+### Restarting a website checkout
+
+The website's guest checkout (`POST /donor/checkouts`) restarts the same way but never hands
+a session back. Its caller is whoever typed the email, so returning the open session's URL
+would let anyone who knows an address resume, and pay into, someone else's checkout. Instead
+a new start for an email whose earlier checkout is open and unpaid expires that session at
+Stripe and creates a new one, for the same amount or another, through the same race-safe
+steps as the app (donor row lock, Stripe call outside any lock, the reservation re-locked
+before the attempt is marked `EXPIRED`). Paid just as the request arrives is `409`; an expiry
+that fails is a retryable `503` with the reservation untouched. A retry with the same
+`Idempotency-Key` returns the same session; the key of a replaced checkout answers `409`.
+An app start that finds a website checkout holding the slot replaces it the same way.
+
+The trade-off is that a stranger who knows an email can make a donor's open checkout close:
+the donor sees Stripe's expired page and starts again, and no payment is lost, because an
+expired session cannot be paid. Three limits bound it. A checkout begun in the last 15 seconds
+is never expired by another website request, so concurrent restarts cannot expire each
+other's replacement and leave nothing open (`409`; retry). At most 10 checkouts can be
+begun for one email in an hour, counting the new one; the next answers `429` with
+`Retry-After`. That budget is per email in the database, so it holds across API instances,
+and it sits beside the per-address `visitor` limit of 60 a minute. An attacker who spends the
+budget also blocks that donor's own restart until it refills or the open session lapses, which
+is no worse than the hour-long lockout this replaces.
+
 ## Staff and content
 
 Staff sign in with passkeys on the staff host. Provision the first administrator with

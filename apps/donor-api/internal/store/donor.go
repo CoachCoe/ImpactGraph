@@ -134,6 +134,8 @@ type Sharing struct {
 	PublicName *string `json:"public_name"`
 	Link       *string `json:"link"`
 	IRLLink    *string `json:"irl_link"`
+	// ReferralCode is the code inside Link and IRLLink, null exactly when they are.
+	ReferralCode *string `json:"referral_code"`
 }
 
 type ReferralCapture struct {
@@ -466,7 +468,8 @@ func sharing(d queries.Donor, site publicSite) Sharing {
 	out := Sharing{PublicName: textPointer(d.PublicName)}
 	if d.ReferralCode.String != "" && d.PublicName.String != "" {
 		link, irl := site.referral(d.ReferralCode.String), site.irlReferral(d.ReferralCode.String)
-		out.Link, out.IRLLink = &link, &irl
+		code := d.ReferralCode.String
+		out.Link, out.IRLLink, out.ReferralCode = &link, &irl, &code
 	}
 	return out
 }

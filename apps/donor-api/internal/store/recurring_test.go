@@ -50,6 +50,11 @@ func (g *subscriptionGateway) CreateCheckout(_ context.Context, _ []byte, key st
 	return payments.RemoteCheckout{ID: "cs_test_" + key, URL: "https://checkout.stripe.com/c/test", Livemode: &live}, nil
 }
 
+func (g *subscriptionGateway) ExpireCheckout(_ context.Context, _, key string) (string, error) {
+	g.intercept(key)
+	return "expired", nil
+}
+
 // stall pauses the next mutation until the returned gate opens.
 func (g *subscriptionGateway) stall(t *testing.T) *gate {
 	stalled := newGate(t)
@@ -255,6 +260,10 @@ func (g *offlineGateway) UpdateSubscriptionPaymentMethod(context.Context, string
 
 func (g *offlineGateway) CreateCheckout(context.Context, []byte, string) (payments.RemoteCheckout, error) {
 	return payments.RemoteCheckout{}, g.call("CreateCheckout")
+}
+
+func (g *offlineGateway) ExpireCheckout(context.Context, string, string) (string, error) {
+	return "", g.call("ExpireCheckout")
 }
 
 func (g *offlineGateway) ScheduleCancellation(context.Context, string, int64, string) error {

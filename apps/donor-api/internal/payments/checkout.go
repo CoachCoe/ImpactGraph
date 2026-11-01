@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -13,6 +14,9 @@ import (
 var (
 	ErrCheckoutConflict = errors.New("checkout conflicts with an existing request")
 	ErrCheckoutInput    = errors.New("invalid checkout fields")
+	// ErrCheckoutThrottled reports that this email has begun too many
+	// checkouts for another open one to be expired; the caller retries later.
+	ErrCheckoutThrottled = errors.New("too many checkouts begun for this email; retry later")
 	// ErrProcessorUnavailable reports a processor call that failed or could not
 	// be made; the caller may retry the same request.
 	ErrProcessorUnavailable = errors.New("payment processor is unavailable; retry the same request")
@@ -39,11 +43,21 @@ type CheckoutRequest struct {
 	Amount    int64
 	Frequency string
 	Visitor   *string
+	// NativeReturn is the origin a native client's hosted checkout returns to,
+	// in place of the website's thank-you and donate pages.
+	NativeReturn string
 }
 
 type CheckoutResult struct {
 	CheckoutID string `json:"checkoutId"`
 	URL        string `json:"url"`
+}
+
+// NativeCheckoutResult is a hosted checkout opened for a signed-in donor.
+type NativeCheckoutResult struct {
+	ExpiresAt time.Time `json:"expires_at"`
+	SessionID string    `json:"session_id"`
+	URL       string    `json:"url"`
 }
 
 type RemoteCheckout struct {
@@ -54,6 +68,10 @@ type RemoteCheckout struct {
 
 type CheckoutGateway interface {
 	CreateCheckout(context.Context, []byte, string) (RemoteCheckout, error)
+	// ExpireCheckout closes an open hosted checkout so it can no longer be paid
+	// and reports the session's resulting status: "expired", or "complete" if
+	// the donor paid first. Any other outcome is an error.
+	ExpireCheckout(ctx context.Context, sessionID, idempotencyKey string) (string, error)
 }
 
 // ValidateOrigin accepts an exact HTTPS origin, or plain HTTP on a loopback

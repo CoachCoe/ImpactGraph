@@ -25,6 +25,7 @@ const event = {
   capacity: 20,
   qualifying_perk: "",
   booking_opens_at: "",
+  time_zone: "America/Los_Angeles",
   publish_state: "PUBLISHED",
   cancelled_at: null,
   reserved: 1,
@@ -95,7 +96,9 @@ it("validates the editor form", () => {
   form.set("booking_opens_at", "2026-11-07T11:00");
   expect(eventInput(form)).toBe("Booking must open before the event starts.");
   form.set("booking_opens_at", "2026-11-05T09:00");
-  expect(eventInput(form)).toMatchObject({ booking_opens_at: instant("2026-11-05T09:00") });
+  expect(eventInput(form)).toMatchObject({ booking_opens_at: instant("2026-11-05T09:00"), time_zone: "" });
+  form.set("time_zone", " America/Chicago ");
+  expect(eventInput(form)).toMatchObject({ time_zone: "America/Chicago" });
 });
 
 it("checks an attendee in by hand and cancels the event", async () => {

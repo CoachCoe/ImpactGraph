@@ -27,7 +27,7 @@ call the API host directly with `X-DAD-Client: native`, no cookies or Origin, an
 access token when authenticated. Browser-only giving and staff operations stay on the web.
 
 After checks pass on the release commit, tag it `mobile-foundation-v<version>` (using the
-version in the file, for example `mobile-foundation-v2.3.0`) and push that tag. The mobile-foundation workflow verifies the tag
+version in the file, for example `mobile-foundation-v2.7.0`) and push that tag. The mobile-foundation workflow verifies the tag
 matches the declared version and publishes the individual files as GitHub Release assets.
 Existing release assets are never overwritten. The workflow also retains a candidate
 bundle as an Actions artifact on normal branch and PR builds; those artifacts are not
@@ -40,7 +40,7 @@ the vendored contract without network access to this private repository. An auth
 maintainer can obtain a release with:
 
 ```sh
-gh release download mobile-foundation-v2.3.0 --repo CoachCoe/DAD-Main --dir /tmp/dad-foundation
+gh release download mobile-foundation-v2.7.0 --repo CoachCoe/DAD-Main --dir /tmp/dad-foundation
 ```
 
 Use patch versions for equivalent packaging corrections, minor versions for compatible
@@ -48,6 +48,144 @@ additions, and major versions for breaking contract/token/link changes. A mobile
 pins its dependency; changing the backend must preserve supported installed clients.
 Breaking field removals, type changes, and newly required request fields require a
 coordinated compatibility plan. Do not invent financial values for unknown server states.
+
+## Compatible additions in version 2.8
+
+Version 2.8 adds the donor's referral code to the sharing reads and documents how to save
+one preference. No request, existing field or enum value changes.
+
+- `Sharing.referral_code` (required, string or `null`) is the code inside `link` and
+  `irl_link`, for display and copying. It is `null` exactly when they are (no public name
+  chosen yet) and changes when `saveSharing` replaces the code. It is on `sharing` and
+  `saveSharing`. The invite paths are `/r/{code}` and `/r/{code}?via=irl` on the public
+  origin; use `link` and `irl_link` as given rather than building them.
+- `savePreferences` is optimistic concurrency by design: every save is a numbered record in
+  the consent history, so it names the profile `version` it replaces and answers `409` when
+  that is stale. To change one setting, read the profile, send its `version` and the six
+  required fields from `preferences` unchanged, and change only the one you mean to; leave
+  the optional fields out to keep their saved values.
+
+## Compatible additions in version 2.7
+
+Version 2.7 closes the gaps native event screens hit. Every addition is a new response
+field; no request, existing field or enum value changes.
+
+- `EventView.time_zone` (required, string) is the venue's IANA zone, for example
+  `America/Chicago`. It is on the list, detail and invite-only reads. `starts_at` and
+  `ends_at` stay instants; format them in this zone, not the device's, so a donor sees the
+  time printed at the venue (PRD E-3). Staff set it on the event (`time_zone` on the staff
+  event input and reads). Left empty it takes the zone of the event's ZIP, else
+  `America/New_York`, and an unknown name is refused with `422`. Events that existed before
+  2.7 read `America/New_York` until staff correct them.
+- `EventView.checked_in_at` (required, date-time or `null`) is when the signed-in donor
+  checked in. `reservation_status` stays `RESERVED` after check-in, so use `checked_in_at`
+  to show the checked-in state on a later read. It is `null` before check-in and on the
+  anonymous read.
+- The `checkInEvent` token is documented: exactly 66 characters, `<22 base64url>.<43
+  base64url>` over `A-Z a-z 0-9 - _` plus one `.`, the event id and its signature. Pass
+  the QR's text through unchanged. Any other length or shape answers `422`, the same as a
+  token for an event outside its check-in window or for a donor without a seat.
+- Retrying is safe without an `Idempotency-Key`: reserving again returns the donor's
+  current `RESERVED` or `WAITLISTED` status unchanged, cancelling again returns
+  `CANCELLED`, and scanning again returns `already_checked_in: true`. Cancelling with no
+  reservation is `404`, and reserve or cancel once the event has started is `409`.
+
+### Forward compatibility of enums
+
+OpenAPI lists the values the server sends today, and the web relies on those types, so
+the enums stay. A later minor version may add values, so a client MUST tolerate a value it
+does not know rather than fail to decode the response. This covers `EventView.type`,
+`EventView.reservation_status`, `ReservationResult.status`, `Subscription.status` and every
+other enum in the bundle. Show an unknown event type as a generic event, an unknown
+reservation status as no reservation action, and treat an unknown `Subscription.status`
+as not active. Strict generated decoders (the Swift generator rejects an unlisted enum
+string) need a tolerant wrapper or the enum stripped from the vendored schema.
+
+`Subscription.status` does not gain `trialing` or `paused`. Monthly gifts start with no
+trial and are never paused, and the server refuses to record a subscription whose Stripe
+status is outside the documented six, so those values cannot reach a client.
+
+## Compatible additions in version 2.6
+
+Version 2.6 adds the one operation the apps lacked to start a monthly gift. `beginCheckout`
+stays web-only: it is keyed by an email and returns to website pages.
+
+- `POST /donor/me/recurring/checkout` (`startRecurringCheckout`, native only, `account`
+  rate limit) takes `{amount_minor}`, validated like every gift amount (a whole number of
+  dollars a day, $1 to $30, times 30), and an `Idempotency-Key`. It acts for the signed-in
+  donor, so the body carries no email. `201` returns `{url, session_id, expires_at}`: open
+  `url` in the system browser. `401` signed out, `403` not a native request, `409` a monthly
+  gift is already active, the key was used with another amount, or another start for the
+  donor is mid-flight (retry), `422` invalid amount or key, `429`, `503` (`PAYMENTS_UNCONFIGURED` when the
+  deployment has no processor, or the earlier session could not be expired; retry).
+  Retrying with the same key and amount returns the same session until it lapses at
+  `expires_at`.
+- Version 2.6.1 changes no schema, only this behaviour: from 2.6.1 a new start no longer
+  answers `409` while the donor's own earlier checkout is open and unpaid.
+- Closing the hosted page without paying never locks the donor out. Starting again, with
+  any new key, while their earlier checkout is still open and unpaid returns that same
+  session (same `url`, `session_id`, `expires_at`) when the amount matches, so show it
+  again. A different amount expires the earlier session at Stripe and returns a new one.
+  If the earlier session was paid just as the request arrived the answer is `409`: poll
+  `GET /donor/me/recurring` for the active gift.
+- The website's `beginCheckout` (web only, not bundled) now also lets its donors restart:
+  it expires an earlier open session for the email and creates a new one. That includes a
+  session the app opened, so an app checkout can be closed from the website; treat an
+  expired session like an abandoned one and start again.
+- Checkout returns to `<origin>/app/return?result=success&session_id=<id>` or
+  `<origin>/app/return?result=cancel`. The origin is `DONOR_NATIVE_RETURN_ORIGIN`, else the
+  public origin. Neither address proves payment: poll `GET /donor/me/recurring` until its
+  `subscription` is present, because the gift becomes active only when Stripe's verified
+  webhook arrives. `/app/return` is not in `links.json` or the web app's association files,
+  so a browser shows a notice and the app must watch for the address (an
+  `ASWebAuthenticationSession` callback matcher or a Custom Tab redirect). To open the app
+  from it instead, add the path to the Apple `components` and the Android intent filter in
+  the same release as the app change.
+- `Subscription.status` documents its fixed set: `active`, `past_due`, `unpaid`,
+  `incomplete`, `canceled`, `incomplete_expired`. Only the first three renew. Treat an
+  unknown value as not active.
+
+## Compatible additions in version 2.5
+
+Version 2.5 documents statuses the API already served and gives shared inline response
+bodies their own names. No operation, field or behaviour changes.
+
+- Every authenticated read documents `429` (`RateLimitedByIngress`): the ingress rate
+  limit can reject any request before it reaches the API, with no JSON body and possibly no
+  `Retry-After`. The API itself applies no limiter to reads. Clients should back off and
+  retry, and must not decode the body.
+- `POST /donor/me/events/{event_id}/reserve` and `/cancel` document `403` and `429`, and
+  `POST /donor/me/events/check-in` documents `403`; the origin and rate-limit guard
+  already produced them.
+- Named response schemas replace inline duplicates, so generators no longer name one
+  operation's body after another: `SignupSent` (`postDonorSignup`), `SignInResult`
+  (`finishDonorPasskeySignIn` and the shared `SignedIn` response used by
+  `finishPhoneSignIn`, `oidcSignIn` and `postDonorPasswordSignIn`),
+  `PartnerSignInLinkSent` (`partnerRequestSignIn`), `PartnerSaved`
+  (`partnerSaveProfile`, `partnerSaveLogo`), `PartnerSignedOut` (`partnerSignOut`) and
+  `InviteOnlyEvents` (`inviteOnlyEvents`). Wire bodies are unchanged. Generated type names
+  change: the Kotlin `BeginPhoneSignIn200Response`, `FinishDonorPasskeySignIn200Response`,
+  `Login202Response`, `EmployeeWorkforce200Response`, `LogoutAll200Response` and
+  `DonorEvents200Response` no longer name those operations' bodies.
+
+## Compatible additions in version 2.4
+
+Version 2.4 adds one optional request pair and corrects two documented behaviours; no
+operation is added or removed.
+
+- `POST /donor/password/sign-in` accepts optional `device_name` (up to 64 characters) and
+  `platform` (`IOS` or `ANDROID`) with the same rules as phone, OIDC, passkey and claim
+  sign-in, so a password session can be labelled in the donor's session list. Browser
+  requests ignore them. Signup issues no session; its emailed link is exchanged through
+  `POST /donor/claim`, which already takes both fields.
+- `POST /donor/signup` answers `200 {"sent":true}` (as the server always has), not the
+  `202 {"message"}` the contract used to describe. Clients must accept any 2xx and ignore
+  the body.
+- `POST /donor/me/password` answers a missing or wrong `current_password` with
+  `422` and `code` `CURRENT_PASSWORD_INCORRECT` instead of `401`, so a typo no longer looks
+  like a lost session. `detail` is unchanged. A `401` still means the session is gone.
+  Clients should treat a `401` with the same `detail` from an older server the same way,
+  and must tolerate an unknown `code` in an error body.
 
 ## Compatible additions in version 2.3
 

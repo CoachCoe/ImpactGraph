@@ -158,7 +158,7 @@ func TestPasswordRequiresProofAndCurrentSecret(t *testing.T) {
 	}
 	mustExec(t, pool, "UPDATE donor_sessions SET password_verified_at=now()-interval '16 minutes' WHERE token_hash=$1", HashToken(token))
 	password := "a long and unique test password"
-	if err := s.Set(ctx, token, "", password); !errors.Is(err, ErrDenied) {
+	if err := s.Set(ctx, token, "", password); !errors.Is(err, ErrDenied) || !errors.Is(err, ErrCurrentPassword) {
 		t.Fatalf("password without fresh proof: %v", err)
 	}
 	if err := q.MarkPasswordReauthenticated(ctx, queries.MarkPasswordReauthenticatedParams{TokenHash: HashToken(token), PasswordVerifiedAt: timestamp(time.Now().UTC())}); err != nil {
@@ -174,8 +174,12 @@ func TestPasswordRequiresProofAndCurrentSecret(t *testing.T) {
 	if err != nil || tokens.Access == "" {
 		t.Fatalf("password login: %+v %v", tokens, err)
 	}
-	if err := s.Set(ctx, tokens.Access, "", "new long replacement password"); !errors.Is(err, ErrDenied) {
+	if err := s.Set(ctx, tokens.Access, "", "new long replacement password"); !errors.Is(err, ErrDenied) ||
+		!errors.Is(err, ErrCurrentPassword) {
 		t.Fatalf("change without proof: %v", err)
+	}
+	if err := s.Set(ctx, tokens.Access, "a typo of the current one", "new long replacement password"); !errors.Is(err, ErrCurrentPassword) {
+		t.Fatalf("change with a wrong current password: %v", err)
 	}
 	if err := s.Set(ctx, tokens.Access, password, "new long replacement password"); err != nil {
 		t.Fatal(err)

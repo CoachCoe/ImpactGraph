@@ -33,6 +33,17 @@ export function instant(local: string): string | null {
   return Number.isNaN(date.getTime()) ? null : date.toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
+/** Zones offered as suggestions; any IANA name the server accepts can be typed. */
+const zones = [
+  "America/New_York",
+  "America/Chicago",
+  "America/Denver",
+  "America/Phoenix",
+  "America/Los_Angeles",
+  "America/Anchorage",
+  "Pacific/Honolulu",
+];
+
 const field = (form: FormData, name: string) => String(form.get(name) ?? "").trim();
 
 /** The event fields from the editor form, or an error to show. */
@@ -57,6 +68,7 @@ export function eventInput(form: FormData): Input | string {
     address: field(form, "address"),
     city: field(form, "city"),
     zip: field(form, "zip"),
+    time_zone: field(form, "time_zone"),
     starts_at: starts,
     ends_at: ends,
     capacity: Number(capacity),
@@ -154,7 +166,11 @@ export default function EventEditor({ event }: { event: string | null }) {
           )}
           <form
             onSubmit={save}
-            key={detail ? `${detail.id}-${detail.starts_at}-${detail.capacity}-${detail.booking_opens_at}` : "new"}
+            key={
+              detail
+                ? `${detail.id}-${detail.starts_at}-${detail.capacity}-${detail.booking_opens_at}-${detail.time_zone}`
+                : "new"
+            }
           >
             <fieldset disabled={cancelled}>
               <label>
@@ -203,6 +219,25 @@ export default function EventEditor({ event }: { event: string | null }) {
                 ZIP
                 <input name="zip" defaultValue={detail?.zip} inputMode="numeric" maxLength={10} />
               </label>
+              <label>
+                Time zone
+                <input
+                  name="time_zone"
+                  defaultValue={detail?.time_zone}
+                  list="event-time-zones"
+                  maxLength={64}
+                  aria-describedby="time-zone-help"
+                />
+              </label>
+              <datalist id="event-time-zones">
+                {zones.map((zone) => (
+                  <option key={zone} value={zone} />
+                ))}
+              </datalist>
+              <p className="note" id="time-zone-help">
+                The venue's IANA zone, such as America/Chicago. Donors see the event time in it. Leave empty to use the
+                zone of the ZIP.
+              </p>
               <label>
                 Starts
                 <input

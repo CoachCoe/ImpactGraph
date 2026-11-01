@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -51,6 +52,36 @@ type EventInput struct {
 	// BookingOpensAt is when reservations open to everyone (RFC3339), or empty
 	// for when the event is published. Team Captains may book 48 hours earlier.
 	BookingOpensAt string `json:"booking_opens_at"`
+	// TimeZone is the IANA zone of the venue, such as "America/New_York": the
+	// zone clients show starts_at and ends_at in. Empty takes the zone of Zip,
+	// else defaultEventTimeZone.
+	TimeZone string `json:"time_zone"`
+}
+
+// defaultEventTimeZone is the zone of an event staff gave neither a zone nor a
+// resolvable ZIP; it is also the column default existing events took.
+const defaultEventTimeZone = "America/New_York"
+
+// ianaZone matches the shape of an IANA zone name; it is also the database
+// check on the column.
+var ianaZone = regexp.MustCompile(`^[A-Za-z0-9+_/-]{1,64}$`)
+
+// eventTimeZone returns the zone to store for an event: the one staff entered
+// if it is a real IANA name, else the zone of its ZIP, else the default.
+func eventTimeZone(zone, zip string) (string, bool) {
+	if zone == "" {
+		if name, err := geo.Timezone(zip); err == nil {
+			return name, true
+		}
+		return defaultEventTimeZone, true
+	}
+	if !ianaZone.MatchString(zone) || zone == "Local" {
+		return "", false
+	}
+	if _, err := time.LoadLocation(zone); err != nil {
+		return "", false
+	}
+	return zone, true
 }
 
 // validate checks an event input, returning ErrStaffInput on any problem. The
@@ -87,6 +118,10 @@ func (in EventInput) validate(now time.Time) (queries.InsertEventParams, error) 
 	if in.Capacity < 0 {
 		return params, ErrStaffInput
 	}
+	zone, ok := eventTimeZone(in.TimeZone, in.Zip)
+	if !ok {
+		return params, ErrStaffInput
+	}
 	starts, err := time.Parse(time.RFC3339, in.StartsAt)
 	if err != nil {
 		return params, ErrStaffInput
@@ -118,6 +153,7 @@ func (in EventInput) validate(now time.Time) (queries.InsertEventParams, error) 
 		Venue: in.Venue, Address: in.Address, City: in.City, Zip: in.Zip,
 		StartsAt: timestamp(starts.UTC()), EndsAt: timestamp(ends.UTC()),
 		Capacity: in.Capacity, QualifyingPerk: in.QualifyingPerk, CreatedAt: timestamp(now), BookingOpensAt: opens,
+		TimeZone: zone,
 	}
 	return params, nil
 }
@@ -173,6 +209,7 @@ func (s EventService) Update(ctx context.Context, token string, id pgtype.UUID, 
 				Venue: params.Venue, Address: params.Address, City: params.City, Zip: params.Zip,
 				StartsAt: params.StartsAt, EndsAt: params.EndsAt, Capacity: params.Capacity,
 				QualifyingPerk: params.QualifyingPerk, UpdatedAt: timestamp(now), BookingOpensAt: params.BookingOpensAt,
+				TimeZone: params.TimeZone,
 			}); err != nil {
 				return struct{}{}, err
 			}
@@ -297,19 +334,24 @@ var ErrEventNotFound = errors.New("event not found")
 // hold no active reservation — it drives the Reserve / Join waitlist / Cancel
 // button (E-4).
 type EventView struct {
-	ID                string    `json:"id"`
-	Slug              string    `json:"slug"`
-	Title             string    `json:"title"`
-	Type              string    `json:"type"`
-	Description       string    `json:"description"`
-	Venue             string    `json:"venue"`
-	Address           string    `json:"address"`
-	City              string    `json:"city"`
-	StartsAt          time.Time `json:"starts_at"`
-	EndsAt            time.Time `json:"ends_at"`
-	Capacity          int32     `json:"capacity"`
-	SpotsLeft         *int32    `json:"spots_left"`
-	ReservationStatus *string   `json:"reservation_status"`
+	ID          string    `json:"id"`
+	Slug        string    `json:"slug"`
+	Title       string    `json:"title"`
+	Type        string    `json:"type"`
+	Description string    `json:"description"`
+	Venue       string    `json:"venue"`
+	Address     string    `json:"address"`
+	City        string    `json:"city"`
+	StartsAt    time.Time `json:"starts_at"`
+	EndsAt      time.Time `json:"ends_at"`
+	// TimeZone is the venue's IANA zone; show starts_at and ends_at in it.
+	TimeZone          string  `json:"time_zone"`
+	Capacity          int32   `json:"capacity"`
+	SpotsLeft         *int32  `json:"spots_left"`
+	ReservationStatus *string `json:"reservation_status"`
+	// CheckedInAt is when the signed-in donor checked in, nil until they do and
+	// on an anonymous read.
+	CheckedInAt *time.Time `json:"checked_in_at"`
 	// InvitationNote is "Invitation earned at ..." for an INVITE_ONLY event the
 	// donor can see via a badge perk (E-5); nil otherwise.
 	InvitationNote *string `json:"invitation_note"`
@@ -329,7 +371,7 @@ func eventView(e queries.DonorEvent) EventView {
 	return EventView{
 		ID: e.ID.String(), Slug: e.Slug, Title: e.Title, Type: e.Type, Description: e.Description,
 		Venue: e.Venue, Address: e.Address, City: e.City,
-		StartsAt: e.StartsAt.Time, EndsAt: e.EndsAt.Time, Capacity: e.Capacity, Cancelled: e.CancelledAt.Valid,
+		StartsAt: e.StartsAt.Time, EndsAt: e.EndsAt.Time, TimeZone: e.TimeZone, Capacity: e.Capacity, Cancelled: e.CancelledAt.Valid,
 		BookingOpensAt: timePointer(e.BookingOpensAt),
 	}
 }
@@ -423,16 +465,18 @@ func (r EventReader) donorViews(
 	if err != nil {
 		return nil, err
 	}
-	status := make(map[pgtype.UUID]string, len(mine))
+	status := make(map[pgtype.UUID]queries.DonorReservationsForEventsRow, len(mine))
 	for _, m := range mine {
-		status[m.EventID] = m.Status
+		status[m.EventID] = m
 	}
 	for _, e := range rows {
 		v := eventView(e)
 		v.ReportIssueURL = r.reportIssueURL(e)
 		v.SpotsLeft = spotsLeft(e.Capacity, reserved[e.ID])
-		if s, ok := status[e.ID]; ok {
+		if m, ok := status[e.ID]; ok {
+			s := m.Status
 			v.ReservationStatus = &s
+			v.CheckedInAt = timePointer(m.CheckedInAt)
 		}
 		out = append(out, v)
 	}
@@ -714,6 +758,7 @@ func (r EventReader) DetailForDonor(ctx context.Context, token string, id pgtype
 			res.Status != reservationCancelled {
 			s := res.Status
 			v.ReservationStatus = &s
+			v.CheckedInAt = timePointer(res.CheckedInAt)
 		} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return EventView{}, err
 		}
@@ -947,9 +992,16 @@ func checkInToken(eventID pgtype.UUID, secret string) string {
 	return base64.RawURLEncoding.EncodeToString(raw) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
+// checkInTokenLength is the exact length of a check-in token: 22 characters for
+// the 16-byte event id, ".", and 43 for the 32-byte HMAC-SHA256.
+const checkInTokenLength = 22 + 1 + 43
+
 // parseCheckInToken verifies a token and returns the event id it names.
 func parseCheckInToken(token, secret string) (pgtype.UUID, bool) {
 	var id pgtype.UUID
+	if len(token) != checkInTokenLength {
+		return id, false
+	}
 	idPart, sigPart, ok := strings.Cut(token, ".")
 	if !ok {
 		return id, false

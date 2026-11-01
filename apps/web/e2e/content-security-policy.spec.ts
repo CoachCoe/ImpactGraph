@@ -130,6 +130,8 @@ test("event links load account pages with their private document policy", async 
     cancelled: false,
     booking_opens_at: null,
     early_booking: false,
+    time_zone: "America/Los_Angeles",
+    checked_in_at: null,
   };
   let signedIn = false;
   await page.route("**/api/donor/me/events/*", (route) =>

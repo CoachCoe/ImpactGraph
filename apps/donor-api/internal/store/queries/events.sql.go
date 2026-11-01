@@ -127,7 +127,7 @@ func (q *Queries) DonorGuestEvents(ctx context.Context, arg DonorGuestEventsPara
 }
 
 const donorReservationsForEvents = `-- name: DonorReservationsForEvents :many
-SELECT event_id, status FROM donor_event_reservations
+SELECT event_id, status, checked_in_at FROM donor_event_reservations
 WHERE donor_id=$1 AND event_id = ANY($2::uuid[])
   AND status IN ('RESERVED', 'WAITLISTED')
 `
@@ -138,8 +138,9 @@ type DonorReservationsForEventsParams struct {
 }
 
 type DonorReservationsForEventsRow struct {
-	EventID pgtype.UUID `json:"event_id"`
-	Status  string      `json:"status"`
+	EventID     pgtype.UUID        `json:"event_id"`
+	Status      string             `json:"status"`
+	CheckedInAt pgtype.Timestamptz `json:"checked_in_at"`
 }
 
 // The signed-in donor's active reservation status per event, for the list.
@@ -152,7 +153,7 @@ func (q *Queries) DonorReservationsForEvents(ctx context.Context, arg DonorReser
 	items := []DonorReservationsForEventsRow{}
 	for rows.Next() {
 		var i DonorReservationsForEventsRow
-		if err := rows.Scan(&i.EventID, &i.Status); err != nil {
+		if err := rows.Scan(&i.EventID, &i.Status, &i.CheckedInAt); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -225,7 +226,7 @@ func (q *Queries) DonorVolunteerStats(ctx context.Context, donorID pgtype.UUID) 
 }
 
 const eventByID = `-- name: EventByID :one
-SELECT id, slug, title, type, description, venue, address, city, zip, starts_at, ends_at, capacity, publish_state, published_at, created_at, updated_at, qualifying_perk, cancelled_at, booking_opens_at FROM donor_events WHERE id=$1
+SELECT id, slug, title, type, description, venue, address, city, zip, starts_at, ends_at, capacity, publish_state, published_at, created_at, updated_at, qualifying_perk, cancelled_at, booking_opens_at, time_zone FROM donor_events WHERE id=$1
 `
 
 func (q *Queries) EventByID(ctx context.Context, id pgtype.UUID) (DonorEvent, error) {
@@ -251,6 +252,7 @@ func (q *Queries) EventByID(ctx context.Context, id pgtype.UUID) (DonorEvent, er
 		&i.QualifyingPerk,
 		&i.CancelledAt,
 		&i.BookingOpensAt,
+		&i.TimeZone,
 	)
 	return i, err
 }
@@ -346,8 +348,8 @@ func (q *Queries) EventRoster(ctx context.Context, eventID pgtype.UUID) ([]Event
 const insertEvent = `-- name: InsertEvent :exec
 INSERT INTO donor_events
   (id, slug, title, type, description, venue, address, city, zip, starts_at, ends_at, capacity, qualifying_perk, created_at, updated_at,
-   booking_opens_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15)
+   booking_opens_at, time_zone)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15,$16)
 `
 
 type InsertEventParams struct {
@@ -366,6 +368,7 @@ type InsertEventParams struct {
 	QualifyingPerk string             `json:"qualifying_perk"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	BookingOpensAt pgtype.Timestamptz `json:"booking_opens_at"`
+	TimeZone       string             `json:"time_zone"`
 }
 
 func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) error {
@@ -385,6 +388,7 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) error 
 		arg.QualifyingPerk,
 		arg.CreatedAt,
 		arg.BookingOpensAt,
+		arg.TimeZone,
 	)
 	return err
 }
@@ -406,7 +410,7 @@ func (q *Queries) IsEventGuest(ctx context.Context, arg IsEventGuestParams) (boo
 }
 
 const lockEvent = `-- name: LockEvent :one
-SELECT id, slug, title, type, description, venue, address, city, zip, starts_at, ends_at, capacity, publish_state, published_at, created_at, updated_at, qualifying_perk, cancelled_at, booking_opens_at FROM donor_events WHERE id=$1 FOR UPDATE
+SELECT id, slug, title, type, description, venue, address, city, zip, starts_at, ends_at, capacity, publish_state, published_at, created_at, updated_at, qualifying_perk, cancelled_at, booking_opens_at, time_zone FROM donor_events WHERE id=$1 FOR UPDATE
 `
 
 // Serializes capacity decisions: a reserve/cancel holds this row lock so two
@@ -434,6 +438,7 @@ func (q *Queries) LockEvent(ctx context.Context, id pgtype.UUID) (DonorEvent, er
 		&i.QualifyingPerk,
 		&i.CancelledAt,
 		&i.BookingOpensAt,
+		&i.TimeZone,
 	)
 	return i, err
 }
@@ -781,7 +786,7 @@ func (q *Queries) SetReservationStatus(ctx context.Context, arg SetReservationSt
 }
 
 const staffEventsPage = `-- name: StaffEventsPage :many
-SELECT id, slug, title, type, description, venue, address, city, zip, starts_at, ends_at, capacity, publish_state, published_at, created_at, updated_at, qualifying_perk, cancelled_at, booking_opens_at FROM donor_events
+SELECT id, slug, title, type, description, venue, address, city, zip, starts_at, ends_at, capacity, publish_state, published_at, created_at, updated_at, qualifying_perk, cancelled_at, booking_opens_at, time_zone FROM donor_events
 ORDER BY starts_at DESC, id
 LIMIT 51 OFFSET $1::bigint
 `
@@ -815,6 +820,7 @@ func (q *Queries) StaffEventsPage(ctx context.Context, pageOffset int64) ([]Dono
 			&i.QualifyingPerk,
 			&i.CancelledAt,
 			&i.BookingOpensAt,
+			&i.TimeZone,
 		); err != nil {
 			return nil, err
 		}
@@ -827,7 +833,7 @@ func (q *Queries) StaffEventsPage(ctx context.Context, pageOffset int64) ([]Dono
 }
 
 const upcomingEventsNearDonor = `-- name: UpcomingEventsNearDonor :many
-SELECT id, slug, title, type, description, venue, address, city, zip, starts_at, ends_at, capacity, publish_state, published_at, created_at, updated_at, qualifying_perk, cancelled_at, booking_opens_at FROM donor_events
+SELECT id, slug, title, type, description, venue, address, city, zip, starts_at, ends_at, capacity, publish_state, published_at, created_at, updated_at, qualifying_perk, cancelled_at, booking_opens_at, time_zone FROM donor_events
 WHERE publish_state='PUBLISHED'
   AND cancelled_at IS NULL
   AND type <> 'INVITE_ONLY'
@@ -880,6 +886,7 @@ func (q *Queries) UpcomingEventsNearDonor(ctx context.Context, arg UpcomingEvent
 			&i.QualifyingPerk,
 			&i.CancelledAt,
 			&i.BookingOpensAt,
+			&i.TimeZone,
 		); err != nil {
 			return nil, err
 		}
@@ -892,7 +899,7 @@ func (q *Queries) UpcomingEventsNearDonor(ctx context.Context, arg UpcomingEvent
 }
 
 const upcomingInviteOnlyEvents = `-- name: UpcomingInviteOnlyEvents :many
-SELECT id, slug, title, type, description, venue, address, city, zip, starts_at, ends_at, capacity, publish_state, published_at, created_at, updated_at, qualifying_perk, cancelled_at, booking_opens_at FROM donor_events
+SELECT id, slug, title, type, description, venue, address, city, zip, starts_at, ends_at, capacity, publish_state, published_at, created_at, updated_at, qualifying_perk, cancelled_at, booking_opens_at, time_zone FROM donor_events
 WHERE publish_state='PUBLISHED'
   AND cancelled_at IS NULL
   AND type='INVITE_ONLY'
@@ -932,6 +939,7 @@ func (q *Queries) UpcomingInviteOnlyEvents(ctx context.Context, now pgtype.Times
 			&i.QualifyingPerk,
 			&i.CancelledAt,
 			&i.BookingOpensAt,
+			&i.TimeZone,
 		); err != nil {
 			return nil, err
 		}
@@ -946,7 +954,7 @@ func (q *Queries) UpcomingInviteOnlyEvents(ctx context.Context, now pgtype.Times
 const updateEvent = `-- name: UpdateEvent :exec
 UPDATE donor_events
 SET title=$2, type=$3, description=$4, venue=$5, address=$6, city=$7, zip=$8,
-    starts_at=$9, ends_at=$10, capacity=$11, qualifying_perk=$12, updated_at=$13, booking_opens_at=$14
+    starts_at=$9, ends_at=$10, capacity=$11, qualifying_perk=$12, updated_at=$13, booking_opens_at=$14, time_zone=$15
 WHERE id=$1
 `
 
@@ -965,6 +973,7 @@ type UpdateEventParams struct {
 	QualifyingPerk string             `json:"qualifying_perk"`
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
 	BookingOpensAt pgtype.Timestamptz `json:"booking_opens_at"`
+	TimeZone       string             `json:"time_zone"`
 }
 
 func (q *Queries) UpdateEvent(ctx context.Context, arg UpdateEventParams) error {
@@ -983,6 +992,7 @@ func (q *Queries) UpdateEvent(ctx context.Context, arg UpdateEventParams) error 
 		arg.QualifyingPerk,
 		arg.UpdatedAt,
 		arg.BookingOpensAt,
+		arg.TimeZone,
 	)
 	return err
 }

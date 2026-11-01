@@ -68,6 +68,8 @@ func TestConfigureRejectsInvalidEnvironmentBeforeTheDatabase(t *testing.T) {
 			"DONOR_PUBLIC_ORIGIN": "https://dad.example.org", "DONOR_OIDC_MODE": "stub", "DONOR_OIDC_STUB_KEY": "k",
 			"DONOR_OIDC_GOOGLE_CLIENT_ID": "g.apps",
 		}},
+		{"native return origin with a path", map[string]string{"DONOR_NATIVE_RETURN_ORIGIN": "https://dad.example.org/app"}},
+		{"native return origin over plain HTTP", map[string]string{"DONOR_NATIVE_RETURN_ORIGIN": "http://dad.example.org"}},
 		{"invalid SMS settings", map[string]string{"DONOR_SMS_PROVIDER": "twilio"}},
 		{"invalid OIDC settings", map[string]string{"DONOR_OIDC_MODE": "live"}},
 	} {
