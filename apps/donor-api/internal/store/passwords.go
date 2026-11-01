@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 	"strings"
@@ -51,6 +52,10 @@ func (s PasswordService) Signup(ctx context.Context, in SignupInput) error {
 	}
 	return pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
 		q := queries.New(tx)
+		// Decide whether the profile is new only after concurrent identity creation finishes.
+		if err := reserveEmailIdentity(ctx, q, email, identityDonor, pgtype.UUID{}); err != nil {
+			return err
+		}
 		_, lookup := q.DonorByEmail(ctx, email)
 		if lookup != nil && !errors.Is(lookup, pgx.ErrNoRows) {
 			return lookup
@@ -65,7 +70,7 @@ func (s PasswordService) Signup(ctx context.Context, in SignupInput) error {
 				return err
 			}
 		}
-		return queueLoginEmail(ctx, q, email, "/account/profile", now)
+		return queueLoginEmail(ctx, q, email, dashboardPath, now)
 	})
 }
 func (s PasswordService) Set(ctx context.Context, token, current, password string) error {
