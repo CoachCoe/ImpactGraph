@@ -23,12 +23,15 @@ type Options<T> = {
 /**
  * Loads `path` (or nothing while it is null) and reports every screen state the
  * product requires. Changing `path` or calling `reload` starts a fresh request and
- * abandons any in flight.
+ * abandons any in flight. A reload keeps the loaded data on screen until the fresh
+ * data replaces it, so a page does not unmount, and lose keyboard focus, after
+ * every change it saves.
  */
 export function useApiResource<T>(path: string | null, options: Options<T> = {}) {
   const [resource, setResource] = useState<Resource<T>>({ state: "loading" });
   const [generation, setGeneration] = useState(0);
   const latest = useRef(options);
+  const loaded = useRef<string | null>(null);
   useEffect(() => {
     latest.current = options;
   });
@@ -36,16 +39,18 @@ export function useApiResource<T>(path: string | null, options: Options<T> = {})
   useEffect(() => {
     if (path === null) return;
     const controller = new AbortController();
-    setResource({ state: "loading" });
+    if (loaded.current !== path) setResource({ state: "loading" });
     const { load = (signal: AbortSignal) => api<T>(path, { signal }) } = latest.current;
     load(controller.signal)
       .then((data) => {
         if (controller.signal.aborted) return;
         latest.current.onLoad?.(data);
+        loaded.current = path;
         setResource({ state: "ready", data });
       })
       .catch((cause) => {
         if (controller.signal.aborted) return;
+        loaded.current = null;
         const failure =
           typeof navigator !== "undefined" && navigator.onLine === false ? "offline" : classifyFailure(cause);
         if (
